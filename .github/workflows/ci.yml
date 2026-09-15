@@ -226,7 +226,7 @@ jobs:
       - name: Build API image
         run: docker build -t aro-api:${{ github.sha }} .
       - name: Scan API image
-        uses: aquasecurity/trivy-action@0.32.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: aro-api:${{ github.sha }}
           format: sarif
