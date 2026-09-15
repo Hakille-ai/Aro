@@ -1,0 +1,15 @@
+{{- if and .Values.clamav.enabled .Values.clamav.persistence.enabled (not .Values.clamav.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "aro.fullname" . }}-clamav-signatures
+spec:
+  accessModes:
+{{ toYaml .Values.clamav.persistence.accessModes | nindent 4 }}
+{{- with .Values.clamav.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+{{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.clamav.persistence.size }}
+{{- end }}

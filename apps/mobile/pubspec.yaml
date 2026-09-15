@@ -1,0 +1,47 @@
+name: aro_mobile
+description: L'espace de travail ARO, sur Android et iOS.
+publish_to: none
+version: 0.1.0+1
+environment:
+  sdk: '>=3.9.0 <4.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  http: ^1.5.0
+  flutter_secure_storage: ^10.0.0
+  shared_preferences: ^2.5.3
+  flutter_markdown_plus: ^1.0.12
+  file_picker: ^10.3.3
+  crypto: ^3.0.6
+  url_launcher: ^6.3.2
+  speech_to_text: ^7.3.0
+  flutter_tts: ^4.2.3
+  uuid: ^4.5.1
+  lucide_icons_flutter: ^3.1.19
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+flutter:
+  uses-material-design: true
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter.ttf
+          weight: 400
+        - asset: assets/fonts/Inter.ttf
+          weight: 500
+        - asset: assets/fonts/Inter.ttf
+          weight: 600
+        - asset: assets/fonts/Inter.ttf
+          weight: 700
+        - asset: assets/fonts/Inter.ttf
+          weight: 800
+  assets:
+    - assets/logo.png
+    - assets/aro-core-logo.png
+    - assets/aro-core-logo-dark.png

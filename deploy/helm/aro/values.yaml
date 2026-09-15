@@ -1,0 +1,230 @@
+image:
+  repository: aro-api
+  tag: "0.1.0"
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+api:
+  replicas: 2
+  port: 8710
+  terminationGracePeriodSeconds: 45
+  topologySpread:
+    enabled: true
+  # Raw Kubernetes envFrom entries for optional integration-specific configuration.
+  extraEnvFrom: []
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  env:
+    ARO_ENV: production
+    ARO_DEPLOYMENT_MODE: self-host
+    ARO_SIGNUP_MODE: closed
+    ARO_API_BIND: 0.0.0.0:8710
+    ARO_AUTO_MIGRATE: "false"
+    ARO_LOG_FORMAT: json
+    ARO_HTTP_MAX_BODY_BYTES: "1048576"
+    ARO_HTTP_MAX_CONCURRENCY: "256"
+    ARO_HTTP_REQUEST_TIMEOUT_SECONDS: "30"
+    ARO_DB_MAX_CONNECTIONS: "20"
+    ARO_JWT_ISSUER: aro-api
+    ARO_JWT_AUDIENCE: aro-desktop
+    ARO_SECRET_PROVIDER: local-key
+    ARO_AGENT_WEB_ACCESS: "false"
+    ARO_AGENT_DIRECT_TOOL_EXECUTION: "false"
+    ARO_IDEMPOTENCY_PURGE_BATCH: "1000"
+    ARO_REFRESH_TOKEN_FAMILY_PURGE_BATCH: "1000"
+    ARO_REFRESH_TOKEN_FAMILY_RETENTION_DAYS: "30"
+    ARO_REFRESH_TOKEN_FAMILY_DAYS: "90"
+    # Invitation tokens are never exposed to tenant administrators. Enable only when a trusted
+    # server-side delivery worker consumes the encrypted invitation delivery queue.
+    ARO_INVITATION_DELIVERY_ENABLED: "false"
+    ARO_INVITATION_ACCEPT_BASE_URL: "https://aro.example.com/"
+    ARO_INVITATION_DELIVERY_BATCH_SIZE: "20"
+    ARO_INVITATION_DELIVERY_MAX_ATTEMPTS: "5"
+    ARO_INVITATION_DELIVERY_LEASE_SECONDS: "60"
+    ARO_SMTP_RELAY: "smtp.internal.example.com"
+    ARO_SMTP_PORT: "587"
+    ARO_SMTP_TLS_MODE: "starttls"
+    ARO_SMTP_TIMEOUT_SECONDS: "30"
+    ARO_SMTP_FROM: "ARO <no-reply@example.com>"
+    ARO_SMTP_ALLOW_UNAUTHENTICATED: "false"
+    # Enable only together with a private S3 backend and the ClamAV worker.
+    ARO_FILES_API: "false"
+
+secrets:
+  # Secure default: provision this Secret out-of-band. Required keys are DATABASE_URL,
+  # ARO_MIGRATION_DATABASE_URL, ARO_JWT_SECRET, ARO_SECRETS_KEY, ARO_METRICS_TOKEN, plus
+  # ARO_WORKER_DATABASE_URL when worker.enabled and ARO_REDIS_URL when redis.enabled=false.
+  create: false
+  existingSecret: aro-secrets
+  databaseUrl: ""
+  workerDatabaseUrl: ""
+  migrationDatabaseUrl: ""
+  # Required when redis.enabled=false and this chart creates the application Secret.
+  redisUrl: ""
+  jwtSecret: ""
+  secretsKey: ""
+  metricsToken: ""
+  # Worker-only; required when ARO_INVITATION_DELIVERY_ENABLED=true unless an external Secret is used.
+  smtpUsername: ""
+  smtpPassword: ""
+
+ingress:
+  enabled: false
+  className: nginx
+  host: aro.example.com
+  tlsSecretName: aro-tls
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+
+postgres:
+  enabled: true
+  image: postgres:16
+  digest: ""
+  imagePullPolicy: IfNotPresent
+  # Existing Secret keys: POSTGRES_PASSWORD, ARO_POSTGRES_APP_PASSWORD,
+  # and ARO_POSTGRES_WORKER_PASSWORD. Leave empty to let this chart create it.
+  existingSecret: aro-postgres
+  terminationGracePeriodSeconds: 60
+  storageSize: 20Gi
+  storageClassName: ""
+  # Schema owner/migrator. Runtime pods use the restricted roles below.
+  user: aro_migrator
+  password: ""
+  appPassword: ""
+  workerPassword: ""
+  database: aro
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop: ["ALL"]
+
+redis:
+  enabled: true
+  image: redis:7-alpine
+  digest: ""
+  imagePullPolicy: IfNotPresent
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop: ["ALL"]
+
+clamav:
+  enabled: true
+  image: clamav/clamav:1.5.3
+  digest: ""
+  imagePullPolicy: IfNotPresent
+  port: 3310
+  signatureVolumeSizeLimit: 2Gi
+  persistence:
+    enabled: true
+    existingClaim: ""
+    storageClassName: ""
+    accessModes: ["ReadWriteOnce"]
+    size: 2Gi
+  terminationGracePeriodSeconds: 60
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop: ["ALL"]
+  resources:
+    requests:
+      cpu: 500m
+      memory: 3Gi
+    limits:
+      memory: 5Gi
+
+networkPolicy:
+  enabled: true
+
+worker:
+  enabled: true
+  replicas: 1
+  terminationGracePeriodSeconds: 90
+  extraEnvFrom: []
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+migration:
+  extraEnvFrom: []
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi

@@ -1,0 +1,43 @@
+[package]
+name = "aro-desktop"
+version = "0.1.0"
+description = "ARO local-first voice AI desktop app"
+authors = ["ARO"]
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[dependencies]
+aro-core = { path = "../../../crates/aro-core" }
+aro-mcp = { path = "../../../crates/aro-mcp" }
+aro-memory = { path = "../../../crates/aro-memory" }
+aro-plugins = { path = "../../../crates/aro-plugins" }
+aro-runtime = { path = "../../../crates/aro-runtime" }
+aro-skills = { path = "../../../crates/aro-skills" }
+aro-tools = { path = "../../../crates/aro-tools" }
+aro-vector = { path = "../../../crates/aro-vector" }
+aro-voice = { path = "../../../crates/aro-voice" }
+base64.workspace = true
+chrono.workspace = true
+directories.workspace = true
+keyring.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri.workspace = true
+tauri-plugin-opener.workspace = true
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true

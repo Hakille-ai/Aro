@@ -1,0 +1,39 @@
+{{- if .Values.postgres.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "aro.fullname" . }}-postgres-role-init
+data:
+  10-aro-runtime-roles.sh: |
+    #!/usr/bin/env bash
+    set -Eeuo pipefail
+    psql --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" \
+      --set=ON_ERROR_STOP=1 \
+      --set=app_password="${ARO_POSTGRES_APP_PASSWORD}" \
+      --set=worker_password="${ARO_POSTGRES_WORKER_PASSWORD}" <<'SQL'
+    SELECT format(
+      'CREATE ROLE aro_app LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS',
+      :'app_password'
+    )
+    WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'aro_app')
+    \gexec
+    SELECT format(
+      'CREATE ROLE aro_worker LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS',
+      :'worker_password'
+    )
+    WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'aro_worker')
+    \gexec
+    SELECT format(
+      'ALTER ROLE aro_app WITH PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS',
+      :'app_password'
+    )
+    \gexec
+    SELECT format(
+      'ALTER ROLE aro_worker WITH PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS',
+      :'worker_password'
+    )
+    \gexec
+    ALTER ROLE aro_app SET row_security = on;
+    ALTER ROLE aro_worker SET row_security = on;
+    SQL
+{{- end }}

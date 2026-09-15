@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aro.fullname" . }}-api
+spec:
+{{- if not .Values.api.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicas }}
+{{- end }}
+  minReadySeconds: 10
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "aro.fullname" . }}-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "aro.fullname" . }}-api
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+{{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+{{- end }}
+      serviceAccountName: {{ include "aro.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
+      securityContext:
+{{ toYaml .Values.podSecurityContext | nindent 8 }}
+{{- if .Values.api.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "aro.fullname" . }}-api
+{{- end }}
+      containers:
+        - name: api
+          image: {{ include "aro.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.api.port }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "aro.fullname" . }}-config
+{{- with .Values.api.extraEnvFrom }}
+{{ toYaml . | nindent 12 }}
+{{- end }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aro.secretName" . }}
+                  key: DATABASE_URL
+            - name: ARO_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aro.secretName" . }}
+                  key: ARO_JWT_SECRET
+            - name: ARO_SECRETS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aro.secretName" . }}
+                  key: ARO_SECRETS_KEY
+            - name: ARO_METRICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aro.secretName" . }}
+                  key: ARO_METRICS_TOKEN
+{{- if not .Values.redis.enabled }}
+            - name: ARO_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aro.secretName" . }}
+                  key: ARO_REDIS_URL
+{{- end }}
+          startupProbe:
+            httpGet:
+              path: /live
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+{{ toYaml .Values.api.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

@@ -1,0 +1,40 @@
+{
+  "name": "aro",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloud-synced desktop AI product with local inference by default.",
+  "workspaces": [
+    "apps/desktop",
+    "packages/contracts",
+    "packages/api-client",
+    "packages/ui-tokens"
+  ],
+  "scripts": {
+    "contracts:check": "npm --workspace @aro/contracts run check",
+    "api-client:check": "npm --workspace @aro/api-client run check",
+    "api-client:test": "npm --workspace @aro/api-client run test",
+    "desktop:dev": "npm --workspace @aro/desktop run tauri:dev",
+    "desktop:build": "npm --workspace @aro/desktop run tauri:build",
+    "api:dev": "cargo run -p aro-api",
+    "dev:web": "npm --workspace @aro/desktop run dev",
+    "build": "npm --workspace @aro/desktop run build",
+    "check": "npm --workspace @aro/desktop run check",
+    "test:unit": "npm --workspace @aro/desktop run test:unit",
+    "test:components": "npm --workspace @aro/desktop run test:components",
+    "test:e2e": "npm --workspace @aro/desktop run test:e2e",
+    "test:visual:update": "npm --workspace @aro/desktop run test:visual:update",
+    "test:frontend": "npm --workspace @aro/desktop run test:frontend",
+    "lint:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",
+    "test:rust": "cargo test --workspace",
+    "smoke:api": "powershell -ExecutionPolicy Bypass -File scripts/smoke-api.ps1",
+    "smoke:redis": "powershell -ExecutionPolicy Bypass -File scripts/smoke-redis.ps1",
+    "doctor": "powershell -ExecutionPolicy Bypass -File scripts/doctor.ps1"
+  },
+  "engines": {
+    "node": ">=24",
+    "npm": ">=11"
+  },
+  "overrides": {
+    "react": "19.2.3"
+  }
+}

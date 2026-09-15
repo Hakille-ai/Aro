@@ -1,0 +1,15 @@
+{{- $minimumReplicas := int .Values.api.replicas -}}
+{{- if .Values.api.autoscaling.enabled -}}
+{{- $minimumReplicas = int .Values.api.autoscaling.minReplicas -}}
+{{- end -}}
+{{- if and .Values.api.podDisruptionBudget.enabled (gt $minimumReplicas 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "aro.fullname" . }}-api
+spec:
+  minAvailable: {{ .Values.api.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "aro.fullname" . }}-api
+{{- end }}

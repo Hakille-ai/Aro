@@ -1,0 +1,80 @@
+{{- if .Values.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aro.fullname" . }}-worker
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "aro.fullname" . }}-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "aro.fullname" . }}-worker
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+{{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+{{- end }}
+      serviceAccountName: {{ include "aro.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      securityContext:
+{{ toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "aro.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          args: ["worker"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "aro.fullname" . }}-config
+{{- with .Values.worker.extraEnvFrom }}
+{{ toYaml . | nindent 12 }}
+{{- end }}
+          env:
+            - name: ARO_WORKER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aro.secretName" . }}
+                  key: ARO_WORKER_DATABASE_URL
+            - name: ARO_SECRETS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aro.secretName" . }}
+                  key: ARO_SECRETS_KEY
+{{- if and (eq (index .Values.env "ARO_INVITATION_DELIVERY_ENABLED") "true") (ne (index .Values.env "ARO_SMTP_ALLOW_UNAUTHENTICATED") "true") }}
+            - name: ARO_SMTP_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aro.secretName" . }}
+                  key: ARO_SMTP_USERNAME
+            - name: ARO_SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aro.secretName" . }}
+                  key: ARO_SMTP_PASSWORD
+{{- end }}
+{{- if not .Values.redis.enabled }}
+            - name: ARO_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "aro.secretName" . }}
+                  key: ARO_REDIS_URL
+{{- end }}
+          resources:
+{{ toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+{{- end }}

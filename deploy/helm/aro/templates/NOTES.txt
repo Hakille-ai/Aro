@@ -1,0 +1,34 @@
+ARO {{ .Chart.AppVersion }} was rendered for namespace {{ .Release.Namespace }}.
+
+{{ if not .Values.secrets.create }}
+Before the workloads can become Ready, provision Secret {{ include "aro.secretName" . }} with:
+  - DATABASE_URL
+  - ARO_MIGRATION_DATABASE_URL
+  - ARO_JWT_SECRET
+  - ARO_SECRETS_KEY
+  - ARO_METRICS_TOKEN
+{{ if .Values.worker.enabled }}
+  - ARO_WORKER_DATABASE_URL
+{{ end }}
+{{ if not .Values.redis.enabled }}
+  - ARO_REDIS_URL
+{{ end }}
+{{ end }}
+
+Set api.env.ARO_PUBLIC_BASE_URL and api.env.ARO_CORS_ALLOWED_ORIGINS to the explicit HTTPS
+origins for this deployment. Production startup intentionally fails when either is absent.
+
+{{ if and .Values.postgres.enabled .Values.postgres.existingSecret }}
+Provision PostgreSQL bootstrap Secret {{ include "aro.postgresSecretName" . }} with:
+  - POSTGRES_PASSWORD
+  - ARO_POSTGRES_APP_PASSWORD
+  - ARO_POSTGRES_WORKER_PASSWORD
+The runtime role names are fixed to aro_app and aro_worker to match the database grants.
+{{ end }}
+
+{{ if or (not .Values.image.digest) (and .Values.postgres.enabled (not .Values.postgres.digest)) (and .Values.redis.enabled (not .Values.redis.digest)) (and .Values.clamav.enabled (not .Values.clamav.digest)) }}
+WARNING: one or more images are selected by a mutable tag. Set every enabled image digest before production rollout.
+{{ end }}
+
+The bundled PostgreSQL, Redis, and ClamAV workloads are single-instance services. Use managed or independently
+operated data services when your availability, backup, or disaster-recovery objectives require redundancy.

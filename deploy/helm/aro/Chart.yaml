@@ -1,0 +1,6 @@
+apiVersion: v2
+name: aro
+description: ARO self-host API, worker, migration job, PostgreSQL, and Redis
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

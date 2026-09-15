@@ -1,0 +1,26 @@
+[package]
+name = "aro-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aro-agent = { path = "../aro-agent" }
+aro-core = { path = "../aro-core" }
+aro-memory = { path = "../aro-memory" }
+aro-tools = { path = "../aro-tools" }
+aro-vector = { path = "../aro-vector" }
+aro-mcp = { path = "../aro-mcp" }
+aro-skills = { path = "../aro-skills" }
+aro-plugins = { path = "../aro-plugins" }
+async-trait.workspace = true
+chrono.workspace = true
+directories.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+url.workspace = true
+uuid.workspace = true

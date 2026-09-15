@@ -1,0 +1,240 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  api-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16@sha256:be01cf82fc7dbba824acf0a82e150b4b360f3ff93c6631d7844af431e841a95c
+        env:
+          POSTGRES_USER: aro
+          POSTGRES_PASSWORD: aro
+          POSTGRES_DB: aro
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aro -d aro"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://aro:aro@127.0.0.1:5432/aro
+      ARO_JWT_SECRET: ci-jwt-secret-that-is-long-enough-for-tests
+      ARO_SECRETS_KEY: ci-secrets-key-that-is-long-enough-for-tests
+      ARO_FILES_API: "true"
+      ARO_FILE_STORAGE_BACKEND: s3
+      ARO_FILE_MAX_BYTES: "52428800"
+      ARO_FILE_ALLOWED_MIME: text/plain,text/markdown,text/csv,application/json,application/pdf,image/png,image/jpeg,image/webp
+      ARO_S3_ENDPOINT: http://127.0.0.1:9000
+      ARO_S3_BUCKET: aro-files-ci
+      ARO_S3_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Provision isolated RLS database identity
+        shell: bash
+        env:
+          PGPASSWORD: aro
+        run: |
+          set -euo pipefail
+          psql --host 127.0.0.1 --username aro --dbname postgres --set ON_ERROR_STOP=1 <<'SQL'
+          SELECT format(
+            'CREATE ROLE aro_app LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS',
+            'aro-app-ci-password'
+          )
+          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'aro_app')
+          \gexec
+
+          ALTER ROLE aro_app WITH
+            PASSWORD 'aro-app-ci-password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          ALTER ROLE aro_app SET row_security = on;
+
+          SELECT 'CREATE DATABASE aro_rls_test OWNER aro'
+          WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'aro_rls_test')
+          \gexec
+
+          REVOKE ALL ON DATABASE aro_rls_test FROM PUBLIC;
+          GRANT CONNECT ON DATABASE aro_rls_test TO aro_app;
+          SQL
+      - name: Start MinIO
+        shell: bash
+        run: |
+          docker run -d --name aro-minio-ci \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            -p 9000:9000 \
+            -p 9001:9001 \
+            minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data --console-address ":9001"
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live; then
+              break
+            fi
+            sleep 1
+          done
+          docker run --rm --network host minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727 sh -c "mc alias set aro-ci http://127.0.0.1:9000 minioadmin minioadmin && mc mb --ignore-existing aro-ci/aro-files-ci"
+      - name: Check API crates
+        run: cargo test --locked -p aro-core -p aro-files -p aro-store -p aro-api
+      - name: Prove private-data RLS with a non-owner runtime role
+        env:
+          DATABASE_URL: postgres://aro:aro@127.0.0.1:5432/aro_rls_test
+          ARO_RLS_TEST_DATABASE_URL: postgres://aro_app:aro-app-ci-password@127.0.0.1:5432/aro_rls_test
+        run: cargo test --locked -p aro-store --test rls -- --test-threads=1
+      - name: Start API
+        shell: bash
+        run: |
+          cargo run --locked -p aro-api > aro-api.log 2>&1 &
+          echo $! > aro-api.pid
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:8710/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat aro-api.log
+          exit 1
+      - name: Smoke API
+        shell: pwsh
+        run: |
+          ./scripts/doctor.ps1
+          ./scripts/smoke-api.ps1 -SkipDockerDatabaseChecks
+
+  rust:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked --workspace
+
+  frontend:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:unit
+      - run: npm run check
+      - run: npm run build
+
+  voice-acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check voice acceptance docs, scripts, and CI gates
+        shell: pwsh
+        run: ./scripts/voice-metrics-notes.ps1 -VerifyDocs -VerifyScripts -VerifyCi
+      - name: Validate voice model harness contract without models
+        shell: pwsh
+        run: ./scripts/measure-voice.ps1 -VerifyOnly
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install checksum-verified Helm
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=v3.17.3
+          archive="helm-${version}-linux-amd64.tar.gz"
+          curl --fail --silent --show-error --location "https://get.helm.sh/${archive}" --output "${archive}"
+          echo "ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd  ${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file "${archive}"
+          sudo install --mode 0755 linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+      - name: Lint and render Helm chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/aro
+          helm lint deploy/helm/aro --values deploy/helm/aro/ci/lint-values.yaml
+          helm template aro deploy/helm/aro > /dev/null
+          helm template aro deploy/helm/aro --values deploy/helm/aro/ci/lint-values.yaml > rendered.yaml
+          grep --quiet 'name: ARO_METRICS_TOKEN' rendered.yaml
+          if helm template aro deploy/helm/aro \
+            --set secrets.create=true \
+            --set-string secrets.jwtSecret=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set-string secrets.secretsKey=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+            --set-string secrets.metricsToken=short > /dev/null 2>&1; then
+            echo 'weak Helm secrets unexpectedly rendered' >&2
+            exit 1
+          fi
+      - name: Validate production Compose boundaries
+        shell: bash
+        env:
+          ARO_API_IMAGE: ghcr.io/example/aro-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          ARO_POSTGRES_IMAGE: postgres:16@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          ARO_REDIS_IMAGE: redis:7-alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          ARO_CLAMAV_IMAGE: clamav/clamav:1.5.3@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          ARO_CADDY_IMAGE: caddy:2-alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        run: |
+          set -euo pipefail
+          trap 'rm -f .env.production .env.production.api .env.production.worker .env.production.migrate compose.json' EXIT
+          cp .env.production.example .env.production
+          cp .env.production.api.example .env.production.api
+          cp .env.production.worker.example .env.production.worker
+          cp .env.production.migrate.example .env.production.migrate
+          docker compose --env-file .env.production --file deploy/compose.prod.yml config --format json > compose.json
+          jq --exit-status '
+            (.services.api.environment
+              | has("DATABASE_URL")
+                and (has("ARO_WORKER_DATABASE_URL") | not)
+                and (has("ARO_MIGRATION_DATABASE_URL") | not))
+            and (.services.worker.environment
+              | has("ARO_WORKER_DATABASE_URL")
+                and (has("DATABASE_URL") | not)
+                and (has("ARO_MIGRATION_DATABASE_URL") | not)
+                and (has("ARO_JWT_SECRET") | not))
+            and (.services.migrate.environment
+              | has("ARO_MIGRATION_DATABASE_URL")
+                and (has("DATABASE_URL") | not)
+                and (has("ARO_WORKER_DATABASE_URL") | not)
+                and (has("AWS_SECRET_ACCESS_KEY") | not))
+            and .services.api.read_only
+            and .services.worker.read_only
+            and .services.migrate.read_only
+          ' compose.json > /dev/null
+
+  container:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build API image
+        run: docker build -t aro-api:${{ github.sha }} .
+      - name: Scan API image
+        uses: aquasecurity/trivy-action@0.32.0
+        with:
+          image-ref: aro-api:${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif

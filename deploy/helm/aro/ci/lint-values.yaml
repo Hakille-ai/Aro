@@ -1,0 +1,14 @@
+# Synthetic values for exercising the chart-created Secret paths in CI.
+# These values are deliberately public and must never be used for a deployment.
+secrets:
+  create: true
+  existingSecret: ""
+  jwtSecret: lint-only-jwt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  secretsKey: lint-only-encryption-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  metricsToken: lint-only-metrics-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+
+postgres:
+  existingSecret: ""
+  password: lint-only-migrator-password
+  appPassword: lint-only-app-password
+  workerPassword: lint-only-worker-password
