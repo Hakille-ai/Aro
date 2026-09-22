@@ -37,7 +37,7 @@ jobs:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95
       - uses: actions/setup-node@v4
         with:
@@ -121,7 +121,7 @@ jobs:
   rust:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95
         with:
           components: rustfmt, clippy
@@ -135,7 +135,7 @@ jobs:
   frontend:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -148,7 +148,7 @@ jobs:
   voice-acceptance:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check voice acceptance docs, scripts, and CI gates
         shell: pwsh
         run: ./scripts/voice-metrics-notes.ps1 -VerifyDocs -VerifyScripts -VerifyCi
@@ -159,7 +159,7 @@ jobs:
   helm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install checksum-verified Helm
         shell: bash
         run: |
@@ -230,7 +230,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build API image
         run: docker build -t aro-api:${{ github.sha }} .
       - name: Scan API image
