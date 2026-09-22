@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::NotificationSettings;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ModelProviderKind {
@@ -130,6 +132,86 @@ impl Default for ModelRef {
             "mock",
             "Mock",
         )
+    }
+}
+
+/// Dynamic capability and token sizing profile inferred for a specific model and provider.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProfile {
+    pub context_window: usize,
+    pub max_output_tokens: u32,
+    pub supports_reasoning: bool,
+    pub default_temperature: f32,
+}
+
+pub fn resolve_model_profile(model_id: &str, provider: &ModelProviderKind) -> ModelProfile {
+    let id_lower = model_id.to_lowercase();
+    let is_reasoning = id_lower.contains("coder")
+        || id_lower.contains("qwen3")
+        || id_lower.contains("deepseek-r1")
+        || id_lower.contains("r1")
+        || id_lower.contains("o1")
+        || id_lower.contains("o3")
+        || id_lower.contains("reasoner")
+        || id_lower.contains("thinking")
+        || id_lower.contains("qvq");
+
+    let context_window = match provider {
+        ModelProviderKind::Google => {
+            if id_lower.contains("1.5") || id_lower.contains("2.0") || id_lower.contains("3.") {
+                131_072
+            } else {
+                32_768
+            }
+        }
+        ModelProviderKind::Anthropic => 200_000,
+        ModelProviderKind::OpenAi => 128_000,
+        ModelProviderKind::Mistral => 32_768,
+        ModelProviderKind::OpenAiCompatible => {
+            if id_lower.contains("deepseek") || id_lower.contains("qwen") || id_lower.contains("kimi") {
+                65_536
+            } else {
+                32_768
+            }
+        }
+        ModelProviderKind::Ollama | ModelProviderKind::LlamaCpp => {
+            if id_lower.contains("qwen") || id_lower.contains("deepseek") || id_lower.contains("llama-3") {
+                32_768
+            } else if id_lower.contains("gemma") || id_lower.contains("phi") {
+                8_192
+            } else {
+                16_384
+            }
+        }
+        ModelProviderKind::Mock => 8_192,
+    };
+
+    let max_output = if is_reasoning {
+        8_192
+    } else {
+        match provider {
+            ModelProviderKind::Google | ModelProviderKind::Anthropic | ModelProviderKind::OpenAi => 8_192,
+            ModelProviderKind::OpenAiCompatible => 8_192,
+            ModelProviderKind::Ollama | ModelProviderKind::LlamaCpp => {
+                if id_lower.contains("mini") || id_lower.contains("1b") {
+                    4_096
+                } else {
+                    8_192
+                }
+            }
+            ModelProviderKind::Mistral => 4_096,
+            ModelProviderKind::Mock => 2_048,
+        }
+    };
+
+    let default_temp = if is_reasoning { 0.6 } else { 0.7 };
+
+    ModelProfile {
+        context_window,
+        max_output_tokens: max_output,
+        supports_reasoning: is_reasoning,
+        default_temperature: default_temp,
     }
 }
 
@@ -674,6 +756,46 @@ impl MemoryConfigurationSettings {
             max_working_turns: self.max_working_turns,
         }
     }
+
+    /// Dynamically scales context partitions according to the active model and provider capability profile
+    /// when contextMode is "auto", while preserving explicit manual user preferences.
+    pub fn to_context_budget_for_model(
+        &self,
+        model_id: &str,
+        provider: &ModelProviderKind,
+    ) -> crate::ContextBudget {
+        if self.context_mode == "manual" {
+            return self.to_context_budget();
+        }
+
+        let profile = resolve_model_profile(model_id, provider);
+        let ceiling = self.total_token_ceiling.max(profile.context_window).max(8192);
+
+        // Reserve budget dynamically scales to guarantee ample headspace for model output + reasoning
+        let reserve = (profile.max_output_tokens as usize)
+            .max(self.reserve_budget)
+            .max(2048);
+
+        let remaining = ceiling.saturating_sub(reserve);
+        let system = (remaining * 10 / 100).clamp(800, 4000);
+        let semantic = (remaining * 20 / 100).max(self.semantic_budget);
+        let episodic = (remaining * 25 / 100).max(self.episodic_budget);
+        let working = remaining
+            .saturating_sub(system)
+            .saturating_sub(semantic)
+            .saturating_sub(episodic)
+            .max(2400);
+
+        crate::ContextBudget {
+            system_budget: system,
+            semantic_budget: semantic,
+            episodic_budget: episodic,
+            working_budget: working,
+            reserve_budget: reserve,
+            total_ceiling: ceiling,
+            max_working_turns: self.max_working_turns,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -685,6 +807,8 @@ pub struct AppSettings {
     pub search: SearchSettings,
     #[serde(default)]
     pub memory: MemoryConfigurationSettings,
+    #[serde(default)]
+    pub notification: NotificationSettings,
     pub retain_history: bool,
     pub speak_responses: bool,
 }
@@ -696,11 +820,13 @@ impl Default for AppSettings {
             voice: VoiceSettings::default(),
             search: SearchSettings::default(),
             memory: MemoryConfigurationSettings::default(),
+            notification: NotificationSettings::default(),
             retain_history: true,
             speak_responses: false,
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -821,4 +947,16 @@ mod tests {
         assert!(!encoded.contains("apiKey"));
         assert!(encoded.contains("authConfigured"));
     }
+
+    #[test]
+    fn app_settings_deserializes_notification_settings_with_defaults() {
+        let base = AppSettings::default();
+        let serialized = serde_json::to_string(&base).expect("serialize");
+        let settings: AppSettings = serde_json::from_str(&serialized).expect("deserialize");
+        assert!(settings.notification.desktop_notifications_enabled);
+        assert!(settings.notification.sound_enabled);
+        assert_eq!(settings.notification.email_provider, "smtp");
+    }
 }
+
+

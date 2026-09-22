@@ -658,7 +658,7 @@ impl ContextBudget {
     /// Automatically constructs an adaptive 5-partition budget for any arbitrary total token ceiling.
     pub fn from_total_ceiling(ceiling: usize, max_working_turns: Option<usize>) -> Self {
         let ceiling = ceiling.max(2048);
-        let system = (ceiling * 10 / 100).clamp(400, 4000);
+        let system = (ceiling * 10 / 100).clamp(400, 32000);
         let semantic = (ceiling * 20 / 100).max(600);
         let episodic = (ceiling * 25 / 100).max(800);
         let working = (ceiling * 30 / 100).max(1000);

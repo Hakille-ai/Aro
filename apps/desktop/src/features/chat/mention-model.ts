@@ -43,7 +43,7 @@ const EMAIL_GUARD_RE = /[A-Za-z0-9._%+-]@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 export function detectMentionQuery(text: string, cursorIndex: number): MentionTrigger | null {
   const safeCursor = Math.max(0, Math.min(cursorIndex, text.length));
   const beforeCursor = text.slice(0, safeCursor);
-  const match = beforeCursor.match(/(?:^|\s)@([a-zA-Z0-9_\-./\\]*)$/);
+  const match = beforeCursor.match(/(?:^|\s)@([a-zA-Z0-9_\-./\\:]*)$/);
   if (!match) return null;
   const query = match[1] ?? "";
   const token = `@${query}`;
@@ -209,7 +209,181 @@ export function resolveMentionedEntries(
 /** Strips `@path` tokens but keeps surrounding prose readable. */
 export function stripMentionTokens(text: string): string {
   return text
-    .replace(/(^|\s)@[a-zA-Z0-9_\-./\\]+/g, "$1")
+    .replace(/(^|\s)@[a-zA-Z0-9_\-./\\:]+/g, "$1")
     .replace(/[ \t]{2,}/g, " ")
     .trim();
+}
+
+export type MentionCategory = "all" | "file" | "skill" | "plugin" | "mcp" | "agent" | "model";
+
+export interface UnifiedMentionItem {
+  id: string;
+  category: "file" | "skill" | "plugin" | "mcp" | "agent" | "model";
+  name: string;
+  title: string;
+  subtitle?: string;
+  badge?: string;
+  isDir?: boolean;
+  relativePath?: string;
+  extension?: string;
+  insertToken: string;
+  iconType?: string;
+  provider?: string;
+  description?: string;
+}
+
+export interface BuildMentionItemsParams {
+  files?: WorkspaceMentionEntry[];
+  skills?: any[];
+  plugins?: any[];
+  mcpServers?: any[];
+  agents?: any[];
+  models?: any[];
+}
+
+export function buildUnifiedMentionItems(params: BuildMentionItemsParams): UnifiedMentionItem[] {
+  const items: UnifiedMentionItem[] = [];
+
+  // 1. Files & Folders
+  for (const file of params.files ?? []) {
+    items.push({
+      id: `file:${file.relativePath || file.path}`,
+      category: "file",
+      name: file.name,
+      title: file.name,
+      subtitle: file.relativePath || file.path,
+      badge: file.isDir ? "Dossier" : (file.extension ? file.extension.toUpperCase() : "Fichier"),
+      isDir: file.isDir,
+      relativePath: file.relativePath,
+      extension: file.extension,
+      insertToken: file.relativePath,
+      iconType: file.isDir ? "folder" : "file",
+    });
+  }
+
+  // 2. Skills
+  for (const skill of params.skills ?? []) {
+    if (!skill || !skill.name) continue;
+    const name = String(skill.name);
+    items.push({
+      id: `skill:${skill.id || name}`,
+      category: "skill",
+      name,
+      title: name,
+      subtitle: skill.description || (skill.pluginName ? `Plugin: ${skill.pluginName}` : "Compétence système"),
+      badge: skill.isPlugin ? "Plugin Skill" : (skill.category || "Skill"),
+      insertToken: `skill:${name.toLowerCase().replace(/\s+/g, "-")}`,
+      iconType: "zap",
+      description: skill.description,
+    });
+  }
+
+  // 3. Plugins
+  for (const plugin of params.plugins ?? []) {
+    if (!plugin || !plugin.name) continue;
+    const name = String(plugin.name);
+    items.push({
+      id: `plugin:${plugin.id || name}`,
+      category: "plugin",
+      name,
+      title: name,
+      subtitle: plugin.description || (plugin.version ? `v${plugin.version}` : "Extension"),
+      badge: plugin.category || "Plugin",
+      insertToken: `plugin:${name.toLowerCase().replace(/\s+/g, "-")}`,
+      iconType: "puzzle",
+      description: plugin.description,
+    });
+  }
+
+  // 4. MCP Servers
+  for (const mcp of params.mcpServers ?? []) {
+    if (!mcp || !mcp.name) continue;
+    const name = String(mcp.name);
+    const toolsCount = Array.isArray(mcp.tools) ? mcp.tools.length : undefined;
+    items.push({
+      id: `mcp:${mcp.id || name}`,
+      category: "mcp",
+      name,
+      title: name,
+      subtitle: mcp.url || mcp.command || (toolsCount !== undefined ? `${toolsCount} outil${toolsCount > 1 ? "s" : ""}` : "Serveur MCP"),
+      badge: mcp.status === "connected" ? "Connecté" : "MCP",
+      insertToken: `mcp:${name.toLowerCase().replace(/\s+/g, "-")}`,
+      iconType: "network",
+    });
+  }
+
+  // 5. Agents
+  for (const agent of params.agents ?? []) {
+    if (!agent || !agent.name) continue;
+    const name = String(agent.name);
+    items.push({
+      id: `agent:${agent.id || name}`,
+      category: "agent",
+      name,
+      title: name,
+      subtitle: agent.description || agent.role || "Agent IA autonome",
+      badge: agent.role || "Agent",
+      insertToken: `agent:${name.toLowerCase().replace(/\s+/g, "-")}`,
+      iconType: "bot",
+      description: agent.description || agent.systemPrompt,
+    });
+  }
+
+  // 6. Models
+  for (const model of params.models ?? []) {
+    if (!model || (!model.id && !model.label)) continue;
+    const label = String(model.label || model.id);
+    items.push({
+      id: `model:${model.id}`,
+      category: "model",
+      name: label,
+      title: label,
+      subtitle: model.provider ? `${model.provider} · ${model.details || ""}` : (model.details || "Modèle IA"),
+      badge: model.provider || "LLM",
+      insertToken: `model:${model.id}`,
+      iconType: "cpu",
+      provider: model.provider,
+    });
+  }
+
+  return items;
+}
+
+export function filterUnifiedMentionItems(
+  items: UnifiedMentionItem[],
+  query: string,
+  category: MentionCategory = "all",
+  limit = 30,
+): UnifiedMentionItem[] {
+  const list = items ?? [];
+  const filteredByCategory = category === "all"
+    ? list
+    : list.filter((item) => item.category === category);
+
+  const q = (query || "").trim().toLowerCase().replace(/\\/g, "/");
+  if (!q) {
+    return filteredByCategory.slice(0, limit);
+  }
+
+  return filteredByCategory
+    .map((item) => {
+      let score = 0;
+      const titleLower = (item.title || "").toLowerCase();
+      const subLower = (item.subtitle || "").toLowerCase();
+      const badgeLower = (item.badge || "").toLowerCase();
+      const pathLower = (item.relativePath || "").toLowerCase().replace(/\\/g, "/");
+
+      if (titleLower === q) score += 100;
+      else if (titleLower.startsWith(q)) score += 60;
+      else if (titleLower.includes(q)) score += 30;
+      else if (pathLower.includes(q)) score += 20;
+      else if (subLower.includes(q)) score += 10;
+      else if (badgeLower.includes(q)) score += 5;
+
+      return { item, score };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.max(0, limit))
+    .map((entry) => entry.item);
 }

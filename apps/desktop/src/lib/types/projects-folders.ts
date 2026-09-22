@@ -8,6 +8,7 @@ export interface Project {
   icon: string;
   createdAt: string;
   updatedAt: string;
+  organizationId?: string | null;
 }
 
 export interface Folder {
@@ -19,6 +20,7 @@ export interface Folder {
   icon?: string | null;
   createdAt: string;
   updatedAt: string;
+  organizationId?: string | null;
 }
 
 export interface MoveConversationPayload {

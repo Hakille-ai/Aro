@@ -12,6 +12,23 @@ pub const TOOL_WEB_FETCH: &str = "web.fetch";
 pub const TOOL_AGENT_DELEGATE: &str = "agent.delegate";
 pub const TOOL_CORE_SEARCH_WEB: &str = "core.search.web";
 pub const TOOL_CORE_WEB_PAGE_READ: &str = "core.web.page.read";
+// Browser and Computer Use tools
+pub const TOOL_CORE_BROWSER_NAVIGATE: &str = "core.browser.navigate";
+pub const TOOL_CORE_BROWSER_ACTION: &str = "core.browser.action";
+pub const TOOL_CORE_COMPUTER_USE: &str = "core.computer.use";
+pub const TOOL_BROWSER_NAVIGATE: &str = "browser.navigate";
+pub const TOOL_BROWSER_ACTION: &str = "browser.action";
+pub const TOOL_COMPUTER_USE: &str = "computer.use";
+pub const TOOL_CORE_VOLUME_CONTROL: &str = "core.computer.volume";
+pub const TOOL_VOLUME_CONTROL: &str = "computer.volume";
+pub const TOOL_CORE_SCREEN_CAPTURE: &str = "core.computer.screenshot";
+pub const TOOL_SCREEN_CAPTURE: &str = "computer.screenshot";
+pub const TOOL_CORE_SYSTEM_INFO: &str = "core.computer.info";
+pub const TOOL_SYSTEM_INFO: &str = "computer.info";
+pub const TOOL_CORE_APP_LAUNCH: &str = "core.computer.launch";
+pub const TOOL_APP_LAUNCH: &str = "computer.launch";
+pub const TOOL_CORE_NETWORK_INFO: &str = "core.computer.network";
+pub const TOOL_NETWORK_INFO: &str = "computer.network";
 // Workspace tools
 pub const TOOL_CORE_WORKSPACE_WRITE: &str = "core.workspace.write";
 pub const TOOL_CORE_WORKSPACE_READ: &str = "core.workspace.read";
@@ -85,9 +102,74 @@ pub fn normalize_tool_id(tool_id: &str) -> &str {
         "web_search" | "web.search" | "core.search.web" => TOOL_CORE_SEARCH_WEB,
         "web_fetch" | "web.fetch" | "core.web.page.read" => TOOL_CORE_WEB_PAGE_READ,
 
+        // Browser tools
+        "browser_navigate" | "browser.navigate" | "core.browser.navigate" => {
+            TOOL_CORE_BROWSER_NAVIGATE
+        }
+        "browser_action" | "browser.action" | "core.browser.action" => {
+            TOOL_CORE_BROWSER_ACTION
+        }
+
+        // Computer use tools
+        "computer_use" | "computer.use" | "core.computer.use" => {
+            TOOL_CORE_COMPUTER_USE
+        }
+        "volume_control" | "volume.control" | "computer.volume" | "core.computer.volume" | "set_volume" | "get_volume" | "volume_set" | "volume_get" | "volume_up" | "volume_down" | "mute" | "unmute" => {
+            TOOL_CORE_VOLUME_CONTROL
+        }
+        "screen_capture" | "screenshot" | "take_screenshot" | "computer.screenshot" | "core.computer.screenshot" => {
+            TOOL_CORE_SCREEN_CAPTURE
+        }
+        "system_info" | "system.info" | "computer.info" | "core.computer.info" | "system_status" => {
+            TOOL_CORE_SYSTEM_INFO
+        }
+        "app_launch" | "computer.launch" | "core.computer.launch" | "system_launch" | "open_app" => {
+            TOOL_CORE_APP_LAUNCH
+        }
+        "network_info" | "wifi_status" | "wifi" | "computer.network" | "core.computer.network" => {
+            TOOL_CORE_NETWORK_INFO
+        }
+
+        // Notification & communication tools
+        "notification_send" | "notification.send" | "send_notification" | "core.notification.send" => {
+            TOOL_CORE_NOTIFICATION_SEND
+        }
+        "email_send" | "email.send" | "send_email" | "core.email.send" => {
+            TOOL_CORE_EMAIL_SEND
+        }
+        "notification_schedule" | "notification.schedule" | "schedule_notification" | "core.notification.schedule" => {
+            TOOL_CORE_NOTIFICATION_SCHEDULE
+        }
+
         other => other,
     }
 }
+
+pub fn is_computer_tool(tool_id: &str) -> bool {
+    let normalized = normalize_tool_id(tool_id);
+    normalized == TOOL_CORE_COMPUTER_USE
+        || normalized == TOOL_CORE_VOLUME_CONTROL
+        || normalized == TOOL_CORE_SCREEN_CAPTURE
+        || normalized == TOOL_CORE_SYSTEM_INFO
+        || normalized == TOOL_CORE_NETWORK_INFO
+        || normalized == TOOL_CORE_APP_LAUNCH
+}
+
+// Notification tools
+pub const TOOL_CORE_NOTIFICATION_SEND: &str = "core.notification.send";
+pub const TOOL_NOTIFICATION_SEND: &str = "notification.send";
+pub const TOOL_CORE_EMAIL_SEND: &str = "core.email.send";
+pub const TOOL_EMAIL_SEND: &str = "email.send";
+pub const TOOL_CORE_NOTIFICATION_SCHEDULE: &str = "core.notification.schedule";
+pub const TOOL_NOTIFICATION_SCHEDULE: &str = "notification.schedule";
+
+pub fn is_notification_tool(tool_id: &str) -> bool {
+    let normalized = normalize_tool_id(tool_id);
+    normalized == TOOL_CORE_NOTIFICATION_SEND
+        || normalized == TOOL_CORE_EMAIL_SEND
+        || normalized == TOOL_CORE_NOTIFICATION_SCHEDULE
+}
+
 
 /// Checks if a tool identifier belongs to the memory family.
 pub fn is_memory_tool(tool_id: &str) -> bool {

@@ -10,6 +10,7 @@
 /apps/desktop/src-tauri/target/
 /.env
 /.env.*
+/legal/operator.json
 !.env.example
 !.env.production.example
 !.env.production.api.example

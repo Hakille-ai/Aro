@@ -185,6 +185,7 @@ dependencies = [
  "serde_json",
  "sha1 0.10.6",
  "sha2 0.10.9",
+ "sqlx",
  "tokio",
  "tower",
  "tower-http",
@@ -223,6 +224,7 @@ dependencies = [
  "chrono",
  "directories",
  "keyring",
+ "lettre",
  "rand 0.8.6",
  "reqwest 0.12.28",
  "serde",
@@ -310,6 +312,7 @@ dependencies = [
  "aro-core",
  "aro-mcp",
  "aro-skills",
+ "base64 0.22.1",
  "chrono",
  "directories",
  "futures-util",
@@ -355,6 +358,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "url",
  "uuid",
 ]
@@ -415,6 +419,7 @@ name = "aro-tools"
 version = "0.1.0"
 dependencies = [
  "aro-core",
+ "base64 0.22.1",
  "chrono",
  "reqwest 0.12.28",
  "scraper",

@@ -567,6 +567,10 @@ impl CloudApiClient {
         access_token: &str,
         request: &LocalResultRequest,
     ) -> AroResult<()> {
+        // The full message is synced, agent execution traces (`steps`)
+        // included: the route carries no body limit and `messages.steps`
+        // persists them server-side. Nothing is dropped.
+        let payload_bytes = serde_json::to_vec(request).map(|v| v.len()).unwrap_or(0);
         let idempotency_key = format!("local-result-{}", request.assistant_message.id);
         let _: serde_json::Value = self
             .post_authed_idempotent(
@@ -575,7 +579,12 @@ impl CloudApiClient {
                 &idempotency_key,
                 request,
             )
-            .await?;
+            .await
+            .map_err(|err| {
+                AroError::RuntimeUnavailable(format!(
+                    "local result sync failed ({payload_bytes} bytes): {err}"
+                ))
+            })?;
         Ok(())
     }
 
@@ -815,6 +824,18 @@ impl CloudApiClient {
             .await
     }
 
+    pub async fn billing_request(&self, access_token:&str, method:&str, path:&str, body:Option<serde_json::Value>) -> AroResult<serde_json::Value> {
+        let valid = matches!((method,path),
+            ("GET","/billing/catalog"|"/billing/account"|"/billing/compute-keys") |
+            ("POST","/billing/checkout"|"/billing/checkout/resume"|"/billing/portal"|"/billing/compute-keys") |
+            ("PUT","/billing/limits")) || (method=="DELETE" && path.strip_prefix("/billing/compute-keys/").is_some_and(|id|uuid::Uuid::parse_str(id).is_ok()));
+        if !valid {return Err(aro_core::AroError::Security("unsupported billing operation".into()));}
+        let method=reqwest::Method::from_bytes(method.as_bytes()).map_err(|e|aro_core::AroError::Configuration(e.to_string()))?;
+        let mut request=self.client.request(method,format!("{}{}",self.base_url,path)).bearer_auth(access_token);
+        if let Some(body)=body {request=request.json(&body);}
+        read_response(request.send().await.map_err(map_reqwest)?).await
+    }
+
     pub async fn create_collection_item(
         &self,
         access_token: &str,
@@ -960,6 +981,65 @@ impl CloudApiClient {
             .await
             .map_err(map_reqwest)?;
         read_response(response).await
+    }
+
+    async fn delete_authed<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        access_token: &str,
+    ) -> AroResult<T> {
+        let response = self
+            .client
+            .delete(format!("{}{}", self.base_url, path))
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(map_reqwest)?;
+        read_response(response).await
+    }
+
+    pub async fn ai_cloud_status(&self, access_token: &str) -> AroResult<serde_json::Value> {
+        self.get_authed("/settings/ai-cloud/status", access_token)
+            .await
+    }
+
+    pub async fn ai_cloud_set_consent(
+        &self,
+        access_token: &str,
+        body: &serde_json::Value,
+    ) -> AroResult<serde_json::Value> {
+        self.put_authed("/settings/ai-cloud/consent", access_token, body)
+            .await
+    }
+
+    pub async fn ai_cloud_put_key(
+        &self,
+        access_token: &str,
+        provider_id: &str,
+        body: &serde_json::Value,
+    ) -> AroResult<serde_json::Value> {
+        self.put_authed(
+            &format!("/settings/ai-cloud/keys/{provider_id}"),
+            access_token,
+            body,
+        )
+        .await
+    }
+
+    pub async fn ai_cloud_delete_key(
+        &self,
+        access_token: &str,
+        provider_id: &str,
+    ) -> AroResult<serde_json::Value> {
+        self.delete_authed(
+            &format!("/settings/ai-cloud/keys/{provider_id}"),
+            access_token,
+        )
+        .await
+    }
+
+    pub async fn assistant_status(&self, access_token: &str) -> AroResult<serde_json::Value> {
+        self.get_authed("/assistant/status", access_token).await
     }
 }
 
@@ -1250,6 +1330,8 @@ async fn read_response<T: for<'de> Deserialize<'de>>(response: reqwest::Response
 
     if status == StatusCode::UNAUTHORIZED {
         Err(AroError::Security(message))
+    } else if status == StatusCode::TOO_MANY_REQUESTS {
+        Err(AroError::Unexpected(format!("cloud rate limit: {message}")))
     } else {
         Err(AroError::RuntimeUnavailable(message))
     }

@@ -28,6 +28,7 @@
     MemoryIndexStatus,
     MemoryConfigurationSettings,
     MemoryContextMode,
+    ModelRef,
   } from "../../../lib/types";
   import { makeDefaultMemorySettings } from "../../../lib/api/transport";
 
@@ -78,6 +79,26 @@
 
   export let memorySettings: MemoryConfigurationSettings | undefined = undefined;
   export let onSaveMemorySettings: ((settings: MemoryConfigurationSettings) => void | Promise<void>) | undefined = undefined;
+  export let activeModel: ModelRef | null = null;
+
+  export function resolveAutoCeiling(model?: ModelRef | null): number {
+    if (!model) return 32768;
+    const id = (model.modelId || "").toLowerCase();
+    const provider = (model.providerKind || "").toLowerCase();
+    if (provider === "google" || id.includes("gemini")) {
+      return 1000000;
+    }
+    if (provider === "anthropic" || id.includes("claude")) {
+      return 200000;
+    }
+    if (provider === "openai" || id.includes("gpt-4") || id.includes("o1") || id.includes("o3") || id.includes("o4")) {
+      return 128000;
+    }
+    if (id.includes("qwen") || id.includes("deepseek") || id.includes("mistral") || id.includes("llama-3")) {
+      return 32768;
+    }
+    return 32768;
+  }
 
   let activeSubTab: "semantic" | "episodic" | "config" | "architecture" = "config";
   let activeQuickFilter: "all" | "pinned" | "high_salience" | "frequent" = "all";
@@ -129,7 +150,7 @@
     else if (preset === "8k") ceiling = 8192;
     else if (preset === "4k") ceiling = 4096;
     else if (preset === "1m") ceiling = 1000000;
-    else if (preset === "auto") ceiling = 8192;
+    else if (preset === "auto") ceiling = resolveAutoCeiling(activeModel);
 
     configDraft.totalTokenCeiling = ceiling;
     rebalancePartitions(ceiling);
@@ -138,7 +159,7 @@
 
   function rebalancePartitions(ceiling: number) {
     const total = Math.max(ceiling, 2048);
-    configDraft.systemBudget = Math.min(Math.max(Math.round((total * 10) / 100), 400), 4000);
+    configDraft.systemBudget = Math.min(Math.max(Math.round((total * 10) / 100), 400), 32000);
     configDraft.semanticBudget = Math.max(Math.round((total * 20) / 100), 600);
     configDraft.episodicBudget = Math.max(Math.round((total * 25) / 100), 800);
     configDraft.workingBudget = Math.max(Math.round((total * 30) / 100), 1000);
@@ -608,7 +629,7 @@
                 type="range"
                 class="apple-slider"
                 min="400"
-                max={Math.min(10000, Math.round(configDraft.totalTokenCeiling * 0.3))}
+                max={Math.min(32000, Math.max(4000, Math.round(configDraft.totalTokenCeiling * 0.3)))}
                 step="50"
                 bind:value={configDraft.systemBudget}
                 on:change={handleSaveConfig}

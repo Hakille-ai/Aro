@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 aro-core = { path = "../aro-core" }
 aro-mcp = { path = "../aro-mcp" }
 aro-skills = { path = "../aro-skills" }
@@ -21,7 +22,7 @@ scraper.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "sync", "process"] }
+tokio = { workspace = true, features = ["fs", "io-util", "sync", "process", "time"] }
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true

@@ -41,17 +41,26 @@ export interface InstalledPlugin {
   mcpServers: PluginMcpServerSummary[];
   skills: PluginSkillSummary[];
   auth?: PluginAuthConfig;
+  /** Spec-compliant branding via extensions["com.aro.client"] (logo emoji/file, brandColor) */
+  logo?: string;
+  logoKind?: "emoji" | "file";
+  brandColor?: string;
+  extensions?: Record<string, any>;
 }
 
 export interface PluginAuthConfig {
-  authType: "oauth2" | "api_key" | "pat" | "none";
+  authType?: "oauth2" | "api_key" | "pat" | "none";
+  auth_type?: "oauth2" | "api_key" | "pat" | "none";
   providerName?: string;
   scopes?: string[];
   instructions?: string;
   documentationUrl?: string;
+  documentation_url?: string;
   defaultLabel?: string;
   supportedMethods?: Array<"oauth2" | "api_key" | "pat">;
+  supported_methods?: Array<"oauth2" | "api_key" | "pat">;
   apiKeyPrompt?: string;
+  api_key_prompt?: string;
   multiAccountSupported?: boolean;
 }
 
@@ -63,12 +72,17 @@ export interface PluginAccount {
   email?: string;
   displayName?: string;
   avatarUrl?: string;
+  avatar_url?: string;
   authMethod: "oauth2" | "api_key" | "pat";
+  auth_method?: "oauth2" | "api_key" | "pat";
+  account_identifier?: string;
   isDefault: boolean;
+  is_default?: boolean;
   status: "active" | "expired" | "revoked" | "error";
   createdAt: string;
   updatedAt: string;
   lastUsedAt?: string;
+  last_used_at?: string;
 }
 
 export interface MarketplacePlugin {
@@ -111,6 +125,16 @@ export interface CreateCustomPluginRequest {
   keywords?: string[];
   mcpServers?: Record<string, any>;
   skills?: CustomSkillInput[];
+  /** Branding: emoji glyph and/or #rgb/#rrggbb color, persisted into extensions["com.aro.client"] */
+  logoEmoji?: string;
+  brandColor?: string;
+  /** Raw image upload (data:image/...;base64,..., PNG/JPEG/WebP/SVG ≤2 MiB), stored as logo.<ext> */
+  logoDataUrl?: string;
+}
+
+export interface PluginLogoPayload {
+  mime: string;
+  dataUrl: string;
 }
 
 export async function listInstalledPlugins(): Promise<InstalledPlugin[]> {
@@ -365,6 +389,16 @@ export async function createCustomPlugin(request: CreateCustomPluginRequest): Pr
     return await invoke<InstalledPlugin>("plugins_custom_create", { request });
   }
   return await webFetch<InstalledPlugin>("POST", "/plugins/custom", request);
+}
+
+export async function readPluginLogo(pluginId: string): Promise<PluginLogoPayload | null> {
+  if (isTauri()) {
+    return await invoke<PluginLogoPayload | null>("plugins_read_plugin_logo", { pluginId });
+  }
+  return await webFetch<PluginLogoPayload | null>(
+    "GET",
+    `/plugins/${encodeURIComponent(pluginId)}/logo`
+  );
 }
 
 export async function getPlugin(pluginId: string): Promise<InstalledPlugin> {

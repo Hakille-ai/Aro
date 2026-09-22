@@ -30,6 +30,7 @@
   import Users from "@lucide/svelte/icons/users";
   import Wrench from "@lucide/svelte/icons/wrench";
   import X from "@lucide/svelte/icons/x";
+  import BrandLogo from "../../../lib/BrandLogo.svelte";
   import Zap from "@lucide/svelte/icons/zap";
   import { fade } from "svelte/transition";
   import { requestConfirm } from "../../../lib/confirm";
@@ -536,9 +537,15 @@
   <!-- Hero Showcase Card -->
   <div class="hero-showcase-card">
     <div class="hero-left">
-      <div class="plugin-large-icon">
-        <span>{icon}</span>
-      </div>
+      <BrandLogo
+        pluginId={pluginId}
+        icon={icon}
+        logo={installed?.logo}
+        logoKind={installed?.logoKind}
+        brandColor={installed?.brandColor}
+        size={64}
+        radius={16}
+      />
 
       <div class="hero-info">
         <div class="hero-title-row">

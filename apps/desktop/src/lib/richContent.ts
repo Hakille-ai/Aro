@@ -1,5 +1,19 @@
 // richContent.ts
 // Handles rendering of Chart.js and Mermaid diagrams inside markdown output.
+import { getBrandLogo, brandTileCss, brandTileInner, ensureFileLogo } from "./brandLogos";
+
+function hydrateConnectorFileLogos(root: HTMLElement) {
+  const spots = root.querySelectorAll<HTMLElement>("[data-file-logo]");
+  spots.forEach((spot) => {
+    const pluginId = spot.getAttribute("data-file-logo") || "";
+    if (!pluginId) return;
+    ensureFileLogo(pluginId).then((url) => {
+      if (!url || !spot.isConnected) return;
+      spot.innerHTML =
+        `<img src="${url}" alt="" draggable="false" style="width:100%;height:100%;object-fit:cover;border-radius:8px;" />`;
+    });
+  });
+}
 
 let chartJsPromise: Promise<any> | null = null;
 async function loadChartJs() {
@@ -225,6 +239,54 @@ export async function initRichContent(container: HTMLElement, isDark: boolean) {
       renderedDiv.innerHTML = html;
     } catch (e) {
       console.error("Failed to parse tools json:", e);
+    }
+  });
+
+  // 3b. Process Connectors / Plugins Grid — pro cards nom + icône
+  const connectorsContainers = container.querySelectorAll(".connectors-block-container");
+  connectorsContainers.forEach((el) => {
+    const renderedDiv = el.querySelector(".connectors-grid-rendered") as HTMLElement;
+    if (!renderedDiv || renderedDiv.children.length > 0) return;
+    const rawData = decodeURIComponent(el.getAttribute("data-connectors") || "");
+    try {
+      const data = JSON.parse(rawData);
+      const list = Array.isArray(data)
+        ? data
+        : data.connectors || data.plugins || [];
+      if (!Array.isArray(list)) return;
+      const esc = (s: any) =>
+        String(s ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      let html = `<div class="chat-connectors-panel"><div class="chat-connectors-header"><span>🔌 ${list.length} connecteur${list.length > 1 ? "s" : ""} installé${list.length > 1 ? "s" : ""}</span></div><div class="chat-connectors-grid">`;
+      list.forEach((c: any) => {
+        const name = esc(c.displayName || c.pluginName || c.name || c.connectorId || "Connecteur");
+        const server = esc(c.server || c.connectorId || "");
+        const desc = esc(c.description || "");
+        const version = c.version ? `<span class="chat-conn-version">v${esc(c.version)}</span>` : "";
+        const account = esc(c.activeAccount?.label || c.activeAccount?.email || "");
+        const pluginKey = String(c.connectorId || c.pluginName || c.name || "");
+        const brand = getBrandLogo(pluginKey, {
+          icon: c.icon,
+          logo: c.logo,
+          logoKind: c.logoKind,
+          brandColor: c.brandColor,
+          serverName: c.server,
+        });
+        const tile = brand.filePluginId
+          ? `<span class="chat-conn-icon" data-file-logo="${esc(pluginKey)}" style="${brandTileCss(brand, 38)}">${brandTileInner(brand, 21)}</span>`
+          : `<span class="chat-conn-icon" style="${brandTileCss(brand, 38)}">${brandTileInner(brand, 21)}</span>`;
+        html += `<div class="chat-connector-card">${tile}<div class="chat-conn-meta"><div class="chat-conn-name-row"><span class="chat-conn-name">${name}</span>${version}</div><div class="chat-conn-server">${server}</div>${desc ? `<p class="chat-conn-desc">${desc}</p>` : ""}${account ? `<div class="chat-conn-account">● ${account}</div>` : ""}</div><button class="chat-conn-btn" data-option="${encodeURIComponent("Connecte " + name)}" onclick="window.__sendChatOption ? window.__sendChatOption(this) : null">Connecter</button></div>`;
+      });
+      html += `</div></div>`;
+      renderedDiv.innerHTML = html;
+      // Hydrate uploaded file logos lazily (bytes stay out of the LLM
+      // context; tiles upgrade in place once fetched).
+      hydrateConnectorFileLogos(renderedDiv);
+    } catch (e) {
+      console.error("Failed to parse connectors json:", e);
     }
   });
 

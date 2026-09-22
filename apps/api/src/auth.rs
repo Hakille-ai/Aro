@@ -119,6 +119,21 @@ impl AuthContext {
     pub const fn tenant_context(&self) -> TenantContext {
         self.tenant
     }
+
+    /// Synthetic context for the durable worker loop, which acts on behalf
+    /// of the submitting user without a bearer token. Tenant scoping is
+    /// identical to request auth: every store call still checks
+    /// organization membership.
+    pub fn for_worker(
+        user_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<Self, aro_core::AroError> {
+        Ok(Self {
+            user_id,
+            organization_id,
+            tenant: TenantContext::new(user_id, organization_id)?,
+        })
+    }
 }
 
 impl FromRequestParts<ApiState> for AuthContext {
@@ -152,6 +167,11 @@ impl FromRequestParts<ApiState> for AuthContext {
             .ensure_org_access(claims.sub, organization_id)
             .await
             .map_err(ApiError::from)?;
+
+        if std::env::var("ARO_COMMERCIAL_ENFORCEMENT").as_deref()==Ok("true")
+            && crate::billing::requires_managed_sync(&parts.method,parts.uri.path()) {
+            crate::billing::require_managed_sync(state,tenant).await?;
+        }
 
         Ok(Self {
             user_id: claims.sub,
@@ -278,6 +298,13 @@ impl From<aro_core::AroError> for ApiError {
             aro_core::AroError::RetryableTransaction(message) => {
                 tracing::warn!(error = %message, "database transaction retry budget exhausted");
                 Self::service_unavailable("temporary database contention; retry the request")
+            }
+            aro_core::AroError::RuntimeUnavailable(message) => {
+                // Panne transitoire (Redis, Qdrant, provider…) : 503 avec message
+                // stable pour permettre au client de réessayer, sans fuiter
+                // d'URL ou de détail d'implémentation.
+                tracing::warn!(error = %message, "transient runtime dependency unavailable");
+                Self::service_unavailable("service temporarily unavailable; retry the request")
             }
             other => {
                 // Provider, database, and storage errors may contain implementation details.
@@ -492,7 +519,10 @@ mod tests {
         let error = ApiError::from(aro_core::AroError::RuntimeUnavailable(
             "postgres://username:password@example.invalid/database".to_string(),
         ));
-        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(error.message, "internal server error");
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            error.message,
+            "service temporarily unavailable; retry the request"
+        );
     }
 }

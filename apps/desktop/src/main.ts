@@ -7,6 +7,7 @@ import "./styles/app/04-modals-markdown-chat.css";
 import "./styles/app/05-memory-settings-arena.css";
 import "./styles/app/06-splash-auth-command.css";
 import "./styles/app/07-responsive-agent.css";
+import "./styles/app/08-web-saas.css";
 import "./lib/chatActions";
 import { mount } from "svelte";
 

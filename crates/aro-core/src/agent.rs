@@ -73,6 +73,8 @@ pub struct AgentAction {
     #[serde(default)]
     pub input: Value,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub thinking: Option<String>,
 }
 
 impl AgentAction {
@@ -83,6 +85,7 @@ impl AgentAction {
             tool_id: None,
             input: Value::Null,
             reason: None,
+            thinking: None,
         }
     }
 
@@ -93,6 +96,7 @@ impl AgentAction {
             tool_id: Some(tool_id.into()),
             input,
             reason,
+            thinking: None,
         }
     }
 
@@ -103,7 +107,13 @@ impl AgentAction {
             tool_id: None,
             input: Value::Null,
             reason: Some(reason.into()),
+            thinking: None,
         }
+    }
+
+    pub fn with_thinking(mut self, thinking: impl Into<String>) -> Self {
+        self.thinking = Some(thinking.into());
+        self
     }
 }
 

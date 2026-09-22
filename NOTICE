@@ -1,0 +1,19 @@
+ARO
+
+The default license for original ARO material in this repository is
+PolyForm Noncommercial License 1.0.0. See LICENSE.
+
+Directory exceptions:
+- packages/api-client: Apache License 2.0.
+- packages/contracts: Apache License 2.0.
+
+Existing copyright notices, third-party license texts, model licenses and
+asset-specific terms remain in effect. This notice does not relicense third-party
+material or grant rights that the relevant contributor does not possess.
+
+ARO names, logos and branding are not licensed for presenting another product
+as an official ARO service. Descriptive references remain subject to applicable
+law; this notice does not claim registration of any trademark.
+
+Commercial permissions for the core must come from its authorized rights holder
+under a separate agreement. See legal/README.md.

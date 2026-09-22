@@ -6,7 +6,9 @@ use aro_core::{
     AroResult, AssistantMode, AttachmentMode, ChatMessage, ContextPack, Conversation, Device,
     FileObject, FileScanStatus, FileStatus, FileUploadSession, Folder, InferenceMode,
     InvitationDeliveryStatus, LongTermMemory, Membership, MembershipRole, MembershipStatus,
-    MessageAttachment, Organization, OrganizationInvitation, OrganizationInvitationStatus,
+    MessageAttachment, NotificationFilter, NotificationItem, NotificationKind,
+    NotificationPriority, NotificationSource, NotificationStatus, Organization,
+    OrganizationInvitation, OrganizationInvitationStatus,
     OrganizationMember, PermissionCommandApproval, PermissionProfile, Project, PublicApiKey,
     SyncHealth, SyncStatus, User, UserPreferences, MEMORY_STATUS_APPROVED,
 };
@@ -19,11 +21,13 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 
 mod agent_jobs;
+mod billing;
 mod governance;
 mod integrations_v3;
 mod tool_registry;
 
 pub use agent_jobs::*;
+pub use billing::*;
 pub use integrations_v3::*;
 pub use tool_registry::*;
 
@@ -150,6 +154,30 @@ pub struct StoredFileObject {
     pub storage_backend: String,
     pub bucket: Option<String>,
     pub object_key: String,
+}
+
+/// Sovereign-AI cloud consent for one organization. Default-DENY: without an
+/// explicit admin opt-in row with `enabled = true`, no conversation content
+/// ever leaves the self-hosted server. Contains no secrets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgAiCloudConsent {
+    pub enabled: bool,
+    pub provider_ids: Vec<String>,
+    pub data_residency: Option<String>,
+    pub accepted_by: Option<Uuid>,
+    pub accepted_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Non-secret presence flag for one server-side provider key. The key itself
+/// is only ever readable through `get_org_provider_key` (generation path).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgProviderKeyStatus {
+    pub provider_id: String,
+    pub configured: bool,
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// A file scan job claimed by exactly one worker. The lease token is required for every
@@ -2405,6 +2433,9 @@ impl AroStore {
             )
         })?;
         upsert_default_preferences(&mut tx, user_id).await?;
+        if std::env::var("ARO_COMMERCIAL_ENFORCEMENT").as_deref() == Ok("true") {
+            Self::billing_check_seat(&mut tx, organization_id).await?;
+        }
         let active = enum_to_string(&MembershipStatus::Active)?;
         let membership_id: Uuid = sqlx::query_scalar(
             r#"
@@ -2956,12 +2987,16 @@ impl AroStore {
 
     /// Conversations are private to their creator until an explicit share/ACL
     /// model exists. Organization membership alone is not sufficient access.
+    /// Runs in its own tenant transaction so the RLS-gated `conversations`
+    /// read sees the caller's session context (fail-closed otherwise).
     async fn ensure_conversation_owner(
         &self,
         user_id: Uuid,
         organization_id: Uuid,
         conversation_id: Uuid,
     ) -> AroResult<()> {
+        let context = TenantContext::new(user_id, organization_id)?;
+        let mut tx = self.begin_tenant_tx(context).await?;
         let exists: bool = sqlx::query_scalar(
             r#"
             SELECT EXISTS (
@@ -2977,9 +3012,10 @@ impl AroStore {
         .bind(conversation_id)
         .bind(organization_id)
         .bind(user_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
         if exists {
             Ok(())
         } else {
@@ -4261,6 +4297,206 @@ impl AroStore {
         Ok(sanitized)
     }
 
+    pub async fn get_org_ai_cloud_consent(
+        &self,
+        organization_id: Uuid,
+    ) -> AroResult<OrgAiCloudConsent> {
+        let row = sqlx::query(
+            r#"
+            SELECT enabled, provider_ids, data_residency, accepted_by, accepted_at, updated_at
+            FROM org_ai_cloud_consent
+            WHERE organization_id = $1
+            "#,
+        )
+        .bind(organization_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        match row {
+            Some(row) => {
+                let provider_ids: Value = row.get("provider_ids");
+                Ok(OrgAiCloudConsent {
+                    enabled: row.get("enabled"),
+                    provider_ids: serde_json::from_value(provider_ids).unwrap_or_default(),
+                    data_residency: row.get("data_residency"),
+                    accepted_by: row.get("accepted_by"),
+                    accepted_at: row.get("accepted_at"),
+                    updated_at: row.get("updated_at"),
+                })
+            }
+            None => Ok(OrgAiCloudConsent {
+                enabled: false,
+                provider_ids: Vec::new(),
+                data_residency: None,
+                accepted_by: None,
+                accepted_at: None,
+                updated_at: Utc::now(),
+            }),
+        }
+    }
+
+    pub async fn set_org_ai_cloud_consent(
+        &self,
+        organization_id: Uuid,
+        enabled: bool,
+        provider_ids: &[String],
+        data_residency: Option<&str>,
+        accepted_by: Uuid,
+    ) -> AroResult<OrgAiCloudConsent> {
+        if provider_ids.len() > 32 {
+            return Err(AroError::Memory(
+                "at most 32 cloud providers can be consented".to_string(),
+            ));
+        }
+        for id in provider_ids {
+            validate_provider_key_id(id)?;
+        }
+        let residency = data_residency
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.chars().take(160).collect::<String>());
+        let ids =
+            serde_json::to_value(provider_ids).map_err(|err| AroError::Memory(err.to_string()))?;
+        sqlx::query(
+            r#"
+            INSERT INTO org_ai_cloud_consent
+                (organization_id, enabled, provider_ids, data_residency, accepted_by, accepted_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, CASE WHEN $2 THEN now() ELSE NULL END, now())
+            ON CONFLICT (organization_id)
+            DO UPDATE SET enabled = excluded.enabled,
+                          provider_ids = excluded.provider_ids,
+                          data_residency = excluded.data_residency,
+                          accepted_by = excluded.accepted_by,
+                          accepted_at = excluded.accepted_at,
+                          updated_at = now()
+            "#,
+        )
+        .bind(organization_id)
+        .bind(enabled)
+        .bind(ids)
+        .bind(residency)
+        .bind(accepted_by)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        self.get_org_ai_cloud_consent(organization_id).await
+    }
+
+    /// Stores (or replaces) one server-side provider key, encrypted at rest
+    /// with the server secrets key. Callers must be org admins (enforced in
+    /// the API layer, like other org secrets).
+    pub async fn set_org_provider_key(
+        &self,
+        organization_id: Uuid,
+        provider_id: &str,
+        api_key: &str,
+        secrets_key: &str,
+    ) -> AroResult<()> {
+        validate_provider_key_id(provider_id)?;
+        let key = api_key.trim();
+        if key.is_empty() || key.len() > 2048 {
+            return Err(AroError::Memory(
+                "provider API key must be 1-2048 characters".to_string(),
+            ));
+        }
+        require_secrets_key(secrets_key)?;
+        sqlx::query(
+            r#"
+            INSERT INTO org_provider_keys (organization_id, provider_id, enc_key, updated_at)
+            VALUES ($1, $2, pgp_sym_encrypt($3::text, $4), now())
+            ON CONFLICT (organization_id, provider_id)
+            DO UPDATE SET enc_key = excluded.enc_key, updated_at = now()
+            "#,
+        )
+        .bind(organization_id)
+        .bind(provider_id)
+        .bind(key)
+        .bind(secrets_key)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    pub async fn delete_org_provider_key(
+        &self,
+        organization_id: Uuid,
+        provider_id: &str,
+    ) -> AroResult<bool> {
+        validate_provider_key_id(provider_id)?;
+        let result = sqlx::query(
+            r#"
+            DELETE FROM org_provider_keys
+            WHERE organization_id = $1 AND provider_id = $2
+            "#,
+        )
+        .bind(organization_id)
+        .bind(provider_id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Decrypts one server-side provider key for the generation path ONLY.
+    /// Never logs, never returns the key to API clients.
+    pub async fn get_org_provider_key(
+        &self,
+        organization_id: Uuid,
+        provider_id: &str,
+        secrets_key: &str,
+    ) -> AroResult<Option<String>> {
+        validate_provider_key_id(provider_id)?;
+        require_secrets_key(secrets_key)?;
+        let row = sqlx::query(
+            r#"
+            SELECT pgp_sym_decrypt(enc_key, $3)::text AS api_key
+            FROM org_provider_keys
+            WHERE organization_id = $1 AND provider_id = $2
+            "#,
+        )
+        .bind(organization_id)
+        .bind(provider_id)
+        .bind(secrets_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        match row {
+            Some(row) => {
+                let key: Option<String> = row.get("api_key");
+                Ok(key.filter(|value| !value.trim().is_empty()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Non-secret presence flags, safe to expose to org members and clients.
+    pub async fn list_org_provider_key_status(
+        &self,
+        organization_id: Uuid,
+    ) -> AroResult<Vec<OrgProviderKeyStatus>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT provider_id, updated_at
+            FROM org_provider_keys
+            WHERE organization_id = $1
+            ORDER BY provider_id
+            "#,
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| OrgProviderKeyStatus {
+                provider_id: row.get("provider_id"),
+                configured: true,
+                updated_at: row.get("updated_at"),
+            })
+            .collect())
+    }
+
     pub async fn get_preferences(&self, user_id: Uuid) -> AroResult<UserPreferences> {
         let row = sqlx::query(
             r#"
@@ -5056,6 +5292,213 @@ impl AroStore {
         Ok(res.rows_affected() > 0)
     }
 
+    pub async fn create_notification(
+        &self,
+        context: TenantContext,
+        notif: &NotificationItem,
+    ) -> AroResult<NotificationItem> {
+        let mut tx = self.begin_tenant_tx(context).await?;
+        let notif_uuid = Uuid::parse_str(&notif.id).unwrap_or_else(|_| Uuid::new_v4());
+        let user_id = notif.user_id.or(Some(context.actor_id()));
+        let row = sqlx::query(
+            r#"
+            INSERT INTO notifications (
+                id, organization_id, user_id, title, body,
+                kind, priority, status, source, action_url, metadata,
+                created_at, read_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            RETURNING id, organization_id, user_id, title, body, kind, priority, status, source, action_url, metadata, created_at, read_at
+            "#,
+        )
+        .bind(notif_uuid)
+        .bind(context.organization_id())
+        .bind(user_id)
+        .bind(&notif.title)
+        .bind(&notif.body)
+        .bind(notif.kind.as_str())
+        .bind(notif.priority.as_str())
+        .bind(notif.status.as_str())
+        .bind(notif.source.as_str())
+        .bind(&notif.action_url)
+        .bind(&notif.metadata)
+        .bind(notif.created_at)
+        .bind(notif.read_at)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        let saved = map_notification_row(row)?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(saved)
+    }
+
+    pub async fn list_notifications(
+        &self,
+        context: TenantContext,
+        filter: &NotificationFilter,
+    ) -> AroResult<Vec<NotificationItem>> {
+        let mut tx = self.begin_tenant_tx(context).await?;
+        let status_str = filter.status.map(|s| s.as_str().to_string());
+        let kind_str = filter.kind.map(|k| k.as_str().to_string());
+        let source_str = filter.source.map(|s| s.as_str().to_string());
+        let search_pattern = filter.search.as_ref().map(|s| format!("%{}%", s.trim()));
+        let limit = filter.limit.unwrap_or(50).min(200) as i64;
+        let offset = filter.offset.unwrap_or(0) as i64;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT id, organization_id, user_id, title, body, kind, priority, status, source, action_url, metadata, created_at, read_at
+            FROM notifications
+            WHERE organization_id = $1
+              AND (user_id IS NULL OR user_id = $2)
+              AND ($3::text IS NULL OR status = $3)
+              AND ($4::text IS NULL OR kind = $4)
+              AND ($5::text IS NULL OR source = $5)
+              AND ($6::text IS NULL OR title ILIKE $6 OR body ILIKE $6)
+            ORDER BY created_at DESC
+            LIMIT $7 OFFSET $8
+            "#,
+        )
+        .bind(context.organization_id())
+        .bind(context.actor_id())
+        .bind(status_str)
+        .bind(kind_str)
+        .bind(source_str)
+        .bind(search_pattern)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        let notifs = rows.into_iter().map(map_notification_row).collect::<AroResult<Vec<_>>>()?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(notifs)
+    }
+
+    pub async fn get_unread_notification_count(
+        &self,
+        context: TenantContext,
+    ) -> AroResult<u64> {
+        let mut tx = self.begin_tenant_tx(context).await?;
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM notifications
+            WHERE organization_id = $1
+              AND (user_id IS NULL OR user_id = $2)
+              AND status = 'unread'
+            "#,
+        )
+        .bind(context.organization_id())
+        .bind(context.actor_id())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(count.max(0) as u64)
+    }
+
+    pub async fn mark_notification_as_read(
+        &self,
+        context: TenantContext,
+        id: Uuid,
+    ) -> AroResult<bool> {
+        let mut tx = self.begin_tenant_tx(context).await?;
+        let result = sqlx::query(
+            r#"
+            UPDATE notifications
+            SET status = 'read', read_at = now()
+            WHERE id = $1
+              AND organization_id = $2
+              AND (user_id IS NULL OR user_id = $3)
+              AND status != 'read'
+            "#,
+        )
+        .bind(id)
+        .bind(context.organization_id())
+        .bind(context.actor_id())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn mark_all_notifications_as_read(
+        &self,
+        context: TenantContext,
+    ) -> AroResult<u64> {
+        let mut tx = self.begin_tenant_tx(context).await?;
+        let result = sqlx::query(
+            r#"
+            UPDATE notifications
+            SET status = 'read', read_at = now()
+            WHERE organization_id = $1
+              AND (user_id IS NULL OR user_id = $2)
+              AND status = 'unread'
+            "#,
+        )
+        .bind(context.organization_id())
+        .bind(context.actor_id())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn delete_notification(
+        &self,
+        context: TenantContext,
+        id: Uuid,
+    ) -> AroResult<bool> {
+        let mut tx = self.begin_tenant_tx(context).await?;
+        let result = sqlx::query(
+            r#"
+            DELETE FROM notifications
+            WHERE id = $1
+              AND organization_id = $2
+              AND (user_id IS NULL OR user_id = $3)
+            "#,
+        )
+        .bind(id)
+        .bind(context.organization_id())
+        .bind(context.actor_id())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn clear_all_notifications(
+        &self,
+        context: TenantContext,
+    ) -> AroResult<u64> {
+        let mut tx = self.begin_tenant_tx(context).await?;
+        let result = sqlx::query(
+            r#"
+            DELETE FROM notifications
+            WHERE organization_id = $1
+              AND (user_id IS NULL OR user_id = $2)
+            "#,
+        )
+        .bind(context.organization_id())
+        .bind(context.actor_id())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn add_message(
         &self,
         context: TenantContext,
@@ -5065,12 +5508,13 @@ impl AroStore {
         let mut tx = self.begin_tenant_tx(context).await?;
         ensure_conversation_owner_in_tx(&mut tx, context, message.conversation_id).await?;
         let role = enum_to_string(&message.role)?;
+        let steps_json = message_steps_json(message)?;
         let row = sqlx::query(
             r#"
             INSERT INTO messages
-              (id, organization_id, conversation_id, role, content, created_at, token_estimate, model_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING id, conversation_id, role, content, created_at, token_estimate, model_id
+              (id, organization_id, conversation_id, role, content, created_at, token_estimate, model_id, steps)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING id, conversation_id, role, content, created_at, token_estimate, model_id, steps
             "#,
         )
         .bind(message.id)
@@ -5081,6 +5525,7 @@ impl AroStore {
         .bind(message.created_at)
         .bind(message.token_estimate.map(|value| value as i32))
         .bind(&message.model_id)
+        .bind(steps_json)
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx)?;
@@ -5135,7 +5580,7 @@ impl AroStore {
               AND c.owner_user_id = $3
               AND m.deleted_at IS NULL
               AND c.deleted_at IS NULL
-            RETURNING m.id, m.conversation_id, m.role, m.content, m.created_at, m.token_estimate, m.model_id
+            RETURNING m.id, m.conversation_id, m.role, m.content, m.created_at, m.token_estimate, m.model_id, m.steps
             "#,
         )
         .bind(message_id)
@@ -5168,7 +5613,7 @@ impl AroStore {
         }
         let rows = sqlx::query(
             r#"
-            SELECT m.id, m.conversation_id, m.role, m.content, m.created_at, m.token_estimate, m.model_id
+            SELECT m.id, m.conversation_id, m.role, m.content, m.created_at, m.token_estimate, m.model_id, m.steps
             FROM messages m
             JOIN conversations c ON c.organization_id = m.organization_id AND c.id = m.conversation_id
             WHERE m.organization_id = $1
@@ -7322,6 +7767,10 @@ impl AroStore {
         item_id: Uuid,
     ) -> AroResult<Option<Value>> {
         self.ensure_org_access(user_id, organization_id).await?;
+        // Tenant transaction (not bare pool): RLS-gated tables resolve to
+        // empty without session context, so every read carries it.
+        let context = TenantContext::new(user_id, organization_id)?;
+        let mut tx = self.begin_tenant_tx(context).await?;
         let table = collection.table_name();
         let public_expr = collection.public_json_expr("t");
         let owner_clause = collection.owner_clause("t", 3);
@@ -7334,11 +7783,13 @@ impl AroStore {
         if collection.is_user_owned() {
             query = query.bind(user_id);
         }
-        query
-            .fetch_optional(&self.pool)
+        let row = query
+            .fetch_optional(&mut *tx)
             .await
             .map(|row| row.map(|row| row.get("data")))
-            .map_err(map_sqlx)
+            .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(row)
     }
 
     pub async fn delete_collection_item(
@@ -7350,6 +7801,8 @@ impl AroStore {
     ) -> AroResult<()> {
         self.ensure_collection_write_access(user_id, organization_id, collection)
             .await?;
+        let context = TenantContext::new(user_id, organization_id)?;
+        let mut tx = self.begin_tenant_tx(context).await?;
         let table = collection.table_name();
         let owner_clause = collection.owner_clause("", 3);
         if collection.has_soft_delete() {
@@ -7360,7 +7813,7 @@ impl AroStore {
             if collection.is_user_owned() {
                 query = query.bind(user_id);
             }
-            let result = query.execute(&self.pool).await.map_err(map_sqlx)?;
+            let result = query.execute(&mut *tx).await.map_err(map_sqlx)?;
             if result.rows_affected() == 0 {
                 return Err(AroError::Memory(format!(
                     "{} item not found",
@@ -7375,7 +7828,7 @@ impl AroStore {
             if collection.is_user_owned() {
                 query = query.bind(user_id);
             }
-            let result = query.execute(&self.pool).await.map_err(map_sqlx)?;
+            let result = query.execute(&mut *tx).await.map_err(map_sqlx)?;
             if result.rows_affected() == 0 {
                 return Err(AroError::Memory(format!(
                     "{} item not found",
@@ -7383,6 +7836,7 @@ impl AroStore {
                 )));
             }
         }
+        tx.commit().await.map_err(map_sqlx)?;
         let action = format!("{}.deleted", collection.slug());
         self.emit_domain_event(
             organization_id,
@@ -7573,8 +8027,8 @@ impl AroStore {
         Ok(())
     }
 
-    async fn ensure_memory_sources_belong_to_owner(
-        &self,
+    async fn ensure_memory_sources_belong_to_owner_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
         organization_id: Uuid,
         owner_user_id: Uuid,
         source_conversation_id: Option<Uuid>,
@@ -7596,7 +8050,7 @@ impl AroStore {
             .bind(organization_id)
             .bind(owner_user_id)
             .bind(conversation_id)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut **tx)
             .await
             .map_err(map_sqlx)?;
             if !exists {
@@ -7629,7 +8083,7 @@ impl AroStore {
         .bind(owner_user_id)
         .bind(source_message_ids)
         .bind(source_conversation_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut **tx)
         .await
         .map_err(map_sqlx)?;
         if matching != source_message_ids.len() as i64 {
@@ -7654,7 +8108,10 @@ impl AroStore {
             optional_uuid_vec(&payload, &["sourceMessageIds", "source_message_ids"])
                 .map(dedupe_uuids)
                 .unwrap_or_default();
-        self.ensure_memory_sources_belong_to_owner(
+        let context = TenantContext::new(owner_user_id, organization_id)?;
+        let mut tx = self.begin_tenant_tx(context).await?;
+        Self::ensure_memory_sources_belong_to_owner_in_tx(
+            &mut tx,
             organization_id,
             owner_user_id,
             source_conversation_id,
@@ -7687,9 +8144,10 @@ impl AroStore {
         .bind(source_message_ids)
         .bind(bool_or(&payload, &["pinned"], false))
         .bind(optional_f32(&payload, &["salience"]).unwrap_or(0.5))
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
         Ok(row.get("data"))
     }
 
@@ -7707,7 +8165,10 @@ impl AroStore {
         let source_message_ids =
             optional_uuid_vec(&payload, &["sourceMessageIds", "source_message_ids"])
                 .map(dedupe_uuids);
-        self.ensure_memory_sources_belong_to_owner(
+        let context = TenantContext::new(owner_user_id, organization_id)?;
+        let mut tx = self.begin_tenant_tx(context).await?;
+        Self::ensure_memory_sources_belong_to_owner_in_tx(
+            &mut tx,
             organization_id,
             owner_user_id,
             source_conversation_id,
@@ -7747,9 +8208,10 @@ impl AroStore {
         .bind(source_message_ids)
         .bind(optional_bool(&payload, &["pinned"]))
         .bind(optional_f32(&payload, &["salience"]))
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
         row.map(|row| row.get("data"))
             .ok_or_else(|| AroError::Memory("memory not found".to_string()))
     }
@@ -7760,6 +8222,8 @@ impl AroStore {
         organization_id: Uuid,
     ) -> AroResult<Vec<LongTermMemory>> {
         self.ensure_org_access(user_id, organization_id).await?;
+        let context = TenantContext::new(user_id, organization_id)?;
+        let mut tx = self.begin_tenant_tx(context).await?;
         let sql = memory_select_sql(
             "WHERE organization_id = $1 AND owner_user_id = $2 AND deleted_at IS NULL
              ORDER BY pinned DESC, updated_at DESC",
@@ -7767,9 +8231,10 @@ impl AroStore {
         let rows = sqlx::query(&sql)
             .bind(organization_id)
             .bind(user_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *tx)
             .await
             .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
         rows.into_iter().map(map_memory_row).collect()
     }
 
@@ -7783,6 +8248,8 @@ impl AroStore {
         self.ensure_org_access(user_id, organization_id).await?;
         let limit = limit.clamp(1, 50);
         let trimmed = query.trim();
+        let context = TenantContext::new(user_id, organization_id)?;
+        let mut tx = self.begin_tenant_tx(context).await?;
         if trimmed.is_empty() {
             let sql = memory_select_sql(
                 "WHERE organization_id = $1
@@ -7796,9 +8263,10 @@ impl AroStore {
                 .bind(organization_id)
                 .bind(user_id)
                 .bind(limit)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(map_sqlx)?;
+            tx.commit().await.map_err(map_sqlx)?;
             return rows.into_iter().map(map_memory_row).collect();
         }
 
@@ -7819,9 +8287,10 @@ impl AroStore {
             .bind(user_id)
             .bind(trimmed)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *tx)
             .await
             .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
         rows.into_iter().map(map_memory_row).collect()
     }
 
@@ -7835,6 +8304,8 @@ impl AroStore {
         if memory_ids.is_empty() {
             return Ok(());
         }
+        let context = TenantContext::new(user_id, organization_id)?;
+        let mut tx = self.begin_tenant_tx(context).await?;
         sqlx::query(
             r#"
             UPDATE memories
@@ -7849,9 +8320,10 @@ impl AroStore {
         .bind(organization_id)
         .bind(user_id)
         .bind(memory_ids)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
         Ok(())
     }
 
@@ -9932,6 +10404,9 @@ async fn activate_locked_organization_invitation(
     actor_user_id: Uuid,
     invitation: &LockedExistingOrganizationInvitation,
 ) -> AroResult<Uuid> {
+    if std::env::var("ARO_COMMERCIAL_ENFORCEMENT").as_deref() == Ok("true") {
+        AroStore::billing_check_seat(tx, invitation.organization_id).await?;
+    }
     let active = enum_to_string(&MembershipStatus::Active)?;
     let membership_id = if let Some(membership_id) = invitation.membership_id {
         let locked_membership = sqlx::query(
@@ -10136,22 +10611,35 @@ async fn ensure_conversation_owner_in_tx(
     }
 }
 
+/// Serialize message agent traces for the `messages.steps` JSONB column.
+/// `None` (no trace) binds as SQL NULL; every step is preserved verbatim.
+fn message_steps_json(message: &ChatMessage) -> AroResult<Option<serde_json::Value>> {
+    message
+        .steps
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|err| AroError::Memory(err.to_string()))
+}
+
 async fn insert_message_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
     message: &ChatMessage,
 ) -> AroResult<()> {
     let role = enum_to_string(&message.role)?;
+    let steps_json = message_steps_json(message)?;
     let result = sqlx::query(
         r#"
         INSERT INTO messages
-          (id, organization_id, conversation_id, role, content, created_at, token_estimate, model_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          (id, organization_id, conversation_id, role, content, created_at, token_estimate, model_id, steps)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (id)
         DO UPDATE SET
           content = excluded.content,
           token_estimate = excluded.token_estimate,
-          model_id = excluded.model_id
+          model_id = excluded.model_id,
+          steps = excluded.steps
         WHERE messages.organization_id = excluded.organization_id
           AND messages.conversation_id = excluded.conversation_id
         "#,
@@ -10164,6 +10652,7 @@ async fn insert_message_in_tx(
     .bind(message.created_at)
     .bind(message.token_estimate.map(|value| value as i32))
     .bind(&message.model_id)
+    .bind(steps_json)
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx)?;
@@ -10331,6 +10820,7 @@ fn map_conversation_row(row: sqlx::postgres::PgRow) -> AroResult<Conversation> {
 }
 
 fn map_project_row(row: sqlx::postgres::PgRow) -> AroResult<Project> {
+    let org_id: Option<Uuid> = row.try_get("organization_id").ok();
     Ok(Project {
         id: row.get("id"),
         name: row.get("name"),
@@ -10341,10 +10831,12 @@ fn map_project_row(row: sqlx::postgres::PgRow) -> AroResult<Project> {
         icon: row.get("icon"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+        organization_id: org_id.map(|u| u.to_string()),
     })
 }
 
 fn map_folder_row(row: sqlx::postgres::PgRow) -> AroResult<Folder> {
+    let org_id: Option<Uuid> = row.try_get("organization_id").ok();
     Ok(Folder {
         id: row.get("id"),
         project_id: row.try_get("project_id").ok(),
@@ -10354,10 +10846,79 @@ fn map_folder_row(row: sqlx::postgres::PgRow) -> AroResult<Folder> {
         icon: row.get("icon"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+        organization_id: org_id.map(|u| u.to_string()),
+    })
+}
+
+fn map_notification_row(row: sqlx::postgres::PgRow) -> AroResult<NotificationItem> {
+    let id_uuid: Uuid = row.get("id");
+    let org_id: Uuid = row.get("organization_id");
+    let user_id: Option<Uuid> = row.try_get("user_id").ok();
+    let title: String = row.get("title");
+    let body: String = row.get("body");
+    let kind_str: String = row.get("kind");
+    let priority_str: String = row.get("priority");
+    let status_str: String = row.get("status");
+    let source_str: String = row.get("source");
+    let action_url: Option<String> = row.try_get("action_url").ok();
+    let metadata_val: Option<serde_json::Value> = row.try_get("metadata").ok();
+    let created_at: DateTime<Utc> = row.get("created_at");
+    let read_at: Option<DateTime<Utc>> = row.try_get("read_at").ok();
+
+    let kind = match kind_str.as_str() {
+        "success" => NotificationKind::Success,
+        "warning" => NotificationKind::Warning,
+        "error" => NotificationKind::Error,
+        "agent-completion" | "agent_completion" => NotificationKind::AgentCompletion,
+        "routine" => NotificationKind::Routine,
+        "security" => NotificationKind::Security,
+        _ => NotificationKind::Info,
+    };
+
+    let priority = match priority_str.as_str() {
+        "low" => NotificationPriority::Low,
+        "high" => NotificationPriority::High,
+        "urgent" => NotificationPriority::Urgent,
+        _ => NotificationPriority::Normal,
+    };
+
+    let status = match status_str.as_str() {
+        "read" => NotificationStatus::Read,
+        "archived" => NotificationStatus::Archived,
+        _ => NotificationStatus::Unread,
+    };
+
+    let source = match source_str.as_str() {
+        "agent" => NotificationSource::Agent,
+        "routine" => NotificationSource::Routine,
+        "cloud" => NotificationSource::Cloud,
+        _ => NotificationSource::System,
+    };
+
+    Ok(NotificationItem {
+        id: id_uuid.to_string(),
+        organization_id: Some(org_id),
+        user_id,
+        title,
+        body,
+        kind,
+        priority,
+        status,
+        source,
+        action_url,
+        metadata: metadata_val,
+        created_at,
+        read_at,
     })
 }
 
 fn map_message_row(row: sqlx::postgres::PgRow) -> AroResult<ChatMessage> {
+    let steps: Option<Vec<AgentStep>> = row
+        .get::<Option<serde_json::Value>, _>("steps")
+        .map(|value| {
+            serde_json::from_value(value).map_err(|err| AroError::Memory(err.to_string()))
+        })
+        .transpose()?;
     Ok(ChatMessage {
         id: row.get("id"),
         conversation_id: row.get("conversation_id"),
@@ -10370,7 +10931,7 @@ fn map_message_row(row: sqlx::postgres::PgRow) -> AroResult<ChatMessage> {
         model_id: row.get("model_id"),
         attachments: Vec::new(),
         agent_run_id: None,
-        steps: None,
+        steps,
     })
 }
 
@@ -10710,6 +11271,34 @@ fn string_or(payload: &Value, keys: &[&str], fallback: &str) -> String {
     optional_string(payload, keys).unwrap_or_else(|| fallback.to_string())
 }
 
+/// Provider ids double as SQL keys and directory-adjacent identifiers:
+/// lowercase slugs only, so crafted ids can never escape their scope.
+fn validate_provider_key_id(provider_id: &str) -> AroResult<()> {
+    let valid = !provider_id.is_empty()
+        && provider_id.len() <= 64
+        && provider_id
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-');
+    if valid {
+        Ok(())
+    } else {
+        Err(AroError::Memory(
+            "provider id must be 1-64 chars of [a-z0-9-]".to_string(),
+        ))
+    }
+}
+
+/// The server secrets key protects every encrypted secret at rest; refuse to
+/// touch ciphertext without a real one (same bar as invitation tokens).
+fn require_secrets_key(secrets_key: &str) -> AroResult<()> {
+    if secrets_key.trim().len() < 32 {
+        return Err(AroError::Configuration(
+            "server secrets key is not configured".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn optional_bool(payload: &Value, keys: &[&str]) -> Option<bool> {
     value_for(payload, keys).and_then(|value| match value {
         Value::Bool(value) => Some(*value),
@@ -10935,7 +11524,9 @@ fn compile_prompt(identity: &str, rules: &str, formatting: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aro_core::{AgentContextItem, AgentRun, AgentStep, AssistantMode, MessageRole};
+    use aro_core::{
+        AgentContextItem, AgentRun, AgentStep, AgentStepKind, AssistantMode, MessageRole,
+    };
 
     const TEST_SECRETS_KEY: &str = "aro-test-secrets-key-at-least-32-bytes-long";
 
@@ -13401,6 +13992,65 @@ mod tests {
                 .await,
             "source conversation",
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_result_roundtrip_persists_message_steps() -> AroResult<()> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let principal = create_test_principal(&store, "message-steps").await?;
+        let context = tenant_context(principal.user.id, principal.active_organization.id);
+        let conversation = store
+            .create_conversation(context, "Steps sync".to_string(), AssistantMode::Chat)
+            .await?;
+
+        let run_id = Uuid::new_v4();
+        let step = AgentStep::completed(
+            run_id,
+            0,
+            AgentStepKind::Tool,
+            "Listed 10 connector(s) from installed plugins",
+            serde_json::json!({}),
+            serde_json::json!({ "count": 10 }),
+        );
+        let user = ChatMessage::new(
+            conversation.id,
+            MessageRole::User,
+            "liste mes connecteurs",
+        );
+        let mut assistant = ChatMessage::new(
+            conversation.id,
+            MessageRole::Assistant,
+            "voici tes 10 connecteurs",
+        );
+        assistant.steps = Some(vec![step]);
+        store
+            .store_local_result(context, conversation.clone(), user, assistant)
+            .await?;
+
+        let listed = store.list_messages(context, conversation.id).await?;
+        assert_eq!(listed.len(), 2);
+        let back = listed
+            .iter()
+            .find(|m| m.content == "voici tes 10 connecteurs")
+            .expect("assistant message");
+        let steps = back.steps.as_ref().expect("steps persisted");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].title,
+            "Listed 10 connector(s) from installed plugins"
+        );
+        assert_eq!(steps[0].run_id, run_id);
+
+        // Plain messages keep NULL steps (no trace fabricated).
+        let plain = listed
+            .iter()
+            .find(|m| m.content == "liste mes connecteurs")
+            .expect("user message");
+        assert!(plain.steps.is_none());
 
         Ok(())
     }

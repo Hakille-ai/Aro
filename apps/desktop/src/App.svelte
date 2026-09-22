@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
+  import { get } from "svelte/store";
   import { fade, fly } from "svelte/transition";
 
   // Spotlight variables & checks
@@ -94,31 +95,43 @@
 
       spotlightConversationId = response.conversation.id;
 
-      // Met à jour les deux bulles temporaires (l'id de conversation réel
-      // n'est connu qu'après réponse, notamment pour un nouveau fil).
-      spotlightMessages = spotlightMessages.map(msg => {
-        if (msg.id === assistantMsgId) {
-          return {
-            ...response.assistantMessage,
-            content: response.assistantMessage.content,
-            steps: msg.steps
-          };
-        }
-        if (msg.id === userMsg.id) {
-          return {
-            ...response.userMessage,
-            content: payloadContent,
-          };
-        }
-        return msg;
-      });
+      const spotlightAssistant = response.assistantMessage;
+      if (response.unavailable || !spotlightAssistant) {
+        spotlightMessages = spotlightMessages.map(msg =>
+          msg.id === assistantMsgId
+            ? { ...msg, isGenerating: false }
+            : msg,
+        );
+        errorMessage = currentLanguage === "fr"
+          ? "IA indisponible sur ce serveur. Vérifiez les modèles disponibles ou réessayez plus tard."
+          : "AI unavailable on this server. Check available models or retry later.";
+      } else {
+        // Met à jour les deux bulles temporaires (l'id de conversation réel
+        // n'est connu qu'après réponse, notamment pour un nouveau fil).
+        spotlightMessages = spotlightMessages.map(msg => {
+          if (msg.id === assistantMsgId) {
+            return {
+              ...spotlightAssistant,
+              content: spotlightAssistant.content,
+              steps: msg.steps
+            };
+          }
+          if (msg.id === userMsg.id) {
+            return {
+              ...response.userMessage,
+              content: payloadContent,
+            };
+          }
+          return msg;
+        });
 
-      if (response.agentRunId) {
-        await refreshAgentRuns(response.agentRunId);
-      }
+        if (response.agentRunId) {
+          await refreshAgentRuns(response.agentRunId);
+        }
 
-      if (settings?.speakResponses) {
-        await speak(response.assistantMessage.content);
+        if (settings?.speakResponses) {
+          await speak(spotlightAssistant.content);
+        }
       }
     } catch (err) {
       console.error("Spotlight message send failed", err);
@@ -308,6 +321,9 @@
   import MoreHorizontal from "@lucide/svelte/icons/more-horizontal";
   import Minus from "@lucide/svelte/icons/minus";
   import Plus from "@lucide/svelte/icons/plus";
+  import PanelLeftOpen from "@lucide/svelte/icons/panel-left-open";
+  import PanelLeftClose from "@lucide/svelte/icons/panel-left-close";
+  import PanelRight from "@lucide/svelte/icons/panel-right";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import Send from "@lucide/svelte/icons/send";
   import Settings from "@lucide/svelte/icons/settings";
@@ -366,6 +382,7 @@
     deleteCloudCollectionItem,
     deleteConversation,
     deleteEmptyConversations,
+    fetchAssistantStatus,
     getCloudSession,
     getCloudCollection,
     getAgentRun,
@@ -451,6 +468,8 @@
     togglePlugin,
     listEpisodes,
   } from "./lib/api";
+  import { cloudSync } from "./lib/api/cloud-sync";
+  import type { AssistantStatus } from "./lib/api/settings-models-runtime";
   import type {
     AgentLaneView,
     AgentOrchestratorSnapshot,
@@ -487,12 +506,21 @@
     VoiceModelsStatus,
     VoiceProfile,
     WebAccessMode,
+    PreviewFile,
   } from "./lib/types";
   import type { ArenaSlotState, ArenaStreamChunk } from "./lib/types";
   import CustomSelect from "./lib/CustomSelect.svelte";
   import SplashScreen from "./features/shell/SplashScreen.svelte";
   import CreateOrganizationModal from "./features/organizations/CreateOrganizationModal.svelte";
   import AddProviderModal from "./features/models/AddProviderModal.svelte";
+  import {
+    addProviderDefaults,
+    buildProviderDraft,
+    initialDraftForKind,
+    providerOptions,
+    syncDraftNames,
+  } from "./features/model-providers/modelProviders";
+  import { createModelOrchestrators } from "./features/model-providers/modelOrchestrators";
   import PreviewOverlays from "./features/files/PreviewOverlays.svelte";
   import WorkspacePopover from "./features/organizations/WorkspacePopover.svelte";
   import ImageLightboxModal from "./features/workspace/ImageLightboxModal.svelte";
@@ -519,6 +547,8 @@
   import CloudAuthPage from "./features/auth/CloudAuthPage.svelte";
   import NotificationToastStack from "./features/notifications/NotificationToastStack.svelte";
   import type { ToastNotification } from "./features/notifications/model";
+  import { createNotification, sendDirectEmail } from "./features/notifications/model";
+  import NotificationSettings from "./features/settings/pages/NotificationSettings.svelte";
   import CommandPalette from "./features/command-palette/CommandPalette.svelte";
   import QuickOpenModal from "./features/workspace/QuickOpenModal.svelte";
   import {
@@ -534,6 +564,12 @@
   import type { ShortcutKey, Shortcuts } from "./features/command-palette/model";
   import RenameConversationModal from "./features/conversations/RenameConversationModal.svelte";
   import CreateProjectModal from "./features/projects/CreateProjectModal.svelte";
+  import {
+    filterProjectsForScope,
+    filterFoldersForScope,
+    filterConversationsForScope,
+    getConversationOrganizationId,
+  } from "./features/projects/model";
   import CreateFolderModal from "./features/folders/CreateFolderModal.svelte";
   import MoveToProjectFolderModal from "./features/conversations/MoveToProjectFolderModal.svelte";
   import InviteMemberModal from "./features/organizations/InviteMemberModal.svelte";
@@ -543,6 +579,13 @@
   import SpotlightPage from "./features/spotlight/SpotlightPage.svelte";
   import MainSidebar from "./features/shell/MainSidebar.svelte";
   import ModelsSettings from "./features/settings/pages/ModelsSettings.svelte";
+  import BrowserSettings from "./features/settings/pages/BrowserSettings.svelte";
+  import ComputerSettings from "./features/settings/pages/ComputerSettings.svelte";
+  import {
+    computerPermissions,
+    getCachedComputerEnvironment,
+    formatEnvironmentContextForPrompt,
+  } from "./lib/computer/computer-service";
   import SearchSettings from "./features/settings/pages/SearchSettings.svelte";
   import VoiceSettings from "./features/settings/pages/VoiceSettings.svelte";
   import PathsSettings from "./features/settings/pages/PathsSettings.svelte";
@@ -560,6 +603,7 @@
   import MonitoringSettings from "./features/settings/pages/MonitoringSettings.svelte";
   import ConversationTopbar from "./features/chat/ConversationTopbar.svelte";
   import ProfileSettings from "./features/settings/pages/ProfileSettings.svelte";
+  import BillingSettings from "./features/settings/pages/BillingSettings.svelte";
   import PluginsSettings from "./features/settings/pages/PluginsSettings.svelte";
   import Composer from "./features/chat/Composer.svelte";
   import OrganizationSettings from "./features/settings/pages/OrganizationSettings.svelte";
@@ -581,6 +625,7 @@
   import SchedulerSettings from "./features/settings/pages/SchedulerSettings.svelte";
   import ArenaView from "./features/arena/ArenaView.svelte";
   import SkillEditorModal from "./features/skills/SkillEditorModal.svelte";
+  import VoiceLiveOverlay from "./features/voice/VoiceLiveOverlay.svelte";
   import SettingsSidebar from "./features/settings/SettingsSidebar.svelte";
   import type { SettingsTab } from "./features/settings/types";
   import {
@@ -624,6 +669,7 @@
   import {
     INSTRUCTION_DEFAULTS_VERSION,
     buildDefaultSystemPrompts,
+    clampPromptToTokenBudget,
     compileSystemPrompt as compileAroSystemPrompt,
     composeInstructionPrompt,
     defaultInstructionFormatting,
@@ -700,6 +746,10 @@
   let settings: AppSettings | null = null;
   let settingsDraft: AppSettings | null = null;
   let modelOptions: ModelOption[] = [];
+  // Sovereign AI (navigateur) : statut serveur pour griser les modeles cloud
+  // non executables. Null en Tauri (generation locale) ou sans session web.
+  let serverAiStatus: AssistantStatus | null = null;
+  $: serverAiRunnableIds = serverAiStatus?.runnableModelIds ?? null;
   let modelProviders: ModelProviderConnection[] = [];
   let modelProviderBusy: Record<string, boolean> = {};
   let modelProviderStatus: Record<string, RuntimeStatus> = {};
@@ -951,7 +1001,6 @@
     const wanted = dedupeMentionedPaths(extractMentionedPaths(content));
     if (wanted.length === 0) return { contextBlock: "", referenced: [] };
     const referenced = resolveMentionedEntries(content, workspaceMentionEntries).filter((e) => !e.isDir);
-    if (referenced.length === 0) return { contextBlock: "", referenced: [] };
     const conversationId = activeConversation?.id ?? undefined;
     const settled = await Promise.all(
       referenced.slice(0, MAX_MENTION_CONTEXT_FILES).map(async (entry) => {
@@ -967,6 +1016,36 @@
       }),
     );
     const parts = settled.filter((p): p is string => p !== null);
+
+    // Also extract mentioned skills, agents, mcp servers, and plugins
+    for (const token of wanted) {
+      if (token.startsWith("skill:")) {
+        const skillKey = token.replace(/^skill:/, "").toLowerCase();
+        const found = allSkills.find((s) => s.name.toLowerCase().replace(/\s+/g, "-") === skillKey || s.name.toLowerCase() === skillKey);
+        if (found) {
+          parts.push(`--- Compétence / Skill : ${found.name} ---\nDescription: ${found.description || ""}`);
+        }
+      } else if (token.startsWith("agent:")) {
+        const agentKey = token.replace(/^agent:/, "").toLowerCase();
+        const found = customAgentsList.find((a) => a.name.toLowerCase().replace(/\s+/g, "-") === agentKey || a.name.toLowerCase() === agentKey);
+        if (found) {
+          parts.push(`--- Agent spécialisé : ${found.name} ---\nRôle: ${found.role || ""}\nDescription: ${found.description || ""}\nInstructions: ${found.systemPrompt || ""}`);
+        }
+      } else if (token.startsWith("mcp:")) {
+        const mcpKey = token.replace(/^mcp:/, "").toLowerCase();
+        const found = allMcpServers.find((m) => m.name.toLowerCase().replace(/\s+/g, "-") === mcpKey || m.name.toLowerCase() === mcpKey);
+        if (found) {
+          parts.push(`--- Serveur MCP : ${found.name} ---\nStatut: ${found.status || "connecté"}\n${found.url ? `URL: ${found.url}` : ""}\n${found.command ? `Commande: ${found.command}` : ""}`);
+        }
+      } else if (token.startsWith("plugin:")) {
+        const pluginKey = token.replace(/^plugin:/, "").toLowerCase();
+        const found = (installedAgentPlugins.length > 0 ? installedAgentPlugins : userPlugins).find((p) => p.name.toLowerCase().replace(/\s+/g, "-") === pluginKey || p.name.toLowerCase() === pluginKey);
+        if (found) {
+          parts.push(`--- Plugin : ${found.name} ---\nDescription: ${found.description || ""}`);
+        }
+      }
+    }
+
     if (parts.length === 0) return { contextBlock: "", referenced: [] };
     return {
       contextBlock: `Contexte du projet (références @) :\n${parts.join("\n\n")}\n\n--- Message ---\n${content}`,
@@ -1000,9 +1079,28 @@
       : `Web access ${mode}`;
   }
 
+  let currentWorkspaceScope: "personal" | "organization" = "personal";
   let searchQuery = "";
-  $: filteredConversations = conversations.filter(c => 
-    c.title.toLowerCase().includes(searchQuery.toLowerCase())
+  $: filteredConversations = filterConversationsForScope(
+    conversations,
+    currentWorkspaceScope,
+    cloudSession?.activeOrganization?.id,
+    projects,
+    folders,
+  ).filter((c) => !searchQuery || c.title.toLowerCase().includes(searchQuery.toLowerCase()));
+  $: filteredProjects = filterProjectsForScope(
+    projects,
+    currentWorkspaceScope,
+    cloudSession?.activeOrganization?.id,
+    conversations,
+    folders,
+  );
+  $: filteredFolders = filterFoldersForScope(
+    folders,
+    currentWorkspaceScope,
+    cloudSession?.activeOrganization?.id,
+    projects,
+    conversations,
   );
   let loading = true;
   let showSplash = !isSpotlightMode;
@@ -1115,18 +1213,28 @@
 
   $: pendingDestinationLabel = (() => {
     if (!pendingProjectId && !pendingFolderId) return null;
-    const folder = folders.find((f) => f.id === pendingFolderId);
+    const folder = filteredFolders.find((f) => f.id === pendingFolderId);
     if (folder) {
-      const parent = projects.find((p) => p.id === folder.projectId);
+      const parent = filteredProjects.find((p) => p.id === folder.projectId);
       return parent ? `${parent.name} / ${folder.name}` : folder.name;
     }
-    return projects.find((p) => p.id === pendingProjectId)?.name ?? null;
+    return filteredProjects.find((p) => p.id === pendingProjectId)?.name ?? null;
   })();
 
   async function createAndActivateConversation(content: string, mode: AssistantMode): Promise<Conversation> {
     const projectId = pendingProjectId;
     const folderId = pendingFolderId;
-    const conversation = await createConversation(conversationTitleFromContent(content), mode, projectId, folderId);
+    const targetOrgId = currentWorkspaceScope === "organization" && cloudSession?.activeOrganization?.id
+      ? cloudSession.activeOrganization.id
+      : "personal";
+    const conversation = await createConversation(
+      conversationTitleFromContent(content),
+      mode,
+      projectId,
+      folderId,
+      targetOrgId
+    );
+    conversation.organizationId = targetOrgId;
     // Destination consommée : on repart sur "Sans classement" pour le prochain chat.
     pendingProjectId = null;
     pendingFolderId = null;
@@ -1559,6 +1667,7 @@
   let memberSearchQuery = "";
   let showInviteModal = false;
   let showCreateTeamModal = false;
+  let showVoiceLiveOverlay = false;
 
   // Form states for modals
   let inviteFormName = "";
@@ -2796,8 +2905,10 @@
     scheduledTasks = scheduledTasks.map(t => t.id === id ? { ...t, status: "running" } : t);
     
     setTimeout(() => {
+      let completedTask: ScheduledTask | undefined;
       scheduledTasks = scheduledTasks.map(t => {
         if (t.id === id) {
+          completedTask = t;
           return {
             ...t,
             status: "completed",
@@ -2807,6 +2918,35 @@
         return t;
       });
       saveTasksToLocalStorage();
+
+      if (completedTask) {
+        const notifTitle = `✓ Routine exécutée : ${completedTask.name}`;
+        const notifBody = `La routine planifiée '${completedTask.name}' s'est exécutée avec succès.`;
+        sendDesktopNotification(notifTitle, notifBody);
+        addNotificationToast({
+          type: "success",
+          title: notifTitle,
+          body: notifBody,
+        });
+        void createNotification({
+          title: notifTitle,
+          body: notifBody,
+          kind: "routine",
+          source: "routine",
+          organizationId: currentWorkspaceScope === "organization" ? (cloudSession?.activeOrganization?.id ?? null) : null,
+        });
+        if (
+          settings?.notification?.emailNotificationsEnabled &&
+          settings?.notification?.emailOnRoutineSummary &&
+          settings?.notification?.emailRecipient
+        ) {
+          void sendDirectEmail(
+            settings.notification.emailRecipient,
+            notifTitle,
+            `Bonjour,\n\n${notifBody}\n\nDate d'exécution : ${new Date().toLocaleString()}\nPrompt configuré : ${completedTask.prompt}\n\nCordialement,\nARO Assistant`
+          );
+        }
+      }
     }, 2000);
   }
 
@@ -3356,6 +3496,12 @@
   }
 
   function compileSystemPrompt(activePers: Personality | null, mode: string, userInput = ""): string {
+    const configuredBudget = settings?.memory?.systemBudget || 800;
+    const targetBudget = Math.max(configuredBudget - 20, 400);
+    const currentPerms = get(computerPermissions);
+    const envContext = getCachedComputerEnvironment(currentPerms);
+    const osEnvironment = formatEnvironmentContextForPrompt(currentPerms, envContext, currentLanguage);
+
     const basePrompt = compileAroSystemPrompt({
       mode: normalizeInstructionMode(mode),
       personality: activePers as InstructionPersonality | null,
@@ -3368,6 +3514,8 @@
       model: settings?.model.activeModelRef ?? null,
       runtimeDetail: runtime?.detail ?? null,
       skills: userSkills,
+      osEnvironment,
+      maxTokens: targetBudget,
     });
 
     let permDirective = "";
@@ -3389,7 +3537,8 @@
         : "\n\n[AUTONOMY & PERMISSION POLICY: STANDARD]\nBalanced standard mode. Reading and editing project files are permitted. System command execution and destructive actions require explicit user confirmation.";
     }
 
-    return basePrompt + permDirective;
+    const fullPrompt = basePrompt + permDirective;
+    return clampPromptToTokenBudget(fullPrompt, targetBudget);
   }
 
   function saveMemories() {
@@ -3857,6 +4006,7 @@
     if (!labels) return "";
     switch (tab) {
       case "profile": return labels.profileTab;
+      case "billing": return language === "fr" ? "Offre & consommation" : "Plan & usage";
       case "organization": return labels.orgTab;
       case "general":
       case "models": return labels.modelTab;
@@ -3865,9 +4015,10 @@
       case "memory": return labels.memoryTab;
       case "voice": return labels.voiceTab;
       case "preferences": return labels.preferencesTab;
-      case "skills": return "Skills";
+      case "notifications": return language === "fr" ? "Notifications & E-mails" : "Notifications & Emails";
+      case "skills": return "Plugins › Skills";
       case "plugins": return "Plugins";
-      case "mcp": return "Model Context Protocol (MCP)";
+      case "mcp": return "Plugins › MCP Servers";
       case "hooks": return "Hooks & Webhooks";
       case "scheduler": return "Planificateur";
       case "permissions": return labels.permissionsTab;
@@ -3875,6 +4026,10 @@
       case "paths": return labels.pathsTab;
       case "monitoring": return labels.monitoringTab;
       case "system": return labels.maintenanceTab;
+      case "browser": return language === "fr" ? "Navigateur" : "Browser";
+      case "computer": return language === "fr" ? "Ordinateur" : "Computer";
+      case "agents": return language === "fr" ? "Agents & Sub-agents" : "Agents & Sub-agents";
+      case "shortcuts": return language === "fr" ? "Raccourcis" : "Shortcuts";
       default: return "";
     }
   }
@@ -4258,8 +4413,10 @@
     if (typeof document !== "undefined" && document.body) {
       if (theme === "dark") {
         document.body.classList.add("dark-theme");
+        document.body.classList.remove("light-theme");
       } else {
         document.body.classList.remove("dark-theme");
+        document.body.classList.add("light-theme");
       }
     }
   }
@@ -4830,6 +4987,7 @@
   let showRightPanel = false;
   let rightPanelWidth = 500;
   let isResizingRightPanel = false;
+  let pendingHashConvId: string | null = null;
   let collapsedContextSections: Record<ContextSectionKey, boolean> = {
     outputs: false,
     agentInbox: false,
@@ -5296,10 +5454,93 @@
     window.removeEventListener("mouseup", stopResizingRightPanel);
   }
 
+  // --- Web SaaS : mode web, sidebar adaptative, deep-link hash ---
+  function applyWebModeClass() {
+    try {
+      const isWeb = typeof window !== "undefined" && !Boolean((window as any).__TAURI_INTERNALS__);
+      document.body.classList.toggle("web-mode", isWeb);
+      document.body.classList.toggle("tauri-mode", !isWeb);
+    } catch { /* ignore */ }
+  }
+
+  // Ne ferme auto que vers le drawer (jamais de réouverture forcée :
+  // respecte le choix utilisateur sur grand écran).
+  function collapseSidebarForViewport() {
+    try {
+      if (typeof window === "undefined") return;
+      if (window.innerWidth < 1024 && sidebarOpen && !showSettings) sidebarOpen = false;
+    } catch { /* ignore */ }
+  }
+
+  function readHashRoute(): { convId: string | null; settings: string | null } {
+    try {
+      const raw = (window.location.hash || "").replace(/^#\/?/, "");
+      const params = new URLSearchParams(raw.includes("?") ? raw.slice(raw.indexOf("?")) : "");
+      const convId = params.get("conv");
+      const settings = params.get("settings");
+      return { convId, settings };
+    } catch {
+      return { convId: null, settings: null };
+    }
+  }
+
+  function writeHashRoute() {
+    try {
+      if (isSpotlightMode) return;
+      const parts: string[] = [];
+      if (activeConversation?.id) parts.push(`conv=${encodeURIComponent(activeConversation.id)}`);
+      if (showSettings && settingsDraft) parts.push(`settings=${encodeURIComponent(activeSettingsTab)}`);
+      const next = parts.length > 0 ? `#/?${parts.join("&")}` : "#/";
+      if (window.location.hash !== next) window.history.replaceState(null, "", next);
+    } catch { /* ignore */ }
+  }
+
+  $: if (!isSpotlightMode && (activeConversation?.id || showSettings)) {
+    writeHashRoute();
+  }
+
+  function closeMobileDrawers() {
+    try {
+      if (typeof window !== "undefined" && window.innerWidth < 1024 && sidebarOpen) sidebarOpen = false;
+      if (typeof window !== "undefined" && window.innerWidth < 768 && showRightPanel) showRightPanel = false;
+    } catch { /* ignore */ }
+  }
+
   onMount(() => {
     const unlisteners: (() => void)[] = [];
+    applyWebModeClass();
+    collapseSidebarForViewport();
+    try {
+      const { convId, settings } = readHashRoute();
+      if (settings) {
+        settingsMobileView = "content";
+        void openSettings(settings as SettingsTab);
+      } else if (convId) {
+        pendingHashConvId = convId;
+      }
+    } catch { /* ignore */ }
+    const onResizeWeb = () => collapseSidebarForViewport();
+    window.addEventListener("resize", onResizeWeb);
+    unlisteners.push(() => window.removeEventListener("resize", onResizeWeb));
     loadShortcuts();
     void loadWorkspaceMentions(activeConversation?.id ?? null);
+    void loadInstalledPluginsData();
+
+    // Background routine scheduler runner: regularly checks and executes enabled routines
+    const routineSchedulerInterval = setInterval(() => {
+      if (!scheduledTasks || scheduledTasks.length === 0) return;
+      const now = Date.now();
+      for (const task of scheduledTasks) {
+        if (!task.enabled || task.status === "running") continue;
+        const durationMinutes = task.durationMinutes ?? 60;
+        const intervalMs = Math.max(1, durationMinutes) * 60 * 1000;
+        const lastRunTime = task.lastRun ? new Date(task.lastRun).getTime() : new Date(task.createdAt).getTime();
+        if (now - lastRunTime >= intervalMs) {
+          triggerTaskImmediately(task.id);
+        }
+      }
+    }, 30000);
+    unlisteners.push(() => clearInterval(routineSchedulerInterval));
     if (typeof window !== "undefined") {
       const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
       const invitationToken = fragment.get("token")?.trim() ?? "";
@@ -5340,6 +5581,23 @@
     };
     window.addEventListener("aro:preview-diff", onPreviewDiff);
     unlisteners.push(() => window.removeEventListener("aro:preview-diff", onPreviewDiff));
+
+    const onAroOpenBrowser = (e: any) => {
+      showSettings = false;
+      if (!showRightPanel) {
+        showRightPanel = true;
+        const detail = e.detail;
+        setTimeout(() => {
+          try {
+            window.dispatchEvent(new CustomEvent("aro:open-browser", { detail }));
+          } catch {
+            // ignore
+          }
+        }, 50);
+      }
+    };
+    window.addEventListener("aro:open-browser", onAroOpenBrowser);
+    unlisteners.push(() => window.removeEventListener("aro:open-browser", onAroOpenBrowser));
 
     const onApplyDiff = async (e: any) => {
       const detail = e.detail;
@@ -5434,6 +5692,119 @@
     };
     window.addEventListener("aro-chat-stream-chunk", webUnsubscribe);
     unlisteners.push(() => window.removeEventListener("aro-chat-stream-chunk", webUnsubscribe));
+
+    const handleWebStep = (event: Event) => {
+      const payload = (event as CustomEvent).detail as {
+        conversationId: string;
+        step: AgentStep;
+      };
+      if (!payload || !payload.step) return;
+      const { conversationId, step } = payload;
+      const runId = step.runId;
+
+      if (selectedAgentRunView && selectedAgentRunView.run?.id === runId) {
+        const currentRunSteps = [...(selectedAgentRunView.steps || [])];
+        const sIdx = currentRunSteps.findIndex((s) => s.sequence === step.sequence);
+        if (sIdx >= 0) {
+          currentRunSteps[sIdx] = step;
+        } else {
+          currentRunSteps.push(step);
+        }
+        currentRunSteps.sort((a, b) => a.sequence - b.sequence);
+        selectedAgentRunView = {
+          ...selectedAgentRunView,
+          steps: currentRunSteps,
+        };
+      }
+
+      let messageId = runToMessageMap[runId];
+      if (!messageId) {
+        const activeMsg = messages.find(m => m.isGenerating && m.conversationId === conversationId)
+          || spotlightMessages.find(m => m.isGenerating && m.conversationId === conversationId);
+        if (activeMsg) {
+          messageId = activeMsg.id;
+          runToMessageMap[runId] = messageId;
+        }
+      }
+
+      if (messageId) {
+        const currentSteps = stepsByMessageId[messageId] || [];
+        const idx = currentSteps.findIndex(s => s.sequence === step.sequence);
+        if (idx >= 0) {
+          currentSteps[idx] = step;
+        } else {
+          currentSteps.push(step);
+        }
+        currentSteps.sort((a, b) => a.sequence - b.sequence);
+        stepsByMessageId[messageId] = currentSteps;
+        stepsByMessageId = stepsByMessageId;
+
+        if (expandedMessageSteps[messageId] === undefined) {
+          expandedMessageSteps[messageId] = true;
+          expandedMessageSteps = expandedMessageSteps;
+        }
+
+        const applySteps = (items: ChatMessage[]) => items.map(msg => {
+          if (msg.id === messageId) {
+            return {
+              ...msg,
+              steps: currentSteps,
+            };
+          }
+          return msg;
+        });
+
+        if (activeConversation?.id === conversationId || (!activeConversation && messages.some(m => m.id === messageId))) {
+          messages = applySteps(messages);
+        }
+        if (isSpotlightMode) {
+          spotlightMessages = applySteps(spotlightMessages);
+        }
+
+        const toolId = (step.input?.toolId || "").toLowerCase();
+        const stepTitle = (step.title || "").toLowerCase();
+        const isBrowser = toolId.includes("browser") ||
+          stepTitle.includes("browser") ||
+          stepTitle.includes("navigate") ||
+          toolId.includes("web.page.read") ||
+          toolId.includes("web.fetch") ||
+          Boolean(step.input?.url) ||
+          Boolean(step.output?.url);
+
+        const targetUrl = step.input?.url || step.output?.url;
+        if (isBrowser && targetUrl) {
+          window.dispatchEvent(
+            new CustomEvent("aro:agent-browser-step", {
+              detail: {
+                url: targetUrl,
+                title: step.output?.title || step.input?.title,
+                status: step.status,
+                stepTitle: step.title,
+                content: step.output?.content || step.output?.text,
+              },
+            })
+          );
+        }
+      }
+    };
+    window.addEventListener("aro-agent-step-update", handleWebStep);
+    unlisteners.push(() => window.removeEventListener("aro-agent-step-update", handleWebStep));
+
+    const handlePreviewFileGlobal = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (detail) {
+        previewFileObject = {
+          name: detail.name || "document",
+          mimeType: detail.mimeType || "application/octet-stream",
+          url: detail.url || (detail.data ? URL.createObjectURL(new Blob([detail.data])) : ""),
+          content: detail.content,
+          data: detail.data,
+          sizeBytes: detail.sizeBytes,
+        };
+      }
+    };
+    window.addEventListener("aro:preview-file", handlePreviewFileGlobal);
+    unlisteners.push(() => window.removeEventListener("aro:preview-file", handlePreviewFileGlobal));
 
     if (Boolean(window.__TAURI_INTERNALS__)) {
       import("@tauri-apps/api/event").then(({ listen }) => {
@@ -5969,15 +6340,15 @@
     }
   }
 
-  $: activeProject = activeConversation?.projectId ? projects.find((p) => p.id === activeConversation?.projectId) ?? null : null;
+  $: activeProject = activeConversation?.projectId ? filteredProjects.find((p) => p.id === activeConversation?.projectId) ?? null : null;
 
   $: commandPaletteFilteredResults = buildCommandPaletteResults({
     language: currentLanguage,
     theme: currentTheme,
     shortcuts,
-    conversations,
-    projects,
-    folders,
+    conversations: filteredConversations,
+    projects: filteredProjects,
+    folders: filteredFolders,
     actions: {
       close: toggleCommandPalette,
       startConversation,
@@ -6067,6 +6438,9 @@
       updateSettingsWithActiveVoice();
       modelOptions = ensureCurrentModelOption(payload.models, payload.settings);
       modelProviders = payload.modelProviders ?? payload.settings.model.providers ?? [];
+      // Navigateur uniquement : quels modeles le serveur peut-il executer ?
+      // Echec silencieux (null) : le selecteur garde son comportement actuel.
+      serverAiStatus = await fetchAssistantStatus();
       conversations = payload.conversations;
       try {
         projects = await listProjects();
@@ -6083,6 +6457,7 @@
         };
       }
       cloudSession = await getCloudSession();
+      refreshCloudSyncScope();
       cloudAuthenticated = Boolean(payload.cloudAuthenticated || cloudSession);
       cloudSyncStatus = payload.syncStatus ?? { health: "offline-read-only", pendingEvents: 0, lastSyncedAt: null };
       apiBaseUrl = payload.apiBaseUrl ?? "";
@@ -6243,6 +6618,7 @@
         });
       }
       cloudAuthenticated = true;
+      refreshCloudSyncScope();
       showCloudAuthPanel = false;
       leaveSettingsView();
       cloudAuthPassword = "";
@@ -6255,6 +6631,12 @@
     }
   }
 
+  function refreshCloudSyncScope() {
+    const userId = cloudSession?.user?.id;
+    const orgId = cloudSession?.activeOrganization?.id;
+    cloudSync.setIdentityScope(userId && orgId ? `${userId}:${orgId}` : "default");
+  }
+
   async function disconnectCloud() {
     cloudAuthError = "";
     let logoutError = "";
@@ -6264,6 +6646,7 @@
       logoutError = normalizeError(error);
     }
     cloudSession = null;
+    cloudSync.reset();
     cloudAuthenticated = false;
     cloudOrganizations = [];
     cloudSyncStatus = { health: "offline-read-only", pendingEvents: 0, lastSyncedAt: null };
@@ -6274,11 +6657,38 @@
   }
 
   async function switchOrganizationFromUi(organizationId: string) {
-    if (!organizationId || organizationId === cloudSession?.activeOrganization.id || cloudOrganizationBusy) return;
+    if (!organizationId || cloudOrganizationBusy) return;
+    if (organizationId === "personal") {
+      currentWorkspaceScope = "personal";
+      showCloudAuthPanel = false;
+      pendingProjectId = null;
+      pendingFolderId = null;
+      if (activeConversation) {
+        const activeOrg = getConversationOrganizationId(activeConversation, projects, folders);
+        if (activeOrg && activeOrg !== "personal") {
+          activeConversation = null;
+          messages = [];
+        }
+      }
+      return;
+    }
+    if (organizationId === cloudSession?.activeOrganization?.id && currentWorkspaceScope === "organization") return;
     cloudOrganizationBusy = true;
     collectionsSyncError = "";
     try {
       cloudSession = await switchCloudOrganization(organizationId);
+      refreshCloudSyncScope();
+      currentWorkspaceScope = "organization";
+      showCloudAuthPanel = false;
+      pendingProjectId = null;
+      pendingFolderId = null;
+      if (activeConversation) {
+        const activeOrg = getConversationOrganizationId(activeConversation, projects, folders);
+        if (activeOrg !== organizationId) {
+          activeConversation = null;
+          messages = [];
+        }
+      }
       clearOrganizationScopedState();
       await loadBootstrap();
     } catch (error) {
@@ -6295,7 +6705,16 @@
     collectionsSyncError = "";
     try {
       cloudSession = await createCloudOrganization({ name });
+      refreshCloudSyncScope();
+      currentWorkspaceScope = "organization";
+      showCloudAuthPanel = false;
       newOrganizationName = "";
+      pendingProjectId = null;
+      pendingFolderId = null;
+      if (activeConversation) {
+        activeConversation = null;
+        messages = [];
+      }
       clearOrganizationScopedState();
       await loadBootstrap();
     } catch (error) {
@@ -6324,6 +6743,7 @@
           localStorage.removeItem(key);
           continue;
         }
+        cloudSync.seedSyncedState(key, value);
         if (typeof value === "string") {
           localStorage.setItem(key, value);
         } else {
@@ -6334,7 +6754,6 @@
       void refreshPermissionProfiles();
       loadHooksFromLocalStorage();
       loadTasksFromLocalStorage();
-      purgeAroLocalStorage();
     } finally {
       hydratingCloudState = false;
     }
@@ -6381,7 +6800,7 @@
   }
 
   function shouldRetainLocalStorageKey(key: string): boolean {
-    return !key.startsWith("aro-");
+    return !isSensitiveCloudStateKey(key);
   }
 
   function purgeAroLocalStorage() {
@@ -6427,23 +6846,15 @@
     const originalSetItem = prototype.setItem;
     const originalRemoveItem = prototype.removeItem;
     prototype.setItem = function(key: string, value: string) {
-      if (hydratingCloudState || shouldRetainLocalStorageKey(key)) {
-        originalSetItem.call(this, key, value);
-      } else {
-        originalRemoveItem.call(this, key);
-      }
+      originalSetItem.call(this, key, value);
       if (!hydratingCloudState && cloudAuthenticated && key.startsWith("aro-")) {
-        void setCloudState(key, parseStorageValue(value)).catch((error) => {
-          console.warn("Cloud state sync failed", key, error);
-        });
+        cloudSync.enqueueSet(key, parseStorageValue(value));
       }
     };
     prototype.removeItem = function(key: string) {
       originalRemoveItem.call(this, key);
       if (!hydratingCloudState && cloudAuthenticated && key.startsWith("aro-")) {
-        void deleteCloudState(key).catch((error) => {
-          console.warn("Cloud state delete failed", key, error);
-        });
+        cloudSync.enqueueDelete(key);
       }
     };
     cloudStorageBridgeInstalled = true;
@@ -6819,8 +7230,11 @@
         getAgentOrchestratorSnapshot(),
       ]);
       
-      // Check for newly completed agent runs to notify user
+      // Check for newly completed agent runs to notify user (only genuine subagents)
       for (const run of runs) {
+        if (!run.autonomyProfileId && (!run.laneId || run.laneId.startsWith("default-virtual"))) {
+          continue;
+        }
         const prev = agentRuns.find((r) => r.id === run.id);
         if (prev && prev.status !== "completed" && run.status === "completed") {
           const title = `✓ Agent ARO Terminé`;
@@ -6832,6 +7246,25 @@
             body,
             conversationId: run.conversationId ?? undefined,
           });
+          void createNotification({
+            title,
+            body,
+            kind: "agent-completion",
+            source: "agent",
+            actionUrl: run.conversationId ? `conversation:${run.conversationId}` : null,
+            organizationId: currentWorkspaceScope === "organization" ? (cloudSession?.activeOrganization?.id ?? null) : null,
+          });
+          if (
+            settings?.notification?.emailNotificationsEnabled &&
+            settings?.notification?.emailOnAgentCompletion &&
+            settings?.notification?.emailRecipient
+          ) {
+            void sendDirectEmail(
+              settings.notification.emailRecipient,
+              title,
+              `Bonjour,\n\n${body}\n\nIdentifiant de la tâche : ${run.id}\nConversation : ${run.conversationId ?? "N/A"}\nDate : ${new Date().toLocaleString()}\n\nCordialement,\nARO Assistant`
+            );
+          }
         }
       }
 
@@ -6954,7 +7387,14 @@
     const activeId = activeConversation?.id;
     if (!activeId) return [];
 
-    const convRuns = dedupeAgentRuns(runs.filter((r) => r.conversationId === activeId));
+    // Filter runs to genuine sub-agents (with autonomy profile)
+    // Plain conversational chat messages with the orchestrator are not subagent runs
+    const convRuns = dedupeAgentRuns(
+      runs.filter((r) =>
+        r.conversationId === activeId &&
+        Boolean(r.autonomyProfileId)
+      )
+    );
     const knownLaneIds = new Set(lanes.map((l) => l.lane?.id).filter(Boolean));
 
     const runsByLane = new Map<string, AgentRun[]>();
@@ -6970,7 +7410,7 @@
       .filter((laneView) => laneView.lane.conversationId === activeId)
       .map((laneView) => {
         const laneRunsAll = dedupeAgentRuns([
-          ...laneView.latestRuns.filter((r) => r.conversationId === activeId),
+          ...laneView.latestRuns.filter((r) => r.conversationId === activeId && Boolean(r.autonomyProfileId)),
           ...(runsByLane.get(laneView.lane.id) ?? []),
         ]);
 
@@ -6994,10 +7434,11 @@
           totalRuns: laneRuns.length,
           activeRunCount,
         };
-      });
+      })
+      .filter((lane) => lane.totalRuns > 0);
 
-    // Virtual default lane fallback for unassigned runs
-    const unassignedRuns = convRuns.filter((r) => !r.laneId || !knownLaneIds.has(r.laneId));
+    // Dedicated unassigned runs only for real autonomous runs
+    const unassignedRuns = convRuns.filter((r) => (!r.laneId || !knownLaneIds.has(r.laneId)) && Boolean(r.autonomyProfileId));
     if (unassignedRuns.length > 0) {
       const activeRunCount = unassignedRuns.filter(isActiveAgentRun).length;
       const collapsed = collapsedAgentLaneIds["default-virtual"] ?? false;
@@ -7005,7 +7446,7 @@
         lane: {
           id: "default-virtual",
           conversationId: activeId,
-          title: currentLanguage === "fr" ? "Voie principale / Tâches actives" : "Main Lane / Active Tasks",
+          title: currentLanguage === "fr" ? "Sous-agents / Tâches actives" : "Sub-agents / Active Tasks",
           status: "active",
           priority: "normal",
           maxConcurrentRuns: 2,
@@ -7036,21 +7477,13 @@
     if (!activeId) {
       return { running: 0, queued: 0, waiting: 0, done: 0, failed: 0, total: 0 };
     }
-    const convRuns = runs.filter((run) => run.conversationId === activeId);
+    // Only count genuine sub-agents (autonomous profiles)
+    // Plain conversational chat messages with the orchestrator are not subagent runs
+    const convRuns = runs.filter((run) =>
+      run.conversationId === activeId &&
+      Boolean(run.autonomyProfileId)
+    );
     const uniqueRuns = Array.from(new Map(convRuns.map((r) => [r.id, r])).values());
-
-    if (uniqueRuns.length === 0 && snapshot) {
-      const running = Math.max(0, snapshot.runningCount ?? 0);
-      const queued = Math.max(0, snapshot.queuedCount ?? 0);
-      return {
-        running,
-        queued,
-        waiting: 0,
-        done: 0,
-        failed: 0,
-        total: Math.max(0, running + queued),
-      };
-    }
 
     return {
       running: Math.max(0, uniqueRuns.filter((r) => r.status === "running").length),
@@ -7168,7 +7601,8 @@
         if (customAgentId) {
           const matchedAgent = customAgentsList.find(a => a.id === customAgentId);
           if (matchedAgent) {
-            systemPrompt = matchedAgent.systemPrompt;
+            const agentBudget = Math.max((settings?.memory?.systemBudget || 800) - 20, 400);
+            systemPrompt = clampPromptToTokenBudget(matchedAgent.systemPrompt, agentBudget);
             if (matchedAgent.modelId) modelId = matchedAgent.modelId;
             if (matchedAgent.modelProviderId) provider = matchedAgent.modelProviderId;
             
@@ -7340,10 +7774,21 @@
     runToMessageMap = runToMessageMap;
   }
 
+  $: if (pendingHashConvId && conversations && conversations.length > 0) {
+    const found = conversations.find((c) => c.id === pendingHashConvId);
+    if (found) {
+      pendingHashConvId = null;
+      void openConversation(found);
+    } else if (pendingHashConvId) {
+      pendingHashConvId = null;
+    }
+  }
+
   async function openConversation(conversation: Conversation) {
     stopSpeaking();
     pendingProjectId = null;
     pendingFolderId = null;
+    closeMobileDrawers();
     activeConversation = conversation;
     activeMode = conversation.mode ?? "chat";
     errorMessage = "";
@@ -7426,11 +7871,12 @@
 
   async function handleSaveProject(data: { name: string; description?: string; instructions?: string; rootPath?: string; color: string; icon: string }) {
     if (!ensureCloudWriteAllowed("enregistrer un projet")) return;
+    const targetOrgId = currentWorkspaceScope === "organization" ? (cloudSession?.activeOrganization?.id ?? null) : null;
     if (projectToEdit) {
       const updated = await updateProject(projectToEdit.id, data);
       projects = projects.map((p) => (p.id === updated.id ? updated : p));
     } else {
-      const created = await createProject(data.name, data.description, data.instructions, data.rootPath, data.color, data.icon);
+      const created = await createProject(data.name, data.description, data.instructions, data.rootPath, data.color, data.icon, targetOrgId);
       projects = [created, ...projects];
     }
   }
@@ -7465,11 +7911,18 @@
 
   async function handleSaveFolder(data: { name: string; projectId?: string | null; rootPath?: string; color?: string }) {
     if (!ensureCloudWriteAllowed("enregistrer un dossier")) return;
+    let targetOrgId = currentWorkspaceScope === "organization" ? (cloudSession?.activeOrganization?.id ?? null) : null;
+    if (data.projectId) {
+      const parentProj = projects.find((p) => p.id === data.projectId);
+      if (parentProj?.organizationId) {
+        targetOrgId = parentProj.organizationId;
+      }
+    }
     if (folderToEdit) {
       const updated = await updateFolder(folderToEdit.id, data);
       folders = folders.map((f) => (f.id === updated.id ? updated : f));
     } else {
-      const created = await createFolder(data.name, data.projectId, data.rootPath, data.color);
+      const created = await createFolder(data.name, data.projectId, data.rootPath, data.color, undefined, targetOrgId);
       folders = [created, ...folders];
     }
   }
@@ -7639,7 +8092,8 @@
       if (customAgentId) {
         const matchedAgent = customAgentsList.find(a => a.id === customAgentId);
         if (matchedAgent) {
-          systemPrompt = matchedAgent.systemPrompt;
+          const agentBudget = Math.max((settings?.memory?.systemBudget || 800) - 20, 400);
+          systemPrompt = clampPromptToTokenBudget(matchedAgent.systemPrompt, agentBudget);
         }
       }
 
@@ -7758,7 +8212,8 @@
         if (customAgentId) {
           const matchedAgent = customAgentsList.find(a => a.id === customAgentId);
           if (matchedAgent) {
-            systemPrompt = matchedAgent.systemPrompt;
+            const agentBudget = Math.max((settings?.memory?.systemBudget || 800) - 20, 400);
+            systemPrompt = clampPromptToTokenBudget(matchedAgent.systemPrompt, agentBudget);
             if (matchedAgent.modelId) {
               modelId = matchedAgent.modelId;
             }
@@ -7819,32 +8274,45 @@
 
       promoteConversation(response.conversation);
 
-      // Update placeholders with final metadata only if this conversation is still on screen.
-      if (stillViewingTarget) {
-        messages = messages.map(msg => {
-          if (msg.id === assistantMsgId) {
-            return {
-              ...response.assistantMessage,
-              content: response.assistantMessage.content,
-              steps: msg.steps
-            };
-          }
-          if (msg.id === tempUserMsgId) {
-            return response.userMessage;
-          }
-          return msg;
-        });
-      }
+      const finalAssistant = response.assistantMessage;
+      if (response.unavailable || !finalAssistant) {
+        // Sovereign UX: the server persisted nothing (user message only).
+        // The optimistic bubble already holds the streamed notice: mark it
+        // done and surface a global error instead of fake history.
+        if (stillViewingTarget) {
+          messages = messages.map(msg => msg.id === assistantMsgId ? { ...msg, isGenerating: false } : msg);
+        }
+        errorMessage = currentLanguage === "fr"
+          ? "IA indisponible sur ce serveur. Vérifiez les modèles disponibles ou réessayez plus tard."
+          : "AI unavailable on this server. Check available models or retry later.";
+      } else {
+        // Update placeholders with final metadata only if this conversation is still on screen.
+        if (stillViewingTarget) {
+          messages = messages.map(msg => {
+            if (msg.id === assistantMsgId) {
+              return {
+                ...finalAssistant,
+                content: finalAssistant.content,
+                steps: stepsByMessageId[assistantMsgId] || msg.steps || finalAssistant.steps || []
+              };
+            }
+            if (msg.id === tempUserMsgId) {
+              return response.userMessage;
+            }
+            return msg;
+          });
+        }
 
-      const tokenCount = response.assistantMessage.tokenEstimate || estimateTokens(response.assistantMessage.content);
-      addPerformanceRecord(response.conversation.title || conversationTitleAtSend, timeSec, tokenCount);
+        const tokenCount = finalAssistant.tokenEstimate || estimateTokens(finalAssistant.content);
+        addPerformanceRecord(response.conversation.title || conversationTitleAtSend, timeSec, tokenCount);
 
-      if (response.agentRunId) {
-        await refreshAgentRuns(response.agentRunId);
-      }
-      
-      if (stillViewingTarget) {
-        await speak(response.assistantMessage.content);
+        if (response.agentRunId) {
+          await refreshAgentRuns(response.agentRunId);
+        }
+
+        if (stillViewingTarget) {
+          await speak(finalAssistant.content);
+        }
       }
     } catch (error) {
       if (isStillViewingConversation(targetConversationId)) {
@@ -8273,8 +8741,15 @@
       if (isStillViewingConversation(resolvedConversationId)) {
         activeConversation = response.conversation;
         messages = await listMessages(response.conversation.id);
+        populateLoadedSteps(messages);
         await scrollToBottom(false);
-        await speak(response.assistantMessage.content);
+        if (response.unavailable || !response.assistantMessage) {
+          errorMessage = currentLanguage === "fr"
+            ? "IA indisponible sur ce serveur. Vérifiez les modèles disponibles ou réessayez plus tard."
+            : "AI unavailable on this server. Check available models or retry later.";
+        } else {
+          await speak(response.assistantMessage.content);
+        }
       }
     } catch (error) {
       if (isStillViewingConversation(resolvedConversationId)) {
@@ -8598,212 +9073,89 @@
     }
   }
 
-  async function changeModel(modelKey: string) {
-    const model = modelOptions.find((item) => item.id === modelKey);
-    if (!settings || !settingsDraft || !model || changingModel || modelKey === activeModelKey) return;
-    if (!ensureCloudWriteAllowed("changer de modèle")) return;
-    changingModel = true;
-    errorMessage = "";
-    try {
-      settings = await selectModelRef(model.providerId, model.modelId);
-      settingsDraft = cloneSettings(settings);
-      await refreshRuntimeState();
-      modelOptions = ensureCurrentModelOption(await listModels(), settings);
-      modelProviders = settings.model.providers;
-    } catch (error) {
-      errorMessage = normalizeError(error);
-    } finally {
-      changingModel = false;
-    }
-  }
-
-  async function selectModel(modelKey: string) {
-    modelMenuOpen = false;
-    modelSearchQuery = "";
-    await changeModel(modelKey);
-  }
-
-  async function refreshModelsState(nextSettings = settings) {
-    if (!nextSettings) return;
-    settings = nextSettings;
-    settingsDraft = cloneSettings(nextSettings);
-    modelProviders = nextSettings.model.providers;
-    modelOptions = ensureCurrentModelOption(await listModels(), nextSettings);
-    await refreshRuntimeState();
-  }
-
-  async function testProvider(providerId: string) {
-    modelProviderBusy = { ...modelProviderBusy, [providerId]: true };
-    errorMessage = "";
-    try {
-      const draftKey = modelProviderKeyDrafts[providerId]?.trim() ?? "";
-      if (draftKey) {
-        await saveProviderKey(providerId);
+  // Model-provider domain lives in features/model-providers/: pure catalog
+  // builders in modelProviders.ts, async orchestrators below bound to this
+  // component's state through an explicit context (no hidden coupling).
+  const modelOps = createModelOrchestrators({
+    getState: () => ({
+      settings,
+      settingsDraft,
+      modelOptions,
+      changingModel,
+      activeModelKey,
+      modelMenuOpen,
+      modelSearchQuery,
+      modelProviders,
+      modelProviderBusy,
+      modelProviderKeyDrafts,
+      modelProviderStatus,
+      errorMessage,
+    }),
+    setState: (patch) => {
+      if (patch.settings !== undefined) settings = patch.settings;
+      if (patch.settingsDraft !== undefined) settingsDraft = patch.settingsDraft;
+      if (patch.modelOptions !== undefined) modelOptions = patch.modelOptions;
+      if (patch.changingModel !== undefined) changingModel = patch.changingModel;
+      if (patch.activeModelKey !== undefined) activeModelKey = patch.activeModelKey;
+      if (patch.modelMenuOpen !== undefined) modelMenuOpen = patch.modelMenuOpen;
+      if (patch.modelSearchQuery !== undefined) modelSearchQuery = patch.modelSearchQuery;
+      if (patch.modelProviders !== undefined) modelProviders = patch.modelProviders;
+      if (patch.modelProviderBusy !== undefined) modelProviderBusy = patch.modelProviderBusy;
+      if (patch.modelProviderKeyDrafts !== undefined) {
+        modelProviderKeyDrafts = patch.modelProviderKeyDrafts;
       }
-      const status = await testModelProvider(providerId);
-      modelProviderStatus = { ...modelProviderStatus, [providerId]: status };
-    } catch (error) {
-      errorMessage = normalizeError(error);
-    } finally {
-      modelProviderBusy = { ...modelProviderBusy, [providerId]: false };
-    }
-  }
-
-  async function refreshProviderCatalog(providerId: string) {
-    if (!ensureCloudWriteAllowed("rafraîchir les modèles")) return;
-    modelProviderBusy = { ...modelProviderBusy, [providerId]: true };
-    errorMessage = "";
-    try {
-      const draftKey = modelProviderKeyDrafts[providerId]?.trim() ?? "";
-      if (draftKey) {
-        await saveProviderKey(providerId);
+      if (patch.modelProviderStatus !== undefined) {
+        modelProviderStatus = patch.modelProviderStatus;
       }
-      await refreshModelsState(await refreshModelCatalog(providerId));
-    } catch (error) {
-      errorMessage = normalizeError(error);
-    } finally {
-      modelProviderBusy = { ...modelProviderBusy, [providerId]: false };
-    }
-  }
-
-  async function saveProviderKey(providerId: string) {
-    const apiKey = modelProviderKeyDrafts[providerId]?.trim() ?? "";
-    if (!apiKey || !ensureCloudWriteAllowed("ajouter une cle provider")) return;
-    modelProviderBusy = { ...modelProviderBusy, [providerId]: true };
-    errorMessage = "";
-    try {
-      await refreshModelsState(await setModelProviderApiKey(providerId, apiKey));
-      modelProviderKeyDrafts = { ...modelProviderKeyDrafts, [providerId]: "" };
-    } catch (error) {
-      errorMessage = normalizeError(error);
-      modelProviderStatus = {
-        ...modelProviderStatus,
-        [providerId]: {
-          modelProvider: "mock",
-          modelId: "unknown",
-          modelReady: false,
-          voiceReady: false,
-          voiceStatus: null,
-          endpoint: null,
-          detail: errorMessage,
-          checkedAt: new Date().toISOString()
-        }
-      };
-    } finally {
-      modelProviderBusy = { ...modelProviderBusy, [providerId]: false };
-    }
-  }
-
-  async function clearProviderKey(providerId: string) {
-    if (!ensureCloudWriteAllowed("retirer une cle provider")) return;
-    modelProviderBusy = { ...modelProviderBusy, [providerId]: true };
-    errorMessage = "";
-    try {
-      await refreshModelsState(await clearModelProviderApiKey(providerId));
-    } catch (error) {
-      errorMessage = normalizeError(error);
-    } finally {
-      modelProviderBusy = { ...modelProviderBusy, [providerId]: false };
-    }
-  }
-
-  async function removeProvider(providerId: string) {
-    if (!ensureCloudWriteAllowed("supprimer un provider")) return;
-    modelProviderBusy = { ...modelProviderBusy, [providerId]: true };
-    errorMessage = "";
-    try {
-      await refreshModelsState(await deleteModelProvider(providerId));
-    } catch (error) {
-      errorMessage = normalizeError(error);
-    } finally {
-      modelProviderBusy = { ...modelProviderBusy, [providerId]: false };
-    }
-  }
-
-  const providerOptions = [
-    { value: "mock", label: "Mock" },
-    { value: "ollama", label: "Ollama" },
-    { value: "llama-cpp", label: "llama.cpp" },
-    { value: "openai", label: "OpenAI" },
-    { value: "anthropic", label: "Anthropic" },
-    { value: "google", label: "Google Gemini" },
-    { value: "mistral", label: "Mistral" },
-    { value: "openai-compatible", label: "OpenAI-compatible" }
-  ];
-
-  const addProviderDefaults = {
-    "openai": { name: "OpenAI", endpoint: "https://api.openai.com/v1" },
-    anthropic: { name: "Anthropic", endpoint: "https://api.anthropic.com/v1" },
-    google: { name: "Google Gemini", endpoint: "https://generativelanguage.googleapis.com/v1beta" },
-    mistral: { name: "Mistral", endpoint: "https://api.mistral.ai/v1" },
-    "openai-compatible": { name: "Custom Provider", endpoint: "https://api.example.com/v1" },
-    mock: { name: "Mock", endpoint: "" },
-    ollama: { name: "Ollama", endpoint: "http://127.0.0.1:11434" },
-    "llama-cpp": { name: "llama.cpp", endpoint: "http://127.0.0.1:8080" },
-  } satisfies Record<ModelProviderKind, { name: string; endpoint: string }>;
+      if (patch.errorMessage !== undefined) errorMessage = patch.errorMessage;
+    },
+    api: {
+      selectModelRef,
+      listModels,
+      testModelProvider,
+      refreshModelCatalog,
+      setModelProviderApiKey,
+      clearModelProviderApiKey,
+      deleteModelProvider,
+    },
+    helpers: {
+      ensureCloudWriteAllowed,
+      cloneSettings,
+      normalizeError,
+      refreshRuntimeState,
+      ensureCurrentModelOption,
+    },
+  });
 
   function openAddProvider(kind: ModelProviderKind = "openai") {
-    const defaults = addProviderDefaults[kind];
+    const draft = initialDraftForKind(kind);
     addProviderKind = kind;
-    addProviderName = defaults.name;
-    addProviderEndpoint = defaults.endpoint;
-    addProviderApiKey = "";
+    addProviderName = draft.name;
+    addProviderEndpoint = draft.endpoint;
+    addProviderApiKey = draft.apiKey;
     showAddProviderSheet = true;
   }
 
   $: if (addProviderDefaults?.[addProviderKind] && showAddProviderSheet) {
-    const defaults = addProviderDefaults[addProviderKind];
-    if (!addProviderName.trim() || providerOptions.some((option) => option.value === addProviderKind && addProviderName === option.label)) {
-      addProviderName = defaults.name;
-    }
-    if (!addProviderEndpoint.trim()) addProviderEndpoint = defaults.endpoint;
+    const synced = syncDraftNames(addProviderKind, addProviderName, addProviderEndpoint);
+    addProviderName = synced.name;
+    addProviderEndpoint = synced.endpoint;
   }
 
   async function createProviderFromSheet() {
     if (!ensureCloudWriteAllowed("ajouter un provider")) return;
-    const now = new Date().toISOString();
-    const idBase = addProviderKind === "openai-compatible" ? addProviderName : addProviderKind;
-    const id = `${String(idBase).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "provider"}-${Date.now().toString(36)}`;
-    const isLocal = addProviderKind === "mock" || addProviderKind === "ollama" || addProviderKind === "llama-cpp";
-    const modelId = addProviderKind === "anthropic"
-      ? "claude-sonnet-5"
-      : addProviderKind === "google"
-        ? "gemini-3.5-flash"
-        : addProviderKind === "mistral"
-          ? "mistral-small-4"
-          : addProviderKind === "openai"
-            ? "gpt-5.4-mini"
-            : addProviderKind === "ollama"
-              ? "gemma3:1b"
-              : addProviderKind === "llama-cpp"
-                ? "local-model"
-                : "custom-model";
-    const provider: ModelProviderConnection = {
-      id,
+    const provider = buildProviderDraft({
       kind: addProviderKind,
-      displayName: addProviderName.trim() || addProviderDefaults[addProviderKind].name,
-      enabled: true,
-      endpoint: addProviderEndpoint.trim() || null,
-      authConfigured: Boolean(addProviderApiKey.trim()) || isLocal,
-      models: [{
-        providerId: id,
-        providerKind: addProviderKind,
-        modelId,
-        label: modelId,
-        family: addProviderName.trim() || addProviderDefaults[addProviderKind].name,
-        local: isLocal,
-        installed: isLocal || Boolean(addProviderApiKey.trim()),
-        ready: isLocal || Boolean(addProviderApiKey.trim()),
-      }],
-      createdAt: now,
-      updatedAt: now,
-    };
+      name: addProviderName,
+      endpoint: addProviderEndpoint,
+      apiKey: addProviderApiKey,
+    });
     try {
       let nextSettings = await upsertModelProvider(provider);
       if (addProviderApiKey.trim()) {
         nextSettings = await setModelProviderApiKey(provider.id, addProviderApiKey.trim());
       }
-      await refreshModelsState(nextSettings);
+      await modelOps.refreshModelsState(nextSettings);
       showAddProviderSheet = false;
     } catch (error) {
       errorMessage = normalizeError(error);
@@ -9234,7 +9586,7 @@
   }
 
   // Attachment preview state
-  let previewFileObject: { name: string; mimeType: string; url: string; content?: string } | null = null;
+  let previewFileObject: PreviewFile | null = null;
   let previewLoading = false;
   let codePreviewHtml = "";
   let isCodePreviewOpen = false;
@@ -9260,17 +9612,25 @@
       const blob = fileObj.file;
       const url = URL.createObjectURL(blob);
       let content: string | undefined = undefined;
+      let data: ArrayBuffer | undefined = undefined;
       
       const isText = isMimeTypeText(fileObj.type) || isExtensionText(fileObj.name);
       if (isText) {
         content = await blob.text();
+      }
+
+      const isBinaryDoc = /\.(xlsx|xls|docx|doc)$/i.test(fileObj.name) ||
+        fileObj.type.includes("spreadsheet") || fileObj.type.includes("wordprocessingml");
+      if (isBinaryDoc) {
+        data = await blob.arrayBuffer();
       }
       
       previewFileObject = {
         name: fileObj.name,
         mimeType: fileObj.type,
         url,
-        content
+        content,
+        data
       };
     } catch (e) {
       errorMessage = "Erreur lors du chargement de l'aperçu: " + normalizeError(e);
@@ -9289,17 +9649,25 @@
       const blob = await downloadCloudFile(att.fileId);
       const url = URL.createObjectURL(blob);
       let content: string | undefined = undefined;
+      let data: ArrayBuffer | undefined = undefined;
       
       const isText = isMimeTypeText(att.mimeType) || isExtensionText(att.displayName);
       if (isText) {
         content = await blob.text();
+      }
+
+      const isBinaryDoc = /\.(xlsx|xls|docx|doc)$/i.test(att.displayName) ||
+        att.mimeType.includes("spreadsheet") || att.mimeType.includes("wordprocessingml");
+      if (isBinaryDoc) {
+        data = await blob.arrayBuffer();
       }
       
       previewFileObject = {
         name: att.displayName,
         mimeType: att.mimeType,
         url,
-        content
+        content,
+        data
       };
     } catch (e) {
       errorMessage = "Impossible de charger le fichier du cloud: " + normalizeError(e);
@@ -9354,6 +9722,7 @@
     error={collectionsSyncError}
     {sidebarOpen}
     {sidebarWidth}
+    activeScope={currentWorkspaceScope}
     onClose={() => (showCloudAuthPanel = false)}
     onCreate={() => { showCreateOrgModal = true; showCloudAuthPanel = false; }}
     onSwitch={switchOrganizationFromUi}
@@ -9450,7 +9819,7 @@
     {toggleSpotlightRecording}
     {stopSpeaking}
     {selectPersonality}
-    {selectModel}
+    selectModel={modelOps.selectModel}
     {openSettings}
     {getWavePath}
     {expandToMainWindow}
@@ -9495,9 +9864,10 @@
       bind:searchQuery
       bind:activeSidebarMenuId
       bind:showCloudAuthPanel
+      activeScope={currentWorkspaceScope}
       conversations={filteredConversations}
-      {projects}
-      {folders}
+      projects={filteredProjects}
+      folders={filteredFolders}
       {activeConversation}
       {sendingByConversation}
       {cloudWriteLocked}
@@ -9540,8 +9910,64 @@
     ></div>
   {/if}
 
+  {#if sidebarOpen && windowWidth < 1024 && !showSettings}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="web-backdrop visible" on:click={() => (sidebarOpen = false)} aria-hidden="true"></div>
+  {/if}
+  {#if showRightPanel && windowWidth < 1280 && (!showSettings || !settingsDraft)}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="web-backdrop visible" style="z-index: 65;" on:click={() => (showRightPanel = false)} aria-hidden="true"></div>
+  {/if}
+
   <section class="workspace">
     <div class="workspace-content">
+    {#if !showSettings || !settingsDraft}
+      <header class="web-topbar" aria-label={currentLanguage === "fr" ? "Navigation principale" : "Main navigation"}>
+        <button
+          class="web-topbar-btn"
+          type="button"
+          aria-label={sidebarOpen ? t.hideSidebar : t.showSidebar}
+          title={sidebarOpen ? t.hideSidebar : t.showSidebar}
+          on:click={() => (sidebarOpen = !sidebarOpen)}
+        >
+          {#if sidebarOpen}
+            <PanelLeftClose size={18} />
+          {:else}
+            <PanelLeftOpen size={18} />
+          {/if}
+        </button>
+        <div class="web-topbar-title">
+          <strong>{activeConversation?.title ?? "ARO"}</strong>
+          <small>
+            {#if showSettings}{t.settings}
+            {:else if activeConversation}{activeMode} • {cloudStatusShortLabel}
+            {:else}{cloudStatusShortLabel}
+            {/if}
+          </small>
+        </div>
+        <button
+          class="web-topbar-btn"
+          type="button"
+          aria-label={currentLanguage === "fr" ? "Nouvelle conversation" : "New conversation"}
+          title={currentLanguage === "fr" ? "Nouvelle conversation" : "New conversation"}
+          on:click={() => void startConversation()}
+        >
+          <Edit2 size={18} />
+        </button>
+        <button
+          class="web-topbar-btn"
+          type="button"
+          aria-label={currentLanguage === "fr" ? "Panneau contexte" : "Context panel"}
+          title={currentLanguage === "fr" ? "Panneau contexte" : "Context panel"}
+          aria-expanded={showRightPanel}
+          on:click={() => (showRightPanel = !showRightPanel)}
+        >
+          <PanelRight size={18} />
+        </button>
+      </header>
+    {/if}
     {#if showSettings && settingsDraft}
       <div
         class="settings-page"
@@ -9570,11 +9996,35 @@
                 <span>{t.back}</span>
               </button>
               <span class="settings-breadcrumb-title-mobile">
-                {currentSettingsTabLabel}
+                {#if activeSettingsTab === "skills" || activeSettingsTab === "mcp"}
+                  <button
+                    type="button"
+                    class="breadcrumb-crumb-link"
+                    on:click={() => (activeSettingsTab = "plugins")}
+                  >
+                    Plugins
+                  </button>
+                  <span>&rsaquo; {activeSettingsTab === "skills" ? "Skills" : "MCP Servers"}</span>
+                {:else}
+                  {currentSettingsTabLabel}
+                {/if}
               </span>
             {:else}
               <span class="settings-breadcrumb-title">
-                {t.settings} &rsaquo; {currentSettingsTabLabel}
+                {#if activeSettingsTab === "skills" || activeSettingsTab === "mcp"}
+                  <span>{t.settings} &rsaquo; </span>
+                  <button
+                    type="button"
+                    class="breadcrumb-crumb-link"
+                    on:click={() => (activeSettingsTab = "plugins")}
+                    title={currentLanguage === "fr" ? "Afficher Plugins" : "View Plugins"}
+                  >
+                    Plugins
+                  </button>
+                  <span> &rsaquo; {activeSettingsTab === "skills" ? "Skills" : "MCP Servers"}</span>
+                {:else}
+                  {t.settings} &rsaquo; {currentSettingsTabLabel}
+                {/if}
               </span>
             {/if}
           </div>
@@ -9601,12 +10051,12 @@
                 {activeModelKey}
                 writeLocked={cloudWriteLocked}
                 onOpenAddProvider={openAddProvider}
-                onTestProvider={testProvider}
-                onRefreshProviderCatalog={refreshProviderCatalog}
-                onSaveProviderKey={saveProviderKey}
-                onClearProviderKey={clearProviderKey}
-                onRemoveProvider={removeProvider}
-                onSelectModel={selectModel}
+                onTestProvider={modelOps.testProvider}
+                onRefreshProviderCatalog={modelOps.refreshProviderCatalog}
+                onSaveProviderKey={modelOps.saveProviderKey}
+                onClearProviderKey={modelOps.clearProviderKey}
+                onRemoveProvider={modelOps.removeProvider}
+                onSelectModel={modelOps.selectModel}
                 onAutosave={autosaveSettings}
               />
             {/if}
@@ -9751,6 +10201,7 @@
                 {togglePinMemory}
                 onRefreshEpisodes={refreshEpisodes}
                 memorySettings={settings?.memory}
+                activeModel={settings?.model.activeModelRef}
                 onSaveMemorySettings={handleSaveMemorySettings}
               />
             {/if}
@@ -9797,6 +10248,20 @@
               />
             {/if}
 
+{#if activeSettingsTab === "browser"}
+              <BrowserSettings
+                language={currentLanguage}
+                writeLocked={cloudWriteLocked}
+              />
+            {/if}
+
+{#if activeSettingsTab === "computer"}
+              <ComputerSettings
+                language={currentLanguage}
+                writeLocked={cloudWriteLocked}
+              />
+            {/if}
+
 {#if activeSettingsTab === "preferences"}
               <PreferencesSettings
                 labels={t}
@@ -9804,6 +10269,15 @@
                 bind:languageDraft
                 {themeOptions}
                 {languageOptions}
+                onAutosave={autosaveSettings}
+              />
+            {/if}
+
+{#if activeSettingsTab === "notifications"}
+              <NotificationSettings
+                bind:settingsDraft
+                language={currentLanguage}
+                labels={t}
                 onAutosave={autosaveSettings}
               />
             {/if}
@@ -9968,6 +10442,12 @@
               />
             {/if}
 
+{#if activeSettingsTab === "billing"}
+  {#key `${cloudSession?.user.id ?? "guest"}:${cloudSession?.activeOrganization?.id ?? "local"}`}
+    <BillingSettings language={currentLanguage} authenticated={!!cloudSession} />
+  {/key}
+{/if}
+
 {#if activeSettingsTab === "organization"}
               <OrganizationSettings
                 labels={t}
@@ -10025,6 +10505,14 @@
       onMoveConversation={handleOpenMoveModal}
       onExportConversation={handleExportConversation}
       onOpenMemorySettings={() => openSettings("memory")}
+      onOpenVoiceLive={() => (showVoiceLiveOverlay = true)}
+      activeOrganizationId={currentWorkspaceScope === "organization" ? (cloudSession?.activeOrganization?.id ?? null) : null}
+      soundEnabled={settings?.notification?.soundEnabled ?? true}
+      onOpenConversation={(id) => {
+        const target = conversations.find(c => c.id === id);
+        if (target) openConversation(target);
+      }}
+      onOpenSettingsTab={(tab) => openSettings(tab as SettingsTab)}
     />
 
 {#if arenaMode}
@@ -10089,8 +10577,8 @@
       onStopSpeaking={stopSpeaking}
       onSetVoiceInputMode={setVoiceInputMode}
       onSelectPersonality={selectPersonality}
-      {projects}
-      {folders}
+      projects={filteredProjects}
+      folders={filteredFolders}
       {pendingProjectId}
       {pendingFolderId}
       showDestinationPicker={!activeConversation}
@@ -10178,6 +10666,7 @@
       bind:modelMenuOpen
       bind:modelSearchQuery
       modelOptions={filteredModelOptions}
+      serverRunnableIds={serverAiRunnableIds}
       {activeModelKey}
       bind:arenaMode
       {arenaSending}
@@ -10200,9 +10689,13 @@
       onSetVoiceInputMode={setVoiceInputMode}
       onToggleRecording={toggleRecording}
       onStopSpeaking={stopSpeaking}
-      onSelectModel={selectModel}
+      onSelectModel={modelOps.selectModel}
       onOpenModelSettings={() => openSettings("models")}
       workspaceMentionEntries={workspaceMentionEntries}
+      skills={allSkills}
+      plugins={installedAgentPlugins.length > 0 ? installedAgentPlugins : userPlugins}
+      mcpServers={allMcpServers}
+      agents={customAgentsList}
       activePermissionMode={activePermissionPreset}
       {activePermissionLabel}
       {permissionProfiles}
@@ -10219,6 +10712,7 @@
           // ignore
         }
       }}
+      onOpenVoiceLive={() => (showVoiceLiveOverlay = true)}
     />
     {/if}
     </div>
@@ -10322,7 +10816,7 @@
 {#if showCreateFolderModal}
   <CreateFolderModal
     {folderToEdit}
-    {projects}
+    projects={filteredProjects}
     defaultProjectId={folderDefaultProjectId}
     writeLocked={cloudWriteLocked}
     disabledTitle={cloudWriteDisabledTitle("enregistrer un dossier") ?? undefined}
@@ -10338,8 +10832,8 @@
 {#if showMoveModal && conversationToMove}
   <MoveToProjectFolderModal
     conversation={conversationToMove}
-    {projects}
-    {folders}
+    projects={filteredProjects}
+    folders={filteredFolders}
     writeLocked={cloudWriteLocked}
     onClose={() => {
       showMoveModal = false;
@@ -10481,4 +10975,15 @@
 {/if}
 
 <ConfirmModal language={currentLanguage} />
+
+{#if showVoiceLiveOverlay}
+  <VoiceLiveOverlay
+    language={currentLanguage}
+    onClose={() => (showVoiceLiveOverlay = false)}
+    onSubmitToChat={(text) => {
+      submitMessage(text);
+      showVoiceLiveOverlay = false;
+    }}
+  />
+{/if}
 

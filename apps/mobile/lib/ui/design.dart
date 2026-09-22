@@ -172,6 +172,32 @@ class Brand extends StatelessWidget {
   );
 }
 
+/// Splash Flutter unique : reprend exactement le splash natif Android
+/// (même fond, même logo 96 centré) pour une transition invisible.
+/// Le fond suit la luminosité *système* comme le natif, pas le thème
+/// applicatif, afin d'éviter tout flash au premier frame.
+class SplashPage extends StatelessWidget {
+  const SplashPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final dark =
+        MediaQuery.platformBrightnessOf(context) == Brightness.dark;
+    return Scaffold(
+      backgroundColor: dark
+          ? const Color(0xff111115)
+          : const Color(0xfff5f5f7),
+      body: const Center(
+        child: Image(
+          image: AssetImage('assets/logo.png'),
+          width: 96,
+          height: 96,
+          semanticLabel: 'ARO',
+        ),
+      ),
+    );
+  }
+}
+
 class Notice extends StatelessWidget {
   final String text;
   final bool error;

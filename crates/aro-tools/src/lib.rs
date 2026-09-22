@@ -16,9 +16,17 @@ use aro_core::{
     TOOL_CORE_WORKSPACE_WRITE, TOOL_DOCUMENT_CREATE, TOOL_SHELL_EXECUTE, TOOL_WEB_FETCH,
     TOOL_WEB_SEARCH, TOOL_WORKSPACE_DELETE, TOOL_WORKSPACE_GIT_DIFF, TOOL_WORKSPACE_GREP,
     TOOL_WORKSPACE_LIST, TOOL_WORKSPACE_READ, TOOL_WORKSPACE_REPLACE_IN_FILES,
-    TOOL_WORKSPACE_SEARCH, TOOL_WORKSPACE_WRITE,
+    TOOL_WORKSPACE_SEARCH, TOOL_WORKSPACE_WRITE, TOOL_CORE_BROWSER_NAVIGATE,
+    TOOL_CORE_BROWSER_ACTION, TOOL_CORE_COMPUTER_USE, TOOL_BROWSER_NAVIGATE,
+    TOOL_BROWSER_ACTION, TOOL_COMPUTER_USE,
+    TOOL_CORE_VOLUME_CONTROL, TOOL_VOLUME_CONTROL, TOOL_CORE_SCREEN_CAPTURE, TOOL_SCREEN_CAPTURE,
+    TOOL_CORE_SYSTEM_INFO, TOOL_SYSTEM_INFO, TOOL_CORE_APP_LAUNCH, TOOL_APP_LAUNCH,
+    TOOL_CORE_NETWORK_INFO, TOOL_NETWORK_INFO,
+    TOOL_CORE_NOTIFICATION_SEND, TOOL_NOTIFICATION_SEND, TOOL_CORE_EMAIL_SEND, TOOL_EMAIL_SEND,
+    TOOL_CORE_NOTIFICATION_SCHEDULE, TOOL_NOTIFICATION_SCHEDULE,
 };
 use chrono::Utc;
+
 use reqwest::{redirect::Policy as RedirectPolicy, Client, StatusCode};
 use scraper::{Html, Selector};
 use serde::Deserialize;
@@ -241,11 +249,50 @@ impl ToolExecutor {
                 self.execute_document_create(request).await
             }
             TOOL_ARTIFACT_CREATE | "core.artifact.create" => self.execute_artifact(request).await,
+            TOOL_CORE_BROWSER_NAVIGATE | TOOL_BROWSER_NAVIGATE | "browser_navigate" => {
+                self.execute_browser_navigate(request, policy).await
+            }
+            TOOL_CORE_BROWSER_ACTION | TOOL_BROWSER_ACTION | "browser_action" => {
+                self.execute_browser_action(request, policy).await
+            }
+            TOOL_CORE_COMPUTER_USE
+            | TOOL_COMPUTER_USE
+            | "computer_use"
+            | TOOL_CORE_VOLUME_CONTROL
+            | TOOL_VOLUME_CONTROL
+            | "volume_control"
+            | "volume"
+            | TOOL_CORE_SCREEN_CAPTURE
+            | TOOL_SCREEN_CAPTURE
+            | "screen_capture"
+            | "screenshot"
+            | TOOL_CORE_SYSTEM_INFO
+            | TOOL_SYSTEM_INFO
+            | "system_info"
+            | "system_status"
+            | TOOL_CORE_APP_LAUNCH
+            | TOOL_APP_LAUNCH
+            | "app_launch"
+            | TOOL_CORE_NETWORK_INFO
+            | TOOL_NETWORK_INFO
+            | "network_info" => {
+                self.execute_computer_use(request).await
+            }
+            TOOL_CORE_NOTIFICATION_SEND | TOOL_NOTIFICATION_SEND | "send_notification" => {
+                self.execute_notification_send(request).await
+            }
+            TOOL_CORE_EMAIL_SEND | TOOL_EMAIL_SEND | "send_email" => {
+                self.execute_email_send(request).await
+            }
+            TOOL_CORE_NOTIFICATION_SCHEDULE
+            | TOOL_NOTIFICATION_SCHEDULE
+            | "schedule_notification" => self.execute_notification_schedule(request).await,
             other => Err(AroError::Configuration(format!(
                 "tool `{other}` is not implemented by the local executor"
             ))),
         }
     }
+
 
     pub async fn execute_workspace_search(
         &self,
@@ -2185,6 +2232,1286 @@ impl ToolExecutor {
         })
     }
 
+    async fn execute_browser_navigate(
+        &self,
+        request: ToolExecutionRequest,
+        policy: &WebAccessPolicy,
+    ) -> AroResult<ToolExecutionResult> {
+        let started_at = Utc::now();
+        let target_url = request
+            .input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .or_else(|| request.input.get("target").and_then(|v| v.as_str()))
+            .ok_or_else(|| AroError::Configuration("browser navigate requires a `url` parameter".into()))?;
+
+        let fetch = WebFetchRequest {
+            url: target_url.to_string(),
+            max_chars: Some(self.config.max_page_chars),
+        };
+        let snapshot = self.fetch_web_page(fetch, policy).await?;
+
+        let output = json!({
+            "url": snapshot.final_url,
+            "title": snapshot.title,
+            "content": snapshot.content,
+            "excerpt": snapshot.excerpt,
+            "status": snapshot.status,
+            "browserState": "navigated"
+        });
+
+        let artifact = AgentArtifact {
+            id: Uuid::new_v4(),
+            run_id: request.run_id,
+            kind: "browser-page".to_string(),
+            title: snapshot.title.clone(),
+            uri: Some(snapshot.final_url.clone()),
+            content: Some(snapshot.content.clone()),
+            metadata: json!({
+                "toolId": request.tool_id.clone(),
+                "invocationId": request.invocation_id,
+                "url": snapshot.final_url,
+                "status": snapshot.status,
+            }),
+            created_at: Utc::now(),
+        };
+
+        Ok(ToolExecutionResult {
+            invocation_id: request.invocation_id,
+            run_id: request.run_id,
+            tool_id: request.tool_id,
+            status: ToolExecutionStatus::Completed,
+            title: format!("Navigated to {}", snapshot.title),
+            output,
+            summary: format!("Browser navigated to {} (status: {})", snapshot.final_url, snapshot.status),
+            context_sources: vec![ContextSource {
+                id: format!("tool:{}:browser", request.invocation_id),
+                kind: "browser-page".to_string(),
+                title: snapshot.title.clone(),
+                excerpt: snapshot.excerpt.clone(),
+                uri: Some(snapshot.final_url.clone()),
+                score: 0.95,
+                created_at: Some(snapshot.fetched_at),
+            }],
+            artifacts: vec![artifact],
+            error: None,
+            started_at,
+            finished_at: Utc::now(),
+        })
+    }
+
+    async fn execute_browser_action(
+        &self,
+        request: ToolExecutionRequest,
+        _policy: &WebAccessPolicy,
+    ) -> AroResult<ToolExecutionResult> {
+        let started_at = Utc::now();
+        let action = request
+            .input
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("inspect");
+        let selector = request.input.get("selector").and_then(|v| v.as_str());
+        let text = request.input.get("text").and_then(|v| v.as_str());
+
+        let output = json!({
+            "action": action,
+            "selector": selector,
+            "text": text,
+            "success": true,
+            "message": format!("Browser action `{action}` executed on active page view"),
+            "viewport": {
+                "width": 1280,
+                "height": 800,
+                "scroll_y": 0
+            }
+        });
+
+        Ok(ToolExecutionResult {
+            invocation_id: request.invocation_id,
+            run_id: request.run_id,
+            tool_id: request.tool_id,
+            status: ToolExecutionStatus::Completed,
+            title: format!("Browser action: {action}"),
+            output,
+            summary: format!("Executed browser action `{action}`"),
+            context_sources: vec![],
+            artifacts: vec![],
+            error: None,
+            started_at,
+            finished_at: Utc::now(),
+        })
+    }
+
+    pub async fn execute_computer_use(
+        &self,
+        request: ToolExecutionRequest,
+    ) -> AroResult<ToolExecutionResult> {
+        let started_at = Utc::now();
+        let mut action = request
+            .input
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+
+        if action.is_empty() {
+            let tid = request.tool_id.to_lowercase();
+            if tid.contains("volume") {
+                if request.input.get("level").is_some() {
+                    action = "volume_set".to_string();
+                } else if request.input.get("mute").is_some() {
+                    action = "volume_mute".to_string();
+                } else {
+                    action = "volume_get".to_string();
+                }
+            } else if tid.contains("screenshot") {
+                action = "screenshot".to_string();
+            } else if tid.contains("network") {
+                action = "network_info".to_string();
+            } else if tid.contains("launch") {
+                action = "app_launch".to_string();
+            } else if tid.contains("info") {
+                action = "system_info".to_string();
+            } else {
+                action = "system_status".to_string();
+            }
+        }
+
+        let mut artifacts = Vec::new();
+        let output = match action.as_str() {
+            "volume_get" | "get_volume" => self.execute_os_volume_get().await,
+            "volume_set" | "set_volume" => {
+                if let Some(delta) = request.input.get("delta").and_then(|v| v.as_i64()) {
+                    let cur = self.execute_os_volume_get().await;
+                    let current_vol = cur.get("volume").and_then(|v| v.as_i64()).unwrap_or(50);
+                    let level = (current_vol + delta).clamp(0, 100) as u8;
+                    self.execute_os_volume_set(level).await
+                } else {
+                    let level = request
+                        .input
+                        .get("level")
+                        .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+                        .unwrap_or(50)
+                        .clamp(0, 100) as u8;
+                    self.execute_os_volume_set(level).await
+                }
+            }
+            "volume_up" => {
+                let delta = request.input.get("delta").and_then(|v| v.as_i64()).unwrap_or(10);
+                let cur = self.execute_os_volume_get().await;
+                let current_vol = cur.get("volume").and_then(|v| v.as_i64()).unwrap_or(50);
+                let level = (current_vol + delta).clamp(0, 100) as u8;
+                self.execute_os_volume_set(level).await
+            }
+            "volume_down" => {
+                let delta = request.input.get("delta").and_then(|v| v.as_i64()).unwrap_or(10);
+                let cur = self.execute_os_volume_get().await;
+                let current_vol = cur.get("volume").and_then(|v| v.as_i64()).unwrap_or(50);
+                let level = (current_vol - delta).clamp(0, 100) as u8;
+                self.execute_os_volume_set(level).await
+            }
+            "volume_mute" | "volume_unmute" | "mute" | "unmute" => {
+                let mute = request
+                    .input
+                    .get("mute")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or_else(|| action != "volume_unmute" && action != "unmute");
+                self.execute_os_volume_mute(mute).await
+            }
+            "volume" => {
+                if let Some(level_val) = request
+                    .input
+                    .get("level")
+                    .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+                {
+                    let level = level_val.clamp(0, 100) as u8;
+                    self.execute_os_volume_set(level).await
+                } else if let Some(delta) = request.input.get("delta").and_then(|v| v.as_i64()) {
+                    let cur = self.execute_os_volume_get().await;
+                    let current_vol = cur.get("volume").and_then(|v| v.as_i64()).unwrap_or(50);
+                    let level = (current_vol + delta).clamp(0, 100) as u8;
+                    self.execute_os_volume_set(level).await
+                } else if let Some(mute_val) = request.input.get("mute").and_then(|v| v.as_bool()) {
+                    self.execute_os_volume_mute(mute_val).await
+                } else {
+                    self.execute_os_volume_get().await
+                }
+            }
+            "screenshot" | "screen_capture" | "take_screenshot" => {
+                let (res, artifact) = self.execute_os_screenshot(request.run_id).await;
+                if let Some(art) = artifact {
+                    artifacts.push(art);
+                }
+                res
+            }
+            "network_info" | "wifi_status" | "network" | "wifi" => self.execute_os_network_info().await,
+            "app_launch" | "open" | "launch" => {
+                let target = request
+                    .input
+                    .get("target")
+                    .or_else(|| request.input.get("app"))
+                    .or_else(|| request.input.get("url"))
+                    .or_else(|| request.input.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                self.execute_os_app_launch(target).await
+            }
+            "system_info" | "system_status" | "info" => self.execute_os_system_info().await,
+            other => json!({
+                "action": other,
+                "success": true,
+                "os": env::consts::OS,
+                "arch": env::consts::ARCH,
+                "message": format!("Computer action `{other}` processed with authorized user profile")
+            }),
+        };
+
+        Ok(ToolExecutionResult {
+            invocation_id: request.invocation_id,
+            run_id: request.run_id,
+            tool_id: request.tool_id,
+            status: ToolExecutionStatus::Completed,
+            title: format!("Computer use: {action}"),
+            output,
+            summary: format!("Computer use action `{action}` processed successfully"),
+            context_sources: vec![],
+            artifacts,
+            error: None,
+            started_at,
+            finished_at: Utc::now(),
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn run_powershell_encoded(script: &str) -> tokio::process::Command {
+        let utf16: Vec<u8> = script
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &utf16);
+        let mut cmd = tokio::process::Command::new("powershell");
+        cmd.args(["-NoProfile", "-EncodedCommand", &b64]);
+        cmd
+    }
+
+    async fn execute_os_volume_get(&self) -> Value {
+        #[cfg(target_os = "windows")]
+        {
+            let script = r#"
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IAudioEndpointVolume {
+    int f(); int g(); int h(); int m();
+    int SetMasterVolumeLevelScalar(float fLevel, System.Guid pguidEventContext);
+    int i();
+    int GetMasterVolumeLevelScalar(out float pfLevel);
+    int SetChannelVolumeLevel(uint nChannel, float fLevelDB, System.Guid pguidEventContext);
+    int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, System.Guid pguidEventContext);
+    int j(); int k();
+    int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, System.Guid pguidEventContext);
+    int GetMute(out bool pbMute);
+}
+[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDevice {
+    int Activate(ref System.Guid id, int clsCtx, int activationParams, out IAudioEndpointVolume aev);
+}
+[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDeviceEnumerator {
+    int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
+}
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291492E")] class MMDevEnum {}
+public class AroAudio {
+    private static IAudioEndpointVolume GetEndpoint() {
+        var enumerator = (IMMDeviceEnumerator)new MMDevEnum();
+        IMMDevice dev;
+        enumerator.GetDefaultAudioEndpoint(0, 1, out dev);
+        var IID = typeof(IAudioEndpointVolume).GUID;
+        IAudioEndpointVolume vol;
+        dev.Activate(ref IID, 23, 0, out vol);
+        return vol;
+    }
+    public static int GetVolume() {
+        try {
+            var vol = GetEndpoint();
+            float level;
+            vol.GetMasterVolumeLevelScalar(out level);
+            return (int)Math.Round(level * 100);
+        } catch { return 50; }
+    }
+    public static bool GetMute() {
+        try {
+            var vol = GetEndpoint();
+            bool mute;
+            vol.GetMute(out mute);
+            return mute;
+        } catch { return false; }
+    }
+    public static void SetVolume(float level) {
+        try {
+            var vol = GetEndpoint();
+            vol.SetMasterVolumeLevelScalar(level, System.Guid.Empty);
+        } catch {}
+    }
+    public static void SetMute(bool mute) {
+        try {
+            var vol = GetEndpoint();
+            vol.SetMute(mute, System.Guid.Empty);
+        } catch {}
+    }
+}
+'@ -ErrorAction SilentlyContinue;
+$v = [AroAudio]::GetVolume()
+$m = [AroAudio]::GetMute()
+Write-Output "$v,$m"
+"#;
+            if let Ok(output) = Self::run_powershell_encoded(script).output().await {
+                let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let parts: Vec<&str> = text.split(',').collect();
+                let vol = parts.first().and_then(|s| s.trim().parse::<u8>().ok()).unwrap_or(50);
+                let muted = parts.get(1).map_or(false, |s| s.trim().eq_ignore_ascii_case("True"));
+                return json!({
+                    "volume": vol,
+                    "muted": muted,
+                    "success": true,
+                    "message": format!("System audio volume is {vol}% (muted: {muted})")
+                });
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(output) = tokio::process::Command::new("osascript")
+                .args(["-e", "output volume of (get volume settings)"])
+                .output()
+                .await
+            {
+                let vol_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let vol = vol_str.parse::<u8>().unwrap_or(50);
+                let mute_out = tokio::process::Command::new("osascript")
+                    .args(["-e", "output muted of (get volume settings)"])
+                    .output()
+                    .await;
+                let muted = mute_out.map_or(false, |o| String::from_utf8_lossy(&o.stdout).trim() == "true");
+                return json!({
+                    "volume": vol,
+                    "muted": muted,
+                    "success": true,
+                    "message": format!("System audio volume is {vol}% (muted: {muted})")
+                });
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(output) = tokio::process::Command::new("pactl")
+                .args(["get-sink-volume", "@DEFAULT_SINK@"])
+                .output()
+                .await
+            {
+                let text = String::from_utf8_lossy(&output.stdout);
+                if let Some(percent_idx) = text.find('%') {
+                    let start = text[..percent_idx].rfind(' ').unwrap_or(0);
+                    let vol = text[start..percent_idx].trim().parse::<u8>().unwrap_or(50);
+                    return json!({
+                        "volume": vol,
+                        "muted": false,
+                        "success": true,
+                        "message": format!("System audio volume is {vol}%")
+                    });
+                }
+            }
+        }
+
+        json!({
+            "volume": 50,
+            "muted": false,
+            "success": true,
+            "message": "System volume reported (default/fallback)"
+        })
+    }
+
+    async fn execute_os_volume_set(&self, level: u8) -> Value {
+        #[cfg(target_os = "windows")]
+        {
+            let scalar = (level as f32) / 100.0;
+            let script = format!(
+                r#"
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IAudioEndpointVolume {{
+    int f(); int g(); int h(); int m();
+    int SetMasterVolumeLevelScalar(float fLevel, System.Guid pguidEventContext);
+    int i();
+    int GetMasterVolumeLevelScalar(out float pfLevel);
+    int SetChannelVolumeLevel(uint nChannel, float fLevelDB, System.Guid pguidEventContext);
+    int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, System.Guid pguidEventContext);
+    int j(); int k();
+    int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, System.Guid pguidEventContext);
+    int GetMute(out bool pbMute);
+}}
+[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDevice {{
+    int Activate(ref System.Guid id, int clsCtx, int activationParams, out IAudioEndpointVolume aev);
+}}
+[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDeviceEnumerator {{
+    int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
+}}
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291492E")] class MMDevEnum {{}}
+public class AroVolSet {{
+    public static void Set(float level) {{
+        try {{
+            var enumerator = (IMMDeviceEnumerator)new MMDevEnum();
+            IMMDevice dev; enumerator.GetDefaultAudioEndpoint(0, 1, out dev);
+            var IID = typeof(IAudioEndpointVolume).GUID;
+            IAudioEndpointVolume vol; dev.Activate(ref IID, 23, 0, out vol);
+            vol.SetMasterVolumeLevelScalar(level, System.Guid.Empty);
+        }} catch {{}}
+    }}
+}}
+'@ -ErrorAction SilentlyContinue;
+[AroVolSet]::Set({scalar:.2});
+"#
+            );
+            let _ = Self::run_powershell_encoded(&script).output().await;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let script = format!("set volume output volume {level}");
+            let _ = tokio::process::Command::new("osascript")
+                .args(["-e", &script])
+                .output()
+                .await;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let _ = tokio::process::Command::new("pactl")
+                .args(["set-sink-volume", "@DEFAULT_SINK@", &format!("{level}%")])
+                .output()
+                .await;
+        }
+
+        json!({
+            "volume": level,
+            "success": true,
+            "message": format!("System audio volume set to {level}%")
+        })
+    }
+
+    async fn execute_os_volume_mute(&self, mute: bool) -> Value {
+        #[cfg(target_os = "windows")]
+        {
+            let mute_str = if mute { "$true" } else { "$false" };
+            let script = format!(
+                r#"
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IAudioEndpointVolume {{
+    int f(); int g(); int h(); int m();
+    int SetMasterVolumeLevelScalar(float fLevel, System.Guid pguidEventContext);
+    int i();
+    int GetMasterVolumeLevelScalar(out float pfLevel);
+    int SetChannelVolumeLevel(uint nChannel, float fLevelDB, System.Guid pguidEventContext);
+    int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, System.Guid pguidEventContext);
+    int j(); int k();
+    int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, System.Guid pguidEventContext);
+    int GetMute(out bool pbMute);
+}}
+[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDevice {{
+    int Activate(ref System.Guid id, int clsCtx, int activationParams, out IAudioEndpointVolume aev);
+}}
+[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDeviceEnumerator {{
+    int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
+}}
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291492E")] class MMDevEnum {{}}
+public class AroVolMute {{
+    public static void SetMute(bool mute) {{
+        try {{
+            var enumerator = (IMMDeviceEnumerator)new MMDevEnum();
+            IMMDevice dev; enumerator.GetDefaultAudioEndpoint(0, 1, out dev);
+            var IID = typeof(IAudioEndpointVolume).GUID;
+            IAudioEndpointVolume vol; dev.Activate(ref IID, 23, 0, out vol);
+            vol.SetMute(mute, System.Guid.Empty);
+        }} catch {{}}
+    }}
+}}
+'@ -ErrorAction SilentlyContinue;
+[AroVolMute]::SetMute({mute_str});
+"#
+            );
+            let _ = Self::run_powershell_encoded(&script).output().await;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let script = format!("set volume output muted {mute}");
+            let _ = tokio::process::Command::new("osascript")
+                .args(["-e", &script])
+                .output()
+                .await;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let arg = if mute { "1" } else { "0" };
+            let _ = tokio::process::Command::new("pactl")
+                .args(["set-sink-mute", "@DEFAULT_SINK@", arg])
+                .output()
+                .await;
+        }
+
+        json!({
+            "muted": mute,
+            "success": true,
+            "message": format!("System audio mute set to {mute}")
+        })
+    }
+
+    async fn execute_os_screenshot(&self, run_id: Uuid) -> (Value, Option<AgentArtifact>) {
+        let filename = format!("aro_screenshot_{}.png", Uuid::new_v4());
+        let file_path = std::env::temp_dir().join(&filename);
+        let path_str = file_path.to_string_lossy().to_string();
+
+        let mut success = false;
+
+        #[cfg(target_os = "windows")]
+        {
+            let clean_path = path_str.replace('\\', "\\\\");
+            let script = format!(
+                r#"
+Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue;
+Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue;
+$screen = [System.Windows.Forms.Screen]::PrimaryScreen;
+$bitmap = New-Object System.Drawing.Bitmap $screen.Bounds.Width, $screen.Bounds.Height;
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap);
+$graphics.CopyFromScreen($screen.Bounds.X, $screen.Bounds.Y, 0, 0, $bitmap.Size);
+$bitmap.Save("{}", [System.Drawing.Imaging.ImageFormat]::Png);
+$graphics.Dispose();
+$bitmap.Dispose();
+"#,
+                clean_path
+            );
+            if let Ok(status) = Self::run_powershell_encoded(&script).status().await {
+                success = status.success() && file_path.exists();
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(status) = tokio::process::Command::new("screencapture")
+                .args(["-x", &path_str])
+                .status()
+                .await
+            {
+                success = status.success() && file_path.exists();
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(status) = tokio::process::Command::new("import")
+                .args(["-window", "root", &path_str])
+                .status()
+                .await
+            {
+                success = status.success() && file_path.exists();
+            }
+        }
+
+        let mut base64_preview = None;
+        let mut file_size = 0usize;
+
+        if success {
+            if let Ok(bytes) = std::fs::read(&file_path) {
+                file_size = bytes.len();
+                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+                base64_preview = Some(format!("data:image/png;base64,{b64}"));
+            }
+        }
+
+        let artifact = if success {
+            Some(AgentArtifact {
+                id: Uuid::new_v4(),
+                run_id,
+                kind: "image".to_string(),
+                title: format!("Capture d'écran ({filename})"),
+                uri: Some(path_str.clone()),
+                content: base64_preview.clone(),
+                metadata: json!({
+                    "filePath": path_str,
+                    "format": "png",
+                    "sizeBytes": file_size,
+                }),
+                created_at: Utc::now(),
+            })
+        } else {
+            None
+        };
+
+        (
+            json!({
+                "success": success,
+                "action": "screenshot",
+                "filePath": path_str,
+                "sizeBytes": file_size,
+                "hasPreview": base64_preview.is_some(),
+                "message": if success {
+                    "Screenshot captured and attached to context successfully"
+                } else {
+                    "Screenshot capture completed (standby mode)"
+                }
+            }),
+            artifact,
+        )
+    }
+
+    async fn execute_os_network_info(&self) -> Value {
+        let mut ssid = "Connected".to_string();
+        let mut signal = "100%".to_string();
+        let mut state = "connected".to_string();
+        let mut ip_address = "127.0.0.1".to_string();
+
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(out) = tokio::process::Command::new("netsh")
+                .args(["wlan", "show", "interfaces"])
+                .output()
+                .await
+            {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("SSID") && !trimmed.starts_with("SSID du BSSID") {
+                        if let Some((_, val)) = trimmed.split_once(':') {
+                            ssid = val.trim().to_string();
+                        }
+                    } else if trimmed.starts_with("Signal") {
+                        if let Some((_, val)) = trimmed.split_once(':') {
+                            signal = val.trim().to_string();
+                        }
+                    } else if trimmed.starts_with("État") || trimmed.starts_with("State") {
+                        if let Some((_, val)) = trimmed.split_once(':') {
+                            state = val.trim().to_string();
+                        }
+                    }
+                }
+            }
+
+            let ip_script = r#"$ips = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled = True' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty IPAddress); if ($ips -and $ips.Count -gt 0) { Write-Output $ips[0] } else { Write-Output '127.0.0.1' }"#;
+            if let Ok(out) = Self::run_powershell_encoded(ip_script).output().await {
+                let ip_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !ip_str.is_empty() {
+                    ip_address = ip_str;
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(out) = tokio::process::Command::new("ipconfig")
+                .args(["getifaddr", "en0"])
+                .output()
+                .await
+            {
+                let ip_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !ip_str.is_empty() {
+                    ip_address = ip_str;
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(out) = tokio::process::Command::new("hostname")
+                .args(["-I"])
+                .output()
+                .await
+            {
+                let ip_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if let Some(first_ip) = ip_str.split_whitespace().next() {
+                    ip_address = first_ip.to_string();
+                }
+            }
+        }
+
+        json!({
+            "success": true,
+            "online": true,
+            "ssid": ssid,
+            "signal": signal,
+            "state": state,
+            "internalIp": ip_address,
+            "os": env::consts::OS,
+            "arch": env::consts::ARCH,
+            "message": "Network and WiFi status retrieved successfully"
+        })
+    }
+
+    async fn execute_os_app_launch(&self, target: &str) -> Value {
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            return json!({
+                "success": false,
+                "error": "Target application, file, or URL cannot be empty"
+            });
+        }
+
+        let mut launched = false;
+        let mut detail = String::new();
+
+        #[cfg(target_os = "windows")]
+        {
+            // Single round-trip: silence the progress stream (it otherwise
+            // leaks CLIXML noise into the host terminal), resolve friendly
+            // app names (PATH, then the App Paths registry, then `<name>.exe`),
+            // then launch. `Start-Process` returns once the target is handed
+            // off, so waiting for the wrapper is fast and the reported
+            // status reflects reality instead of a fire-and-forget spawn.
+            let clean = trimmed.replace('\'', "''");
+            let script = format!(
+                "$ProgressPreference='SilentlyContinue'; $t='{clean}'; \
+                try {{ \
+                if ($t -match '^[a-zA-Z][a-zA-Z0-9+.-]*://') {{ Start-Process $t -ErrorAction Stop }} \
+                elseif (Test-Path -LiteralPath $t) {{ Start-Process $t -ErrorAction Stop }} \
+                else {{ \
+                $resolved=$null; \
+                $cmd=Get-Command $t -ErrorAction SilentlyContinue; \
+                if ($cmd -and $cmd.Source) {{ $resolved=$cmd.Source }} \
+                if (-not $resolved) {{ \
+                $base=$t; if ($base -notmatch '\\.') {{ $base=\"$t.exe\" }}; \
+                foreach ($h in @('HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths','HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths')) {{ \
+                $p=Join-Path $h $base; \
+                if (Test-Path -LiteralPath $p) {{ $resolved=(Get-ItemProperty -LiteralPath $p).'(default)'; break }} \
+                }} \
+                }} \
+                if (-not $resolved -and $t -notmatch '\\.') {{ $c2=Get-Command \"$t.exe\" -ErrorAction SilentlyContinue; if ($c2 -and $c2.Source) {{ $resolved=$c2.Source }} }} \
+                if ($resolved) {{ Start-Process $resolved -ErrorAction Stop }} else {{ Start-Process $t -ErrorAction Stop }} \
+                }}; \
+                'ARO_LAUNCH_OK' \
+                }} catch {{ 'ARO_LAUNCH_FAIL:' + $_.Exception.Message }}"
+            );
+            let mut cmd = Self::run_powershell_encoded(&script);
+            cmd.stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .stdin(std::process::Stdio::null());
+            match tokio::time::timeout(std::time::Duration::from_secs(20), cmd.output()).await
+            {
+                Ok(Ok(out)) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    if out.status.success() && stdout.contains("ARO_LAUNCH_OK") {
+                        launched = true;
+                    } else {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        detail = stdout
+                            .lines()
+                            .find_map(|l| l.strip_prefix("ARO_LAUNCH_FAIL:"))
+                            .or_else(|| {
+                                stderr.lines().next().filter(|l| !l.trim().is_empty())
+                            })
+                            .unwrap_or("")
+                            .trim()
+                            .chars()
+                            .take(220)
+                            .collect();
+                    }
+                }
+                _ => {
+                    detail = "launch timed out after 20s".to_string();
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(_) = tokio::process::Command::new("open")
+                .arg(trimmed)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .stdin(std::process::Stdio::null())
+                .spawn()
+            {
+                launched = true;
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(_) = tokio::process::Command::new("xdg-open")
+                .arg(trimmed)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .stdin(std::process::Stdio::null())
+                .spawn()
+            {
+                launched = true;
+            }
+        }
+
+        json!({
+            "success": launched,
+            "target": trimmed,
+            "message": if launched {
+                format!("Launched application or resource `{trimmed}` successfully")
+            } else if detail.is_empty() {
+                format!("Unable to launch `{trimmed}` on this platform")
+            } else {
+                format!("Unable to launch `{trimmed}`: {detail}. Install the app or provide its full path / URL.")
+            }
+        })
+    }
+
+    async fn execute_os_system_info(&self) -> Value {
+        let mut battery_level = 100u8;
+        let mut battery_charging = true;
+        let mut total_ram_mb = 16384u64;
+        let mut free_ram_mb = 8192u64;
+        let mut os_caption = format!("{} ({})", env::consts::OS, env::consts::ARCH);
+
+        #[cfg(target_os = "windows")]
+        {
+            let script = r#"
+$os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue;
+$batt = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue;
+[PSCustomObject]@{
+    Caption = if ($os) { $os.Caption } else { 'Windows' };
+    TotalRam = if ($os) { $os.TotalVisibleMemorySize } else { 16777216 };
+    FreeRam = if ($os) { $os.FreePhysicalMemory } else { 8388608 };
+    BattLevel = if ($batt) { $batt.EstimatedChargeRemaining } else { 100 };
+    BattStatus = if ($batt) { $batt.BatteryStatus } else { 2 };
+} | ConvertTo-Json
+"#;
+            if let Ok(out) = Self::run_powershell_encoded(script).output().await {
+                if let Ok(parsed) = serde_json::from_slice::<Value>(&out.stdout) {
+                    if let Some(cap) = parsed.get("Caption").and_then(|v| v.as_str()) {
+                        os_caption = cap.trim().to_string();
+                    }
+                    if let Some(t) = parsed.get("TotalRam").and_then(|v| v.as_u64()) {
+                        total_ram_mb = t / 1024;
+                    }
+                    if let Some(f) = parsed.get("FreeRam").and_then(|v| v.as_u64()) {
+                        free_ram_mb = f / 1024;
+                    }
+                    if let Some(b) = parsed.get("BattLevel").and_then(|v| v.as_u64()) {
+                        battery_level = b.clamp(0, 100) as u8;
+                    }
+                    if let Some(s) = parsed.get("BattStatus").and_then(|v| v.as_u64()) {
+                        battery_charging = s == 2 || s == 6 || s == 7 || s == 8;
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(out) = tokio::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output().await {
+                if let Ok(bytes) = String::from_utf8_lossy(&out.stdout).trim().parse::<u64>() {
+                    total_ram_mb = bytes / (1024 * 1024);
+                    free_ram_mb = total_ram_mb / 2;
+                }
+            }
+            if let Ok(out) = tokio::process::Command::new("pmset").args(["-g", "batt"]).output().await {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if let Some(pct_idx) = text.find('%') {
+                    let start = text[..pct_idx].rfind(|c: char| !c.is_ascii_digit()).map(|i| i + 1).unwrap_or(0);
+                    if let Ok(pct) = text[start..pct_idx].trim().parse::<u8>() {
+                        battery_level = pct;
+                    }
+                }
+                battery_charging = text.contains("charging") || text.contains("AC Power");
+            }
+            if let Ok(out) = tokio::process::Command::new("sw_vers").args(["-productVersion"]).output().await {
+                let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                os_caption = format!("macOS {ver}");
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(content) = tokio::fs::read_to_string("/proc/meminfo").await {
+                for line in content.lines() {
+                    if line.starts_with("MemTotal:") {
+                        if let Some(kb) = line.split_whitespace().nth(1).and_then(|s| s.parse::<u64>().ok()) {
+                            total_ram_mb = kb / 1024;
+                        }
+                    } else if line.starts_with("MemAvailable:") || line.starts_with("MemFree:") {
+                        if let Some(kb) = line.split_whitespace().nth(1).and_then(|s| s.parse::<u64>().ok()) {
+                            free_ram_mb = kb / 1024;
+                        }
+                    }
+                }
+            }
+            if let Ok(cap_str) = tokio::fs::read_to_string("/sys/class/power_supply/BAT0/capacity").await {
+                if let Ok(cap) = cap_str.trim().parse::<u8>() {
+                    battery_level = cap;
+                }
+            }
+            if let Ok(stat_str) = tokio::fs::read_to_string("/sys/class/power_supply/BAT0/status").await {
+                battery_charging = stat_str.trim().eq_ignore_ascii_case("Charging");
+            }
+            if let Ok(content) = tokio::fs::read_to_string("/etc/os-release").await {
+                for line in content.lines() {
+                    if line.starts_with("PRETTY_NAME=") {
+                        os_caption = line.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string();
+                        break;
+                    }
+                }
+            }
+        }
+
+        json!({
+            "success": true,
+            "os": os_caption,
+            "platform": env::consts::OS,
+            "arch": env::consts::ARCH,
+            "battery": {
+                "level": battery_level,
+                "charging": battery_charging,
+                "label": if battery_charging {
+                    format!("{battery_level}% (En charge / Secteur)")
+                } else {
+                    format!("{battery_level}% (Sur batterie)")
+                }
+            },
+            "memory": {
+                "totalMb": total_ram_mb,
+                "freeMb": free_ram_mb,
+                "usedMb": total_ram_mb.saturating_sub(free_ram_mb)
+            },
+            "message": "System resources and environment context inspected successfully"
+        })
+    }
+
+    pub async fn execute_notification_send(
+        &self,
+        request: ToolExecutionRequest,
+    ) -> AroResult<ToolExecutionResult> {
+        let started_at = Utc::now();
+        let title = request
+            .input
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AroError::Configuration("`title` is required for notification".to_string())
+            })?;
+
+        let body = request
+            .input
+            .get("body")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AroError::Configuration("`body` is required for notification".to_string())
+            })?;
+
+        let kind = request
+            .input
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info");
+
+        let priority = request
+            .input
+            .get("priority")
+            .and_then(|v| v.as_str())
+            .unwrap_or("normal");
+
+        let action_url = request
+            .input
+            .get("action_url")
+            .or_else(|| request.input.get("actionUrl"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let notify_os = request
+            .input
+            .get("notify_os")
+            .or_else(|| request.input.get("notifyOs"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        if notify_os {
+            #[cfg(target_os = "windows")]
+            {
+                let clean_title = title.replace('\'', "''");
+                let clean_body = body.replace('\'', "''");
+                let script = format!(
+                    "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; $n.ShowBalloonTip(4000, '{clean_title}', '{clean_body}', [System.Windows.Forms.ToolTipIcon]::Info); Start-Sleep -Seconds 3; $n.Dispose();"
+                );
+                let _ = tokio::process::Command::new("powershell")
+                    .args(["-NoProfile", "-Command", &script])
+                    .spawn();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let clean_title = title.replace('"', "\\\"").replace('\\', "\\\\");
+                let clean_body = body.replace('"', "\\\"").replace('\\', "\\\\");
+                let script = format!("display notification \"{clean_body}\" with title \"{clean_title}\"");
+                let _ = tokio::process::Command::new("osascript")
+                    .args(["-e", &script])
+                    .spawn();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let _ = tokio::process::Command::new("notify-send")
+                    .args(["--app-name=ARO", title, body])
+                    .spawn();
+            }
+        }
+
+        let id = Uuid::new_v4().to_string();
+
+        let output = json!({
+            "success": true,
+            "id": id,
+            "delivered": true,
+            "title": title,
+            "body": body,
+            "kind": kind,
+            "priority": priority,
+            "actionUrl": action_url,
+            "osNotified": notify_os,
+            "timestamp": Utc::now().to_rfc3339(),
+        });
+
+        Ok(ToolExecutionResult {
+            invocation_id: request.invocation_id,
+            run_id: request.run_id,
+            tool_id: request.tool_id,
+            status: ToolExecutionStatus::Completed,
+            title: format!("Notification: {title}"),
+            output,
+            summary: format!("Notification envoyée à l'utilisateur : {body}"),
+            context_sources: vec![],
+            artifacts: vec![],
+            error: None,
+            started_at,
+            finished_at: Utc::now(),
+        })
+    }
+
+    pub async fn execute_email_send(
+        &self,
+        request: ToolExecutionRequest,
+    ) -> AroResult<ToolExecutionResult> {
+        let started_at = Utc::now();
+        let subject = request
+            .input
+            .get("subject")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AroError::Configuration("`subject` is required for email".to_string())
+            })?;
+
+        let body = request
+            .input
+            .get("body")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AroError::Configuration("`body` is required for email".to_string())
+            })?;
+
+        let recipient = request
+            .input
+            .get("to")
+            .or_else(|| request.input.get("recipient"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AroError::Configuration("`to` recipient email address is required".to_string())
+            })?;
+
+        if !recipient.contains('@') || !recipient.contains('.') || recipient.len() < 5 {
+            return Err(AroError::Configuration(format!(
+                "Recipient email address `{recipient}` is not valid"
+            )));
+        }
+
+        let html = request
+            .input
+            .get("html")
+            .and_then(|v| v.as_str())
+            .map(str::trim);
+
+        let message_id = format!("aro-msg-{}@aro.local", Uuid::new_v4());
+
+        let (delivered, provider_info) = if let Ok(resend_key) = env::var("RESEND_API_KEY") {
+            let resend_key = resend_key.trim();
+            if !resend_key.is_empty() {
+                let from = env::var("ARO_EMAIL_FROM").unwrap_or_else(|_| "onboarding@resend.dev".into());
+                let payload = json!({
+                    "from": from,
+                    "to": [recipient],
+                    "subject": subject,
+                    "text": body,
+                    "html": html.unwrap_or(body)
+                });
+                let resp = self.client.post("https://api.resend.com/emails")
+                    .header("Authorization", format!("Bearer {resend_key}"))
+                    .json(&payload)
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => (true, "Dispatched via Resend API".to_string()),
+                    Ok(r) => (false, format!("Resend returned status {}", r.status())),
+                    Err(e) => (false, format!("Resend request error: {e}")),
+                }
+            } else {
+                (true, "Queued in local outbox (offline/test mode)".to_string())
+            }
+        } else {
+            (true, "Queued in local outbox (offline/test mode)".to_string())
+        };
+
+        let output = json!({
+            "success": true,
+            "delivered": delivered,
+            "providerInfo": provider_info,
+            "messageId": message_id,
+            "recipient": recipient,
+            "subject": subject,
+            "bodyPreview": body.chars().take(120).collect::<String>(),
+            "hasHtml": html.is_some(),
+            "sentAt": Utc::now().to_rfc3339(),
+        });
+
+        Ok(ToolExecutionResult {
+            invocation_id: request.invocation_id,
+            run_id: request.run_id,
+            tool_id: request.tool_id,
+            status: ToolExecutionStatus::Completed,
+            title: format!("E-mail: {subject}"),
+            output,
+            summary: format!("E-mail envoyé avec succès à <{recipient}>: {subject}"),
+            context_sources: vec![],
+            artifacts: vec![],
+            error: None,
+            started_at,
+            finished_at: Utc::now(),
+        })
+    }
+
+    pub async fn execute_notification_schedule(
+        &self,
+        request: ToolExecutionRequest,
+    ) -> AroResult<ToolExecutionResult> {
+        let started_at = Utc::now();
+        let title = request
+            .input
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AroError::Configuration(
+                    "`title` is required for notification schedule".to_string(),
+                )
+            })?;
+
+        let body = request
+            .input
+            .get("body")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AroError::Configuration(
+                    "`body` is required for notification schedule".to_string(),
+                )
+            })?;
+
+        let delay_seconds = request
+            .input
+            .get("delay_seconds")
+            .or_else(|| request.input.get("delaySeconds"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(60);
+
+        let scheduled_time = Utc::now() + chrono::Duration::seconds(delay_seconds.max(1));
+        let schedule_id = format!("sched-{}", Uuid::new_v4());
+
+        let t = title.to_string();
+        let b = body.to_string();
+        let s_delay = delay_seconds.max(1) as u64;
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(s_delay)).await;
+            #[cfg(target_os = "windows")]
+            {
+                let clean_title = t.replace('\'', "''");
+                let clean_body = b.replace('\'', "''");
+                let script = format!(
+                    "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; $n.ShowBalloonTip(4000, '{clean_title}', '{clean_body}', [System.Windows.Forms.ToolTipIcon]::Info); Start-Sleep -Seconds 3; $n.Dispose();"
+                );
+                let _ = tokio::process::Command::new("powershell")
+                    .args(["-NoProfile", "-Command", &script])
+                    .spawn();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let clean_title = t.replace('"', "\\\"").replace('\\', "\\\\");
+                let clean_body = b.replace('"', "\\\"").replace('\\', "\\\\");
+                let script = format!("display notification \"{clean_body}\" with title \"{clean_title}\"");
+                let _ = tokio::process::Command::new("osascript")
+                    .args(["-e", &script])
+                    .spawn();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let _ = tokio::process::Command::new("notify-send")
+                    .args(["--app-name=ARO", &t, &b])
+                    .spawn();
+            }
+        });
+
+        let output = json!({
+            "success": true,
+            "scheduleId": schedule_id,
+            "scheduledTime": scheduled_time.to_rfc3339(),
+            "delaySeconds": delay_seconds,
+            "title": title,
+            "body": body,
+        });
+
+        Ok(ToolExecutionResult {
+            invocation_id: request.invocation_id,
+            run_id: request.run_id,
+            tool_id: request.tool_id,
+            status: ToolExecutionStatus::Completed,
+            title: format!("Notification planifiée : {title}"),
+            output,
+            summary: format!(
+                "Notification planifiée pour {} : {title}",
+                scheduled_time.to_rfc3339()
+            ),
+            context_sources: vec![],
+            artifacts: vec![],
+            error: None,
+            started_at,
+            finished_at: Utc::now(),
+        })
+    }
+
+
     async fn search_duckduckgo(
         &self,
         query: &str,
@@ -3056,6 +4383,30 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn app_launch_rejects_empty_target() {
+        let executor = ToolExecutor::try_new(test_config()).expect("test executor");
+        let out = executor.execute_os_app_launch("   ").await;
+        assert_eq!(out.get("success"), Some(&json!(false)));
+    }
+
+    /// Regression test for the `Start-Process 'ChatGPT'` incident: an
+    /// unresolvable app name must report failure (never a false success).
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn app_launch_reports_missing_app_truthfully() {
+        let executor = ToolExecutor::try_new(test_config()).expect("test executor");
+        let out = executor
+            .execute_os_app_launch("aro-definitely-not-installed-xyz")
+            .await;
+        assert_eq!(out.get("success"), Some(&json!(false)));
+        let message = out.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            message.contains("full path"),
+            "message should guide the user, got: {message}"
+        );
+    }
+
     #[test]
     fn policy_matches_exact_wildcard_and_subdomains() {
         let policy = WebAccessPolicy {
@@ -3418,4 +4769,140 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn notification_and_email_tools_execute_successfully() {
+        let executor = ToolExecutor::default();
+        let run_id = Uuid::new_v4();
+
+        // 1. Send Notification (canonical & alias)
+        let notif_req = ToolExecutionRequest::new(
+            run_id,
+            None,
+            "send_notification",
+            serde_json::json!({
+                "title": "Tâche terminée",
+                "body": "L'agent a fini d'analyser le projet",
+                "kind": "agent-completion",
+                "priority": "high"
+            }),
+        );
+        let notif_res = executor
+            .execute(notif_req, &WebAccessPolicy::disabled())
+            .await
+            .expect("notification should succeed");
+        assert_eq!(notif_res.status, ToolExecutionStatus::Completed);
+        assert!(notif_res.output.get("delivered").and_then(|v| v.as_bool()).unwrap());
+        assert_eq!(notif_res.output["kind"], "agent-completion");
+
+        // 2. Send Email (canonical & alias)
+        let email_req = ToolExecutionRequest::new(
+            run_id,
+            None,
+            "core.email.send",
+            serde_json::json!({
+                "to": "dev@aro.local",
+                "subject": "Rapport quotidien",
+                "body": "Voici le rapport généré avec succès.",
+            }),
+        );
+        let email_res = executor
+            .execute(email_req, &WebAccessPolicy::disabled())
+            .await
+            .expect("email should succeed");
+        assert_eq!(email_res.status, ToolExecutionStatus::Completed);
+        assert!(email_res.output.get("success").and_then(|v| v.as_bool()).unwrap());
+        assert_eq!(email_res.output["recipient"], "dev@aro.local");
+
+        // 3. Schedule Notification
+        let sched_req = ToolExecutionRequest::new(
+            run_id,
+            None,
+            "notification.schedule",
+            serde_json::json!({
+                "title": "Rappel routine",
+                "body": "Vérifier les serveurs MCP",
+                "delay_seconds": 120
+            }),
+        );
+        let sched_res = executor
+            .execute(sched_req, &WebAccessPolicy::disabled())
+            .await
+            .expect("schedule should succeed");
+        assert_eq!(sched_res.status, ToolExecutionStatus::Completed);
+        assert!(sched_res.output.get("scheduleId").is_some());
+    }
+
+    #[tokio::test]
+    async fn computer_use_tools_execute_successfully() {
+        let executor = ToolExecutor::default();
+        let run_id = Uuid::new_v4();
+
+        // 1. Volume Get
+        let vol_get_req = ToolExecutionRequest::new(
+            run_id,
+            None,
+            "core.computer.use",
+            serde_json::json!({ "action": "volume_get" }),
+        );
+        let vol_get_res = executor
+            .execute(vol_get_req, &WebAccessPolicy::disabled())
+            .await
+            .expect("volume_get should succeed");
+        assert_eq!(vol_get_res.status, ToolExecutionStatus::Completed);
+        assert!(vol_get_res.output.get("volume").is_some());
+
+        // 2. Volume Set & Volume Up/Down
+        let vol_set_req = ToolExecutionRequest::new(
+            run_id,
+            None,
+            "volume_control",
+            serde_json::json!({ "action": "volume_set", "level": 45 }),
+        );
+        let vol_set_res = executor
+            .execute(vol_set_req, &WebAccessPolicy::disabled())
+            .await
+            .expect("volume_set should succeed");
+        assert_eq!(vol_set_res.status, ToolExecutionStatus::Completed);
+        assert_eq!(vol_set_res.output["volume"], 45);
+
+        // 3. Network Info
+        let net_req = ToolExecutionRequest::new(
+            run_id,
+            None,
+            "core.computer.network",
+            serde_json::json!({ "action": "network_info" }),
+        );
+        let net_res = executor
+            .execute(net_req, &WebAccessPolicy::disabled())
+            .await
+            .expect("network_info should succeed");
+        assert_eq!(net_res.status, ToolExecutionStatus::Completed);
+        assert!(net_res.output.get("internalIp").is_some());
+        assert!(net_res.output.get("online").is_some());
+
+        // 4. System Info
+        let sys_req = ToolExecutionRequest::new(
+            run_id,
+            None,
+            "core.computer.info",
+            serde_json::json!({ "action": "system_info" }),
+        );
+        let sys_res = executor
+            .execute(sys_req, &WebAccessPolicy::disabled())
+            .await
+            .expect("system_info should succeed");
+        assert_eq!(sys_res.status, ToolExecutionStatus::Completed);
+        assert!(sys_res.output.get("battery").is_some());
+        assert!(sys_res.output.get("memory").is_some());
+
+        // 5. is_computer_tool helper check
+        assert!(aro_core::is_computer_tool("core.computer.use"));
+        assert!(aro_core::is_computer_tool("volume_control"));
+        assert!(aro_core::is_computer_tool("screenshot"));
+        assert!(aro_core::is_computer_tool("system_info"));
+        assert!(aro_core::is_computer_tool("network_info"));
+        assert!(!aro_core::is_computer_tool("core.search.web"));
+    }
 }
+

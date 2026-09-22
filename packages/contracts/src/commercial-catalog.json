@@ -1,0 +1,13 @@
+{
+  "version": "2026-09-20",
+  "currency": "EUR",
+  "licenseModel": "source-available",
+  "pricingStatus": "launch-proposal",
+  "inferenceIncluded": false,
+  "plans": [
+    { "id": "community", "name": "Community", "amountCents": 0, "interval": "month", "taxBehavior": "none", "perSeat": false, "commercialUse": false, "selfServe": false, "features": ["local_workspace", "local_models", "byok", "data_export"] },
+    { "id": "cloud", "name": "Cloud", "amountCents": 1200, "interval": "month", "taxBehavior": "inclusive", "perSeat": false, "commercialUse": false, "selfServe": true, "features": ["local_workspace", "local_models", "byok", "data_export", "managed_sync"] },
+    { "id": "business", "name": "Business", "amountCents": 2900, "interval": "month", "taxBehavior": "exclusive", "perSeat": true, "commercialUse": true, "selfServe": true, "features": ["local_workspace", "local_models", "byok", "data_export", "managed_sync", "commercial_license", "team_administration"] },
+    { "id": "enterprise", "name": "Enterprise", "amountCents": 1200000, "interval": "year", "taxBehavior": "exclusive", "perSeat": false, "commercialUse": true, "selfServe": false, "startingAt": true, "features": ["local_workspace", "local_models", "byok", "data_export", "managed_sync", "commercial_license", "team_administration", "contractual_support"] }
+  ]
+}

@@ -13,10 +13,14 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/api.dart';
+import '../core/mentions.dart';
 import '../core/workspace.dart';
 import '../ui/design.dart';
 import '../ui/desktop_controls.dart';
 import '../core/personalities.dart';
+import 'command_palette.dart';
+import 'mention_sheet.dart';
+import 'notifications.dart';
 import 'settings.dart';
 import 'settings_catalog.dart';
 import 'workspace_panel.dart';
@@ -55,6 +59,8 @@ class _HomePageState extends State<HomePage>
   Timer? _copiedTimer;
   // Message dont les actions sont révélées (tap sur la bulle, façon iMessage).
   String? _actionsFor;
+  // Trigger @mention actif dans le composer (miroir desktop mention-model).
+  MentionTrigger? _mentionTrigger;
 
   void _toggleActions(String id) {
     HapticFeedback.selectionClick();
@@ -278,6 +284,7 @@ class _HomePageState extends State<HomePage>
     final text = composer.text;
     composer.clear();
     _actionsFor = null;
+    _mentionTrigger = null;
     await w.send(text);
     if (!mounted) return;
     if (w.error != null) {
@@ -287,6 +294,68 @@ class _HomePageState extends State<HomePage>
       await tts.setLanguage('fr-FR');
       await tts.speak('${w.messages.last['content']}');
     }
+  }
+
+  /// Régénère la dernière réponse en renvoyant le dernier message
+  /// utilisateur comme nouveau tour (le cloud n'expose pas de route
+  /// `/regenerate` : aucun faux endpoint, l'historique reste linéaire).
+  Future<void> regenerate() async {
+    if (w.sending) return;
+    String? lastUser;
+    for (var i = w.messages.length - 1; i >= 0; i--) {
+      if (w.messages[i]['role'] == 'user' &&
+          '${w.messages[i]['content'] ?? ''}'.trim().isNotEmpty) {
+        lastUser = '${w.messages[i]['content']}';
+        break;
+      }
+    }
+    if (lastUser == null || lastUser.trim().isEmpty) return;
+    HapticFeedback.mediumImpact();
+    _actionsFor = null;
+    await w.send(lastUser);
+    if (!mounted) return;
+    if (w.error != null) {
+      composer.text = w.draft;
+    }
+  }
+
+  void _onComposerChanged(String value) {
+    w.saveDraft(value);
+    final cursor = composer.selection.baseOffset < 0
+        ? value.length
+        : composer.selection.baseOffset;
+    final trigger = detectMentionQuery(value, cursor);
+    if ('${trigger?.query}' != '${_mentionTrigger?.query}' ||
+        trigger?.startIndex != _mentionTrigger?.startIndex) {
+      setState(() => _mentionTrigger = trigger);
+    }
+  }
+
+  Future<void> _openMentions({String? initialQuery}) async {
+    final trigger = _mentionTrigger;
+    final picked = await openMentionSheet(
+      context: context,
+      workspace: w,
+      initialQuery: initialQuery ?? trigger?.query ?? '',
+    );
+    if (picked == null || !mounted) return;
+    if (trigger != null &&
+        trigger.startIndex >= 0 &&
+        trigger.endIndex <= composer.text.length) {
+      final applied = applyMentionSelection(composer.text, trigger, picked);
+      composer.text = applied.newText;
+      composer.selection = TextSelection.collapsed(offset: applied.newCursor);
+    } else {
+      final cursor = composer.selection.baseOffset < 0
+          ? composer.text.length
+          : composer.selection.baseOffset;
+      final before = composer.text.substring(0, cursor);
+      final after = composer.text.substring(cursor);
+      final sep = before.isEmpty || before.endsWith(' ') ? '' : ' ';
+      composer.text = '$before$sep@$picked $after';
+    }
+    w.saveDraft(composer.text);
+    setState(() => _mentionTrigger = null);
   }
 
   // ============ Header contextuel (miroir ConversationTopbar, en mieux) ============
@@ -550,6 +619,22 @@ class _HomePageState extends State<HomePage>
           select(null),
       const SingleActivator(LogicalKeyboardKey.comma, control: true): settings,
       const SingleActivator(LogicalKeyboardKey.comma, meta: true): settings,
+      const SingleActivator(LogicalKeyboardKey.keyK, control: true): () =>
+          openCommandPalette(
+            context: context,
+            workspace: w,
+            onSelectConversation: select,
+            onNewConversation: () => select(null),
+            onOpenWorkspace: openRightSidebar,
+          ),
+      const SingleActivator(LogicalKeyboardKey.keyK, meta: true): () =>
+          openCommandPalette(
+            context: context,
+            workspace: w,
+            onSelectConversation: select,
+            onNewConversation: () => select(null),
+            onOpenWorkspace: openRightSidebar,
+          ),
     },
     child: Focus(
       autofocus: true,
@@ -578,10 +663,22 @@ class _HomePageState extends State<HomePage>
                     if (wide) const SizedBox(width: 24),
                     _headerTitleBlock(),
                     IconButton(
+                      tooltip: 'Recherche globale (Ctrl K)',
+                      onPressed: () => openCommandPalette(
+                        context: context,
+                        workspace: w,
+                        onSelectConversation: select,
+                        onNewConversation: () => select(null),
+                        onOpenWorkspace: openRightSidebar,
+                      ),
+                      icon: const Icon(LucideIcons.search, size: 20),
+                    ),
+                    IconButton(
                       tooltip: 'Nouvelle conversation',
                       onPressed: w.sending ? null : () => select(null),
                       icon: const Icon(LucideIcons.squarePen, size: 20),
                     ),
+                    NotificationBell(workspace: w),
                     IconButton(
                       tooltip: 'Plan, fichiers et agents',
                       onPressed: openRightSidebar,
@@ -596,12 +693,97 @@ class _HomePageState extends State<HomePage>
               if (w.error != null)
                 Padding(
                   padding: const EdgeInsets.all(12),
-                  child: Notice(
-                    w.error!,
-                    error: true,
-                    retry: () => w.activeId == null
-                        ? w.refresh()
-                        : w.select(w.activeId),
+                  child: _isOfflineError(w.error!)
+                      ? Container(
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: const Color(0xffff9500).withValues(alpha: .1),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: const Color(
+                                0xffff9500,
+                              ).withValues(alpha: .3),
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                LucideIcons.wifiOff,
+                                size: 18,
+                                color: Color(0xffff9500),
+                              ),
+                              const SizedBox(width: 10),
+                              const Expanded(
+                                child: Text(
+                                  'Hors-ligne : vos brouillons sont conservés sur ce téléphone.',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xffff9500),
+                                  ),
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'Réessayer',
+                                onPressed: () => w.activeId == null
+                                    ? w.refresh()
+                                    : w.select(w.activeId),
+                                icon: const Icon(LucideIcons.refreshCw),
+                              ),
+                            ],
+                          ),
+                        )
+                      : Notice(
+                          w.error!,
+                          error: true,
+                          retry: () => w.activeId == null
+                              ? w.refresh()
+                              : w.select(w.activeId),
+                        ),
+                ),
+              // Banniere IA compacte (2 lignes max) : sur petit ecran + clavier
+              // ouvert, une notice detaillee deborderait. Le detail vit dans
+              // Reglages › Modeles ; l'erreur d'envoi reste detaillee.
+              if (w.aiStatusKnown && !w.aiCanGenerate)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.error.withValues(alpha: .08),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          LucideIcons.circleAlert,
+                          size: 16,
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            w.aiGuidanceShort(),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Theme.of(context).colorScheme.error,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Réessayer',
+                          onPressed: () => w.refreshAiStatus(),
+                          icon: const Icon(LucideIcons.refreshCw, size: 16),
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               Expanded(
@@ -906,29 +1088,38 @@ class _HomePageState extends State<HomePage>
                                   ),
                                 ],
                         ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              LucideIcons.squarePen,
-                              size: 16,
-                              color: w.sending
-                                  ? scheme.onSurface.withValues(alpha: 0.4)
-                                  : Colors.white,
-                            ),
-                            const SizedBox(width: 9),
-                            Text(
-                              'Nouvelle conversation',
-                              style: TextStyle(
-                                fontSize: 14.5,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: -0.2,
+                        child: Center(
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                LucideIcons.squarePen,
+                                size: 16,
                                 color: w.sending
                                     ? scheme.onSurface.withValues(alpha: 0.4)
                                     : Colors.white,
                               ),
-                            ),
-                          ],
+                              const SizedBox(width: 9),
+                              Flexible(
+                                child: Text(
+                                  'Nouvelle conversation',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 14.5,
+                                    fontWeight: FontWeight.w600,
+                                    letterSpacing: -0.2,
+                                    color: w.sending
+                                        ? scheme.onSurface.withValues(
+                                            alpha: 0.4,
+                                          )
+                                        : Colors.white,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -2161,6 +2352,20 @@ class _HomePageState extends State<HomePage>
     );
   }
 
+  bool _isOfflineError(String error) {
+    final lower = error.toLowerCase();
+    return lower.contains('connexion au serveur impossible') ||
+        lower.contains('met trop de temps') ||
+        lower.contains('réseau');
+  }
+
+  void _fillComposer(String value) {
+    HapticFeedback.selectionClick();
+    composer.text = value;
+    w.saveDraft(value);
+    setState(() => _mentionTrigger = null);
+  }
+
   Widget emptyChat() => Center(
     child: SingleChildScrollView(
       padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 24),
@@ -2176,7 +2381,38 @@ class _HomePageState extends State<HomePage>
               width: 84,
               height: 84,
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 18),
+            Text(
+              'Bonjour ${w.userName.split(' ').first}',
+              style: Theme.of(context).textTheme.titleLarge,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Posez une question, joignez un fichier (+) ou citez un outil (@).',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: Color(0xff86868b)),
+            ),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: [
+                for (final s in [
+                  'Explique ce projet en 3 points',
+                  '@ pour citer un fichier',
+                  'Établis un plan d’action',
+                ])
+                  ActionChip(
+                    label: Text(s, style: const TextStyle(fontSize: 12)),
+                    onPressed: s.startsWith('@')
+                        ? () => _openMentions(initialQuery: '')
+                        : () => _fillComposer(s),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 18),
             const Text(
               'PROFIL ARO',
               style: TextStyle(
@@ -2285,20 +2521,37 @@ class _HomePageState extends State<HomePage>
     final text = _contentWithoutThinking(content);
     if (text.isEmpty) return;
     await perform(context, () async {
-      final key = 'aro.saved.${w.api.accountKey}';
-      final raw = w.preferences.getString(key);
-      final List<dynamic> list = raw == null || raw.isEmpty
-          ? []
-          : List<dynamic>.from(jsonDecode(raw) as List);
-      list.insert(0, {
-        'text': text.substring(0, text.length.clamp(0, 2000)),
-        'at': DateTime.now().toIso8601String(),
-      });
-      await w.preferences.setString(
-        key,
-        jsonEncode(list.take(100).toList()),
-      );
-    }, success: 'Retenu ✓');
+      try {
+        await w.api.request(
+          'POST',
+          '/collections/memories',
+          body: {
+            'content': text.substring(0, text.length.clamp(0, 2000)),
+            'category': 'personal',
+            'source': 'chat',
+            'pinned': false,
+          },
+        );
+      } catch (_) {
+        final key = 'aro.saved.${w.api.accountKey}';
+        final raw = w.preferences.getString(key);
+        final List<dynamic> list = raw == null || raw.isEmpty
+            ? []
+            : List<dynamic>.from(jsonDecode(raw) as List);
+        list.insert(0, {
+          'text': text.substring(0, text.length.clamp(0, 2000)),
+          'at': DateTime.now().toIso8601String(),
+        });
+        await w.preferences.setString(
+          key,
+          jsonEncode(list.take(100).toList()),
+        );
+        throw const ApiException(
+          0,
+          'Serveur injoignable — retenu localement sur ce téléphone.',
+        );
+      }
+    }, success: 'Mémorisé ✓');
   }
 
   Widget _avatar(bool user) => Container(
@@ -2923,14 +3176,16 @@ class _HomePageState extends State<HomePage>
     ),
   );
 
-  Widget messageList() => ListView.builder(
-    controller: scroll,
-    physics: const BouncingScrollPhysics(
-      parent: AlwaysScrollableScrollPhysics(),
-    ),
-    keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
-    itemCount: w.messages.length,
+  Widget messageList() => RefreshIndicator(
+    onRefresh: () => w.activeId == null ? w.refresh() : w.select(w.activeId),
+    child: ListView.builder(
+      controller: scroll,
+      physics: const BouncingScrollPhysics(
+        parent: AlwaysScrollableScrollPhysics(),
+      ),
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+      itemCount: w.messages.length,
     itemBuilder: (context, index) {
       final item = w.messages[index], user = item['role'] == 'user';
       final raw = '${item['content'] ?? ''}';
@@ -3160,6 +3415,12 @@ class _HomePageState extends State<HomePage>
                           label: 'Lire',
                           onTap: () => tts.speak(content),
                         ),
+                        if (isLast && !w.sending)
+                          _actionPill(
+                            icon: LucideIcons.refreshCw,
+                            label: 'Régénérer',
+                            onTap: () => regenerate(),
+                          ),
                         _actionPill(
                           icon: LucideIcons.thumbsUp,
                           label: 'Utile',
@@ -3191,6 +3452,7 @@ class _HomePageState extends State<HomePage>
         ),
       );
     },
+  ),
   );
   Future<void> editMessage(Json item) async {
     final result = await editFields(context, 'Modifier le message', const [
@@ -3218,11 +3480,18 @@ class _HomePageState extends State<HomePage>
         ),
       ),
     ),
-    icon: const Icon(LucideIcons.shield, size: 14),
-    label: const Text('Autorisations', style: TextStyle(fontSize: 11)),
+    icon: const Icon(LucideIcons.shield, size: 13),
+    label: const Text(
+      'Droits',
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+    ),
     style: OutlinedButton.styleFrom(
       minimumSize: const Size(0, 40),
-      padding: const EdgeInsets.symmetric(horizontal: 9),
+      maximumSize: const Size(130, 40),
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       foregroundColor: const Color(0xff009ee3),
       backgroundColor: const Color(0xff009ee3).withValues(alpha: .06),
       side: BorderSide(color: const Color(0xff009ee3).withValues(alpha: .25)),
@@ -3230,8 +3499,17 @@ class _HomePageState extends State<HomePage>
     ),
   );
 
+  /// Sélecteur modèle du composer : surcharge PAR MESSAGE (comme desktop),
+  /// sans muter le défaut d'organisation. Le serveur doit servir exactement
+  /// le modèle choisi (local ou cloud opt-in) ou échouer honnêtement.
   Future<void> chooseModel() async {
     final model = object(w.settings['model']);
+    final ai = w.aiStatus;
+    final runnable = <String>{
+      for (final m in (ai['runnableModelIds'] as List? ?? [])) '$m',
+    };
+    bool refRunnable(Json ref) =>
+        ai.isEmpty || runnable.contains('${ref['modelId']}');
     final refs = <Json>[
       for (final provider in records(model['providers']))
         if (provider['enabled'] == true)
@@ -3243,6 +3521,11 @@ class _HomePageState extends State<HomePage>
               'providerName': provider['displayName'] ?? provider['kind'],
             },
     ];
+    final current = w.effectiveModelRef;
+    bool isCurrent(Json ref) =>
+        '${current['modelId']}' == '${ref['modelId']}' &&
+        '${current['providerId']}' == '${ref['providerId']}';
+    final activeDefault = object(model['activeModelRef']);
     final selected = await showModalBottomSheet<Json>(
       context: context,
       isScrollControlled: true,
@@ -3262,6 +3545,18 @@ class _HomePageState extends State<HomePage>
               Expanded(
                 child: ListView(
                   children: [
+                    ListTile(
+                      leading: const Icon(LucideIcons.building2, size: 18),
+                      title: const Text('Modèle par défaut (organisation)'),
+                      subtitle: Text(
+                        '${activeDefault['label'] ?? activeDefault['modelId'] ?? ''}',
+                      ),
+                      trailing: w.modelOverride == null
+                          ? const Icon(LucideIcons.check, size: 18)
+                          : null,
+                      onTap: () => Navigator.pop(context, const {'__default': true}),
+                    ),
+                    const Divider(),
                     if (refs.isEmpty)
                       const Padding(
                         padding: EdgeInsets.all(24),
@@ -3273,15 +3568,17 @@ class _HomePageState extends State<HomePage>
                       ListTile(
                         leading: const Icon(LucideIcons.cpu, size: 18),
                         title: Text('${ref['label'] ?? ref['modelId']}'),
-                        subtitle: Text('${ref['providerName']}'),
-                        trailing:
-                            object(model['activeModelRef'])['modelId'] ==
-                                    ref['modelId'] &&
-                                object(model['activeModelRef'])['providerId'] ==
-                                    ref['providerId']
+                        subtitle: Text(
+                          refRunnable(ref)
+                              ? '${ref['providerName']}'
+                              : '${ref['providerName']} · Non exécuté ici',
+                        ),
+                        trailing: isCurrent(ref)
                             ? const Icon(LucideIcons.check, size: 18)
                             : null,
-                        onTap: () => Navigator.pop(context, ref),
+                        onTap: refRunnable(ref)
+                            ? () => Navigator.pop(context, ref)
+                            : null,
                       ),
                   ],
                 ),
@@ -3292,18 +3589,28 @@ class _HomePageState extends State<HomePage>
       ),
     );
     if (selected == null) return;
-    final next = w.copySettings();
-    final nextModel = object(next['model']);
-    final ref = Map<String, dynamic>.of(selected)..remove('providerName');
-    nextModel['activeModelRef'] = ref;
-    nextModel['provider'] = ref['providerKind'];
-    nextModel['modelId'] = ref['modelId'];
-    next['model'] = nextModel;
-    await w.saveSettings(next);
+    if (selected['__default'] == true) {
+      w.setModelOverride(null);
+      return;
+    }
+    final ref = Map<String, dynamic>.of(selected)
+      ..remove('providerName')
+      ..remove('__default');
+    w.setModelOverride(ref);
   }
 
+  // Padding bas FIXE : le Scaffold reactive deja au clavier
+  // (resizeToAvoidBottomInset). L'ancien `viewInsets * 0.35` faisait gonfler
+  // le composer PENDANT que le corps retrecissait -> double comptage et
+  // "BOTTOM OVERFLOWED" des que le clavier s'ouvrait. Le fixe supprime
+  // aussi le decalage d'animation de 200 ms qui depassait en transitoire.
   Widget composerView() => Padding(
-    padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+    padding: EdgeInsets.fromLTRB(
+      16,
+      8,
+      16,
+      10 + MediaQuery.viewPaddingOf(context).bottom * 0.2,
+    ),
     child: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -3356,15 +3663,59 @@ class _HomePageState extends State<HomePage>
                     ],
                   ),
                 ),
+              if (_mentionTrigger != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(2, 0, 2, 6),
+                  child: Material(
+                    color: Theme.of(context).colorScheme.primary.withValues(
+                      alpha: .07,
+                    ),
+                    borderRadius: BorderRadius.circular(12),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(12),
+                      onTap: () => _openMentions(),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 8,
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(LucideIcons.atSign, size: 14),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                _mentionTrigger!.query.isEmpty
+                                    ? 'Mentionner un fichier, skill, agent…'
+                                    : '@${_mentionTrigger!.query}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Text(
+                              'Voir',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               TextField(
                 controller: composer,
                 enabled: !w.sending,
                 minLines: 1,
                 maxLines: 6,
-                onChanged: w.saveDraft,
+                onChanged: _onComposerChanged,
                 textCapitalization: TextCapitalization.sentences,
                 decoration: const InputDecoration(
-                  hintText: "Demandez n'importe quoi à ARO",
+                  hintText: "Demandez n'importe quoi à ARO (@ pour citer)",
                   filled: false,
                   border: InputBorder.none,
                   enabledBorder: InputBorder.none,
@@ -3374,15 +3725,22 @@ class _HomePageState extends State<HomePage>
               ),
               LayoutBuilder(
                 builder: (context, constraints) {
-                  final model = object(w.settings['model']);
-                  final ref = object(model['activeModelRef']);
+                  final ref = w.effectiveModelRef;
                   final label =
-                      '${ref['label'] ?? ref['modelId'] ?? model['modelId'] ?? 'Modèle IA'}';
+                      '${ref['label'] ?? ref['modelId'] ?? 'Modèle IA'}${w.modelOverride != null ? ' · choix' : ''}';
                   final controls = [
                     DesktopTool(
                       icon: uploading ? LucideIcons.loader : LucideIcons.plus,
                       label: 'Joindre un fichier',
                       onPressed: w.sending || uploading ? null : attach,
+                    ),
+                    const SizedBox(width: 6),
+                    DesktopTool(
+                      icon: LucideIcons.atSign,
+                      label: 'Mentionner un fichier ou un outil (@)',
+                      onPressed: w.sending
+                          ? null
+                          : () => _openMentions(initialQuery: ''),
                     ),
                     const SizedBox(width: 6),
                     DesktopTool(
@@ -3457,6 +3815,7 @@ class _HomePageState extends State<HomePage>
                   // use exactly the desktop's single toolbar.
                   if (constraints.maxWidth < 390) {
                     return Column(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
                         Row(
                           children: [...controls, const Spacer(), sendButton],
@@ -3464,7 +3823,15 @@ class _HomePageState extends State<HomePage>
                         const SizedBox(height: 6),
                         Row(
                           children: [
-                            permissionButton(),
+                            Flexible(
+                              flex: 0,
+                              child: ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  maxWidth: 110,
+                                ),
+                                child: permissionButton(),
+                              ),
+                            ),
                             const SizedBox(width: 8),
                             Expanded(child: selector),
                           ],

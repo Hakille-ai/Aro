@@ -2179,7 +2179,7 @@ impl AroStore {
         let rows = sqlx::query(
             r#"
             SELECT
-              j.id, j.organization_id, j.agent_run_id,
+              j.id, j.organization_id, j.agent_run_id, j.submitted_by_user_id,
               COALESCE(
                 j.started_at + make_interval(secs => j.max_wall_time_seconds) <= now(),
                 false
@@ -2187,6 +2187,10 @@ impl AroStore {
               j.steps_consumed >= j.max_steps
                 OR j.input_tokens_consumed >= j.max_input_tokens
                 OR j.output_tokens_consumed >= j.max_output_tokens AS budget_exhausted,
+              -- Tenant-independent part of the authorization check. The
+              -- RLS-gated `conversations` leg runs per job below, under
+              -- that job owner's session context (a cross-tenant sweep
+              -- cannot hold a single tenant context).
               NOT EXISTS (
                 SELECT 1
                 FROM agent_runs AS r
@@ -2205,17 +2209,6 @@ impl AroStore {
                   AND r.id = j.agent_run_id
                   AND r.owner_user_id = j.submitted_by_user_id
                   AND r.deleted_at IS NULL
-                  AND (
-                    r.conversation_id IS NULL
-                    OR EXISTS (
-                      SELECT 1
-                      FROM conversations AS conversation
-                      WHERE conversation.organization_id = r.organization_id
-                        AND conversation.id = r.conversation_id
-                        AND conversation.owner_user_id = r.owner_user_id
-                        AND conversation.deleted_at IS NULL
-                    )
-                  )
                   AND (
                     r.lane_id IS NULL
                     OR EXISTS (
@@ -2238,7 +2231,7 @@ impl AroStore {
                         AND profile.deleted_at IS NULL
                     )
                   )
-              ) AS authorization_lost
+              ) AS base_authorization_lost
             FROM agent_run_jobs AS j
             WHERE j.status NOT IN ('completed', 'failed', 'cancelled')
               AND (
@@ -2312,17 +2305,57 @@ impl AroStore {
             let job_id: Uuid = row.get("id");
             let organization_id: Uuid = row.get("organization_id");
             let agent_run_id: Uuid = row.get("agent_run_id");
+            let submitted_by_user_id: Uuid = row.get("submitted_by_user_id");
             let deadline_exceeded: bool = row.get("deadline_exceeded");
             let budget_exhausted: bool = row.get("budget_exhausted");
-            let authorization_lost: bool = row.get("authorization_lost");
+            let base_authorization_lost: bool = row.get("base_authorization_lost");
             let (status, reason) = if deadline_exceeded {
                 ("failed", "wall_time_budget_exceeded")
             } else if budget_exhausted {
                 ("failed", "execution_budget_exceeded")
-            } else if authorization_lost {
+            } else if base_authorization_lost {
                 ("cancelled", "authorization_revoked")
             } else {
-                continue;
+                // RLS-gated leg of the authorization check, evaluated under
+                // the job owner's own session context.
+                set_trusted_worker_tenant_context(&mut tx, submitted_by_user_id, organization_id)
+                    .await?;
+                let conversation_ok: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                      SELECT 1
+                      FROM agent_runs AS eligible_run
+                      WHERE eligible_run.organization_id = $1
+                        AND eligible_run.id = $2
+                        AND eligible_run.owner_user_id = $3
+                        AND eligible_run.deleted_at IS NULL
+                        AND (
+                          eligible_run.conversation_id IS NULL
+                          OR EXISTS (
+                            SELECT 1
+                            FROM conversations AS eligible_conversation
+                            WHERE eligible_conversation.organization_id =
+                                    eligible_run.organization_id
+                              AND eligible_conversation.id = eligible_run.conversation_id
+                              AND eligible_conversation.owner_user_id =
+                                    eligible_run.owner_user_id
+                              AND eligible_conversation.deleted_at IS NULL
+                          )
+                        )
+                    )
+                    "#,
+                )
+                .bind(organization_id)
+                .bind(agent_run_id)
+                .bind(submitted_by_user_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(map_sqlx)?;
+                if !conversation_ok {
+                    ("cancelled", "authorization_revoked")
+                } else {
+                    continue;
+                }
             };
             sqlx::query(
                 r#"
@@ -2748,6 +2781,10 @@ async fn lock_and_revalidate_agent_job_authorization(
     organization_id: Uuid,
     actor_id: Uuid,
 ) -> AroResult<bool> {
+    // Establish the caller's session context first: the `conversations`
+    // check below is RLS-gated and resolves empty without it, which would
+    // fail every claim/complete/renew as "unauthorized".
+    set_trusted_worker_tenant_context(tx, actor_id, organization_id).await?;
     let row = sqlx::query(
         r#"
         SELECT r.lane_id, r.conversation_id, r.autonomy_profile_id

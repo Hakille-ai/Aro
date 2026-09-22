@@ -2,6 +2,7 @@
   "name": "aro",
   "version": "0.1.0",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "description": "Cloud-synced desktop AI product with local inference by default.",
   "workspaces": [
     "apps/desktop",
@@ -10,12 +11,15 @@
     "packages/ui-tokens"
   ],
   "scripts": {
+    "license:check": "node scripts/check-commercial-readiness.mjs",
+    "license:inventory": "node scripts/generate-license-inventory.mjs",
+    "commercial:check": "node scripts/check-commercial-readiness.mjs --deployment",
     "contracts:check": "npm --workspace @aro/contracts run check",
     "api-client:check": "npm --workspace @aro/api-client run check",
     "api-client:test": "npm --workspace @aro/api-client run test",
     "desktop:dev": "npm --workspace @aro/desktop run tauri:dev",
     "desktop:build": "npm --workspace @aro/desktop run tauri:build",
-    "api:dev": "cargo run -p aro-api",
+    "api:dev": "powershell -ExecutionPolicy Bypass -File scripts/run-api.ps1",
     "dev:web": "npm --workspace @aro/desktop run dev",
     "build": "npm --workspace @aro/desktop run build",
     "check": "npm --workspace @aro/desktop run check",

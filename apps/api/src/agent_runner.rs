@@ -9,9 +9,16 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::agent_tools::{
+    execute_worker_tool, tool_result_history_snippet, WorkerToolDeps,
+    WORKER_MAX_CONSECUTIVE_TOOL_ERRORS,
+};
+use crate::auth::AuthContext;
+
 pub async fn process_agent_jobs(
     store: &AroStore,
     keyring: &Arc<AgentSnapshotKeyring>,
+    worker_tools: &WorkerToolDeps,
 ) -> anyhow::Result<()> {
     let worker_id = format!("api-worker-{}", Uuid::new_v4());
     let lease_seconds = 60;
@@ -23,8 +30,10 @@ pub async fn process_agent_jobs(
     {
         let store_clone = store.clone();
         let keyring_clone = keyring.clone();
+        let tools_clone = worker_tools.clone();
         tokio::spawn(async move {
-            if let Err(err) = run_agent_job(store_clone, claimed, keyring_clone).await {
+            if let Err(err) = run_agent_job(store_clone, claimed, keyring_clone, tools_clone).await
+            {
                 tracing::error!(?err, "error executing claimed agent job");
             }
         });
@@ -36,6 +45,7 @@ async fn run_agent_job(
     store: AroStore,
     claimed: aro_store::ClaimedAgentRunJob,
     _keyring: Arc<AgentSnapshotKeyring>,
+    worker_tools: WorkerToolDeps,
 ) -> anyhow::Result<()> {
     let lease = claimed.lease.clone();
     let run_id = lease.agent_run_id();
@@ -178,6 +188,19 @@ async fn run_agent_job(
         let mut total_tokens: u32 = 0;
         let mut steps_executed: u32 = 0;
         let mut tool_calls_executed: u32 = 0;
+        let mut consecutive_tool_errors: u32 = 0;
+        let mut last_tool_summary = String::new();
+
+        let worker_auth = AuthContext::for_worker(user_id, org_id)
+            .map_err(|err| anyhow::anyhow!("worker auth context: {err}"))?;
+        let permission_profile = match run.autonomy_profile_id {
+            Some(profile_id) => store
+                .list_agent_permission_profiles(user_id, org_id)
+                .await?
+                .into_iter()
+                .find(|profile| profile.id == profile_id),
+            None => None,
+        };
 
         while steps_executed < max_steps_budget {
             let step_idx = next_sequence;
@@ -263,17 +286,68 @@ async fn run_agent_job(
                     store.add_agent_step(user_id, org_id, &tool_step).await?;
                     next_sequence += 1;
 
+                    // Real execution with the run's permission profile: the
+                    // result (or explicit denial) is persisted and fed back
+                    // into history so the model reasons over actual outputs.
+                    let tool_name = action.tool_id.clone().unwrap_or_else(|| "unknown".to_string());
+                    let result = execute_worker_tool(
+                        &worker_tools,
+                        &worker_auth,
+                        &run,
+                        permission_profile.as_ref(),
+                        &tool_name,
+                        action.input.clone(),
+                        next_sequence,
+                    )
+                    .await;
+                    next_sequence += 1;
+
+                    let failed = !matches!(
+                        result.status,
+                        aro_core::ToolExecutionStatus::Completed
+                    );
+                    if failed {
+                        consecutive_tool_errors += 1;
+                    } else {
+                        consecutive_tool_errors = 0;
+                    }
+                    let snippet = tool_result_history_snippet(&result);
+                    last_tool_summary = format!("Tool `{tool_name}` {}", result.title);
                     let conv_id = run.conversation_id.unwrap_or(run.id);
-                    let tool_name = action.tool_id.as_deref().unwrap_or("unknown");
                     history.push(ChatMessage::new(
                         conv_id,
                         MessageRole::Assistant,
-                        format!("Requested tool `{tool_name}` with input: {}", action.input),
+                        format!("Tool `{tool_name}` result: {snippet}"),
                     ));
 
-                    completed_content = format!("Tool `{tool_name}` requested");
+                    if consecutive_tool_errors >= WORKER_MAX_CONSECUTIVE_TOOL_ERRORS {
+                        store
+                            .fail_agent_run_job(
+                                &lease,
+                                &format!(
+                                    "tool_execution_failed_repeatedly: {consecutive_tool_errors} consecutive tool errors, last: {snippet}"
+                                ),
+                            )
+                            .await?;
+                        tracing::warn!(
+                            ?run_id,
+                            consecutive_tool_errors,
+                            "agent job failed after repeated tool errors"
+                        );
+                        return Ok(());
+                    }
                 }
             }
+        }
+
+        if completed_content.is_empty() {
+            completed_content = if last_tool_summary.is_empty() {
+                format!("Stopped after {steps_executed} steps without a final answer")
+            } else {
+                format!(
+                    "Stopped after {steps_executed} steps without a final answer; {last_tool_summary}"
+                )
+            };
         }
 
         // 5. Complete agent run job with token tracking

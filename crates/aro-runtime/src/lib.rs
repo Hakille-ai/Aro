@@ -1,8 +1,10 @@
 mod providers;
 mod security;
 pub mod context_manager;
+pub mod streaming;
 
 pub use context_manager::*;
+pub use streaming::StreamingActionTracker;
 
 use aro_agent::{AgentRuntime, EnvironmentSnapshot};
 use aro_core::{
@@ -11,15 +13,18 @@ use aro_core::{
     AgentLaneView, AgentOrchestratorSnapshot, AgentRun, AgentRunPriority, AgentRunStartRequest,
     AgentRunStatus, AgentRunView, AgentStep, AgentStepKind, AgentStepStatus, AroError, AroResult,
     AssistantMode, ChatMessage, ContextPack, ContextSource, Conversation, EpisodeSummary, Folder,
-    LongTermMemory, MemoryCategory, MessageRole, ModelResponseFormat, Project, RuntimeStatus,
-    ScoredMemory, SendMessageRequest, SendMessageResponse, ToolExecutionRequest, ToolExecutionResult,
-    ToolExecutionStatus, WebAccessMode, WebFetchRequest, TOOL_CORE_AGENT_DELEGATE,
-    TOOL_CORE_AGENT_SPAWN, TOOL_CORE_AGENT_STATUS, TOOL_CORE_CONNECTOR_CALL,
-    TOOL_CORE_CONNECTOR_LIST, TOOL_CORE_CONTEXT_SEARCH, TOOL_CORE_MCP_CALL, TOOL_CORE_MEMORY_DELETE,
+    LongTermMemory, MemoryCategory, MessageRole, ModelResponseFormat, NotificationFilter,
+    NotificationItem, NotificationKind, NotificationSource, Project, RuntimeStatus,
+    ScoredMemory, SendMessageRequest,
+    SendMessageResponse, ToolExecutionRequest, ToolExecutionResult, ToolExecutionStatus,
+    WebAccessMode, WebFetchRequest, TOOL_CORE_AGENT_DELEGATE, TOOL_CORE_AGENT_SPAWN,
+    TOOL_CORE_AGENT_STATUS, TOOL_CORE_CONNECTOR_CALL, TOOL_CORE_CONNECTOR_LIST,
+    TOOL_CORE_CONTEXT_SEARCH, TOOL_CORE_MCP_CALL, TOOL_CORE_MEMORY_DELETE,
     TOOL_CORE_MEMORY_FORGET, TOOL_CORE_MEMORY_LIST, TOOL_CORE_MEMORY_RECALL, TOOL_CORE_MEMORY_SAVE,
     TOOL_CORE_MEMORY_SEARCH, TOOL_CORE_MEMORY_UPDATE, TOOL_CORE_SKILL_INVOKE, TOOL_CORE_SKILL_LIST,
     TOOL_CORE_WEB_PAGE_READ,
 };
+
 use aro_memory::SqliteMemoryStore;
 use aro_tools::{extract_urls, result_context_items, ToolExecutor, WebAccessPolicy};
 use aro_vector::{
@@ -29,9 +34,10 @@ use aro_vector::{
 use chrono::Utc;
 use serde_json::{json, Value};
 
-// No step limit: agent tool loops run until the model returns a final/pause
-// action (or a validation/provider error). `max_steps` in requests is
-// accepted for backward compatibility but no longer bounds execution.
+// The model alone decides final/pause, so the loop carries an independent
+// safety ceiling (steps + wall-clock) against runaway models and runaway
+// cost. `max_steps` in requests is still honored as an additional cap.
+// Tune with ARO_AGENT_MAX_STEPS / ARO_AGENT_MAX_WALL_SECS (0 = unlimited).
 
 pub use providers::{
     list_models_for_connection, list_ollama_models, LocalModelProvider, ModelProvider, ModelRouter,
@@ -102,6 +108,12 @@ impl AssistantEngine {
         self.plugins.clone()
     }
 
+    /// Device-local SQLite store (conversations, messages, memories).
+    /// Exposed so the host can enforce identity-change hygiene.
+    pub fn memory_store(&self) -> &SqliteMemoryStore {
+        &self.store
+    }
+
     pub fn tools(&self) -> &ToolExecutor {
         &self.tools
     }
@@ -130,13 +142,9 @@ impl AssistantEngine {
         conversation.mode = request.mode.clone();
         conversation.updated_at = Utc::now();
         self.store.upsert_conversation(&conversation)?;
-        let lane = self
-            .store
-            .ensure_agent_lane(Some(conversation.id), conversation.title.clone())?;
-
         let run_request = AgentRunStartRequest {
             run_id: None,
-            lane_id: Some(lane.id),
+            lane_id: None,
             conversation_id: Some(conversation.id),
             goal: trimmed.to_string(),
             mode: request.mode.clone(),
@@ -144,14 +152,12 @@ impl AssistantEngine {
             model_id: request.model_id.clone(),
             provider: request.provider.clone(),
             autonomy_profile_id: None,
-            priority: Some(lane.priority.clone()),
+            priority: Some(AgentRunPriority::Normal),
             max_steps: None,
         };
         let mut agent_run = self.agent.start_run(&run_request, None);
         agent_run.status = AgentRunStatus::Running;
         self.store.upsert_agent_run(&agent_run)?;
-        self.store
-            .add_agent_step(&self.run_started_step(&agent_run, run_request.max_steps))?;
 
         let mut user_message =
             ChatMessage::new(conversation.id, MessageRole::User, trimmed.to_string());
@@ -184,13 +190,21 @@ impl AssistantEngine {
             stored_episodes.iter().map(EpisodeSummary::from).collect();
         let full_history = self.store.list_messages(conversation.id)?;
 
+        let (req_model, req_provider) = resolve_request_model_and_provider(
+            request.model_id.as_deref(),
+            request.provider.as_deref(),
+        );
         let window_mgr = if let Some(mem_cfg) = request.memory_settings.as_ref() {
-            ContextWindowManager::new(mem_cfg.to_context_budget())
+            ContextWindowManager::new(mem_cfg.to_context_budget_for_model(&req_model, &req_provider))
         } else {
-            ContextWindowManager::default()
+            ContextWindowManager::new(
+                aro_core::MemoryConfigurationSettings::default()
+                    .to_context_budget_for_model(&req_model, &req_provider),
+            )
         };
+        let (fitted_sys, _) = window_mgr.fit_system_prompt_lossless_or_truncate(&base_system_prompt);
         let assembled = window_mgr.assemble_context(
-            &base_system_prompt,
+            &fitted_sys,
             &semantic_candidates,
             &episodic_summaries,
             &full_history,
@@ -241,8 +255,9 @@ impl AssistantEngine {
                 provider,
                 request.web_access,
                 request.search_settings.as_ref(),
-                run_request.max_steps,
+                AgentLoopBudget::from_env().capped_by(run_request.max_steps),
                 next_sequence,
+                &window_mgr,
                 None,
                 &mut None,
             )
@@ -257,47 +272,63 @@ impl AssistantEngine {
                 return Err(err);
             }
         };
-        next_sequence = outcome.next_sequence;
-        let mut assistant_message =
-            ChatMessage::new(conversation.id, MessageRole::Assistant, outcome.content);
-        assistant_message.token_estimate = outcome.token_estimate;
-        self.store.add_message(&assistant_message)?;
-        let final_history = self.store.list_messages(conversation.id)?;
-        let checkpoint = self
-            .agent
-            .checkpoint_step(&agent_run, next_sequence, &final_history);
-        next_sequence += 1;
-        if let Some(summary) = checkpoint
-            .output
-            .get("summary")
-            .and_then(|value| value.as_str())
-        {
-            agent_run.checkpoint_summary = Some(summary.to_string());
-        }
-        self.store.add_agent_step(&checkpoint)?;
-        agent_run.status = outcome.status;
-        agent_run.updated_at = Utc::now();
-        agent_run.last_error = outcome.last_error;
-        if matches!(agent_run.status, AgentRunStatus::Completed) {
-            self.store.add_agent_step(&self.agent.final_step(
-                &agent_run,
-                next_sequence,
-                &assistant_message.content,
-            ))?;
-            agent_run.completed_at = Some(agent_run.updated_at);
-        }
-        agent_run.heartbeat_at = Some(agent_run.updated_at);
-        self.store.upsert_agent_run(&agent_run)?;
+        let _ = outcome.next_sequence;
+        let is_pure_chat = outcome.tools_executed == 0 && agent_run.autonomy_profile_id.is_none();
+        if is_pure_chat {
+            let _ = self.store.delete_agent_run(agent_run.id);
+            let mut assistant_message =
+                ChatMessage::new(conversation.id, MessageRole::Assistant, outcome.content);
+            assistant_message.token_estimate = outcome.token_estimate;
+            assistant_message.agent_run_id = None;
+            self.store.add_message(&assistant_message)?;
 
-        conversation.updated_at = Utc::now();
-        self.store.upsert_conversation(&conversation)?;
+            conversation.updated_at = Utc::now();
+            self.store.upsert_conversation(&conversation)?;
 
-        Ok(SendMessageResponse {
-            conversation,
-            user_message,
-            assistant_message,
-            agent_run_id: Some(agent_run.id),
-        })
+            Ok(SendMessageResponse {
+                conversation,
+                user_message,
+                assistant_message,
+                agent_run_id: None,
+            })
+        } else {
+            let mut assistant_message =
+                ChatMessage::new(conversation.id, MessageRole::Assistant, outcome.content);
+            assistant_message.token_estimate = outcome.token_estimate;
+            assistant_message.agent_run_id = Some(agent_run.id);
+            let steps = self.store.list_agent_steps(agent_run.id).ok();
+            assistant_message.steps = steps;
+            self.store.add_message(&assistant_message)?;
+
+            agent_run.status = outcome.status;
+            agent_run.updated_at = Utc::now();
+            agent_run.last_error = outcome.last_error;
+            if matches!(agent_run.status, AgentRunStatus::Completed) {
+                agent_run.completed_at = Some(agent_run.updated_at);
+                let mut notif = NotificationItem::new(
+                    format!("Tâche terminée : {}", conversation.title),
+                    format!("L'agent ARO a terminé sa tâche pour '{}'.", conversation.title),
+                    NotificationKind::AgentCompletion,
+                    NotificationSource::Agent,
+                );
+                notif.action_url = Some(format!("conversation:{}", conversation.id));
+                notif.organization_id = None;
+                let _ = self.store.create_notification(&notif);
+            }
+
+            agent_run.heartbeat_at = Some(agent_run.updated_at);
+            self.store.upsert_agent_run(&agent_run)?;
+
+            conversation.updated_at = Utc::now();
+            self.store.upsert_conversation(&conversation)?;
+
+            Ok(SendMessageResponse {
+                conversation,
+                user_message,
+                assistant_message,
+                agent_run_id: None,
+            })
+        }
     }
 
     pub fn conversations(&self) -> AroResult<Vec<Conversation>> {
@@ -909,22 +940,37 @@ impl AssistantEngine {
         provider: &dyn ModelProvider,
         web_access: WebAccessMode,
         search_settings: Option<&aro_core::settings::SearchSettings>,
-        requested_max_steps: Option<u32>,
+        loop_budget: AgentLoopBudget,
         mut next_sequence: i32,
+        window_mgr: &ContextWindowManager,
         mut on_chunk: Option<&mut (dyn FnMut(String) + Send)>,
         on_step: &mut Option<&mut (dyn FnMut(AgentStep) + Send)>,
     ) -> AroResult<AgentLoopOutcome> {
         let policy = web_policy_for(web_access.clone(), search_settings);
-        let _ = requested_max_steps;
-        let mut token_estimate: Option<u32>;
-        let window_mgr = ContextWindowManager::default();
+        let mut token_estimate: Option<u32> = None;
+        let mut tools_executed: usize = 0;
+        let loop_started = std::time::Instant::now();
+        let mut iterations: u32 = 0;
 
         // Initial bounds enforcement on working history
         let (bounded_history, _, _) = window_mgr.fit_working_messages(&history);
         history = bounded_history;
-
         loop {
-            let max_gen_tokens = provider.max_tokens().min(1392);
+            iterations += 1;
+            if let Some(breach) = loop_budget.breach(iterations, loop_started.elapsed()) {
+                tracing::warn!(run_id = %agent_run.id, iterations, breach = %breach, "agent loop safety ceiling reached");
+                let content = format!("Stopped: {breach}. Refine the goal or raise ARO_AGENT_MAX_STEPS / ARO_AGENT_MAX_WALL_SECS.");
+                return Ok(AgentLoopOutcome {
+                    content,
+                    token_estimate,
+                    status: AgentRunStatus::Failed,
+                    last_error: Some(breach),
+                    next_sequence,
+                    tools_executed,
+                });
+            }
+            let reserve_cap = window_mgr.budget().reserve_budget as u32;
+            let max_gen_tokens = provider.max_tokens().min(reserve_cap);
             let generation_request = self.agent.model_request(
                 agent_run,
                 &context_pack,
@@ -935,7 +981,17 @@ impl AssistantEngine {
                 max_gen_tokens,
                 ModelResponseFormat::AgentActionJson,
             );
-            let generation = provider.generate(generation_request).await?;
+            let mut tracker = StreamingActionTracker::new();
+            let generation = if on_chunk.is_some() {
+                provider
+                    .generate_stream(generation_request, &mut |chunk| {
+                        tracker.push_chunk(&chunk, &mut on_chunk);
+                    })
+                    .await?
+            } else {
+                provider.generate(generation_request).await?
+            };
+            tracker.finalize(&mut on_chunk);
             token_estimate = generation.token_estimate;
             let action = self.agent.parse_model_action(&generation.content);
             let validation_error = self.agent.validate_action(&action, &context_pack).err();
@@ -953,40 +1009,59 @@ impl AssistantEngine {
 
             if let Some(error) = validation_error {
                 let content = assistant_content_for_action(&action, Some(&error));
-                emit_final_chunks(&mut on_chunk, &content);
+                if !tracker.has_streamed_content() {
+                    emit_final_chunks(&mut on_chunk, &content);
+                }
                 return Ok(AgentLoopOutcome {
                     content,
                     token_estimate,
                     status: AgentRunStatus::Failed,
                     last_error: Some(error),
                     next_sequence,
+                    tools_executed,
                 });
             }
 
             match action.action_type {
                 AgentActionType::Final => {
-                    let content = action.content.clone().unwrap_or_default();
-                    emit_final_chunks(&mut on_chunk, &content);
+                    let raw_content = action.content.clone().unwrap_or_default();
+                    let content = if let Some(thinking) = action.thinking.as_deref().filter(|t| !t.trim().is_empty()) {
+                        if !raw_content.contains("<think>") {
+                            format!("<think>{}</think>\n{}", thinking.trim(), raw_content)
+                        } else {
+                            raw_content
+                        }
+                    } else {
+                        raw_content
+                    };
+                    if !tracker.has_streamed_content() {
+                        emit_final_chunks(&mut on_chunk, &content);
+                    }
                     return Ok(AgentLoopOutcome {
                         content,
                         token_estimate,
                         status: AgentRunStatus::Completed,
                         last_error: None,
                         next_sequence,
+                        tools_executed,
                     });
                 }
                 AgentActionType::Pause => {
                     let content = assistant_content_for_action(&action, None);
-                    emit_final_chunks(&mut on_chunk, &content);
+                    if !tracker.has_streamed_content() {
+                        emit_final_chunks(&mut on_chunk, &content);
+                    }
                     return Ok(AgentLoopOutcome {
                         content,
                         token_estimate,
                         status: AgentRunStatus::Waiting,
                         last_error: None,
                         next_sequence,
+                        tools_executed,
                     });
                 }
                 AgentActionType::Tool => {
+                    tools_executed += 1;
                     let result = self
                         .execute_agent_tool(agent_run, &action, &policy, next_sequence, on_step)
                         .await?;
@@ -1246,6 +1321,7 @@ impl AssistantEngine {
         conversation_id: uuid::Uuid,
         system_prompt: Option<String>,
         provider: &dyn ModelProvider,
+        memory_settings: Option<&aro_core::settings::MemoryConfigurationSettings>,
     ) -> AroResult<ChatMessage> {
         let mut conversation = self
             .store
@@ -1290,16 +1366,26 @@ impl AssistantEngine {
         let episodic_summaries: Vec<EpisodeSummary> =
             stored_episodes.iter().map(EpisodeSummary::from).collect();
 
-        let window_mgr = ContextWindowManager::default();
+        let (req_model, req_provider) = resolve_request_model_and_provider(None, None);
+        let window_mgr = if let Some(mem_cfg) = memory_settings {
+            ContextWindowManager::new(mem_cfg.to_context_budget_for_model(&req_model, &req_provider))
+        } else {
+            ContextWindowManager::new(
+                aro_core::MemoryConfigurationSettings::default()
+                    .to_context_budget_for_model(&req_model, &req_provider),
+            )
+        };
+        let (fitted_sys, _) = window_mgr.fit_system_prompt_lossless_or_truncate(&base_system_prompt);
         let assembled = window_mgr.assemble_context(
-            &base_system_prompt,
+            &fitted_sys,
             &semantic_candidates,
             &episodic_summaries,
             &clean_history,
         )?;
         let composite_system_prompt = window_mgr.render_system_prompt(&assembled);
 
-        let memory_sources = self.memory_context_sources(&last_user_content, 8).await?;
+        let top_k = memory_settings.map(|s| s.top_k).unwrap_or(8);
+        let memory_sources = self.memory_context_sources(&last_user_content, top_k).await?;
         let context_pack = self.agent.build_context_pack(
             &run,
             &assembled.working_messages,
@@ -1308,7 +1394,9 @@ impl AssistantEngine {
             EnvironmentSnapshot::desktop_local(None, None),
         );
         self.touch_recalled_memories(&memory_sources)?;
-        let max_gen_tokens = provider.max_tokens().min(1392);
+        let max_gen_tokens = provider
+            .max_tokens()
+            .min(window_mgr.budget().reserve_budget as u32);
         let generation_request = self.agent.model_request(
             &run,
             &context_pack,
@@ -1354,7 +1442,39 @@ impl AssistantEngine {
         self.store.delete_plan(id)
     }
 
+    pub fn create_notification(&self, item: &NotificationItem) -> AroResult<NotificationItem> {
+        self.store.create_notification(item)
+    }
+
+    pub fn list_notifications(
+        &self,
+        filter: &NotificationFilter,
+    ) -> AroResult<Vec<NotificationItem>> {
+        self.store.list_notifications(filter)
+    }
+
+    pub fn get_unread_notification_count(&self, org_id: Option<uuid::Uuid>) -> AroResult<u64> {
+        self.store.get_unread_notification_count(org_id)
+    }
+
+    pub fn mark_notification_as_read(&self, id: &str) -> AroResult<bool> {
+        self.store.mark_notification_as_read(id)
+    }
+
+    pub fn mark_all_notifications_as_read(&self, org_id: Option<uuid::Uuid>) -> AroResult<u64> {
+        self.store.mark_all_notifications_as_read(org_id)
+    }
+
+    pub fn delete_notification(&self, id: &str) -> AroResult<bool> {
+        self.store.delete_notification(id)
+    }
+
+    pub fn clear_all_notifications(&self, org_id: Option<uuid::Uuid>) -> AroResult<u64> {
+        self.store.clear_all_notifications(org_id)
+    }
+
     pub async fn check_runtime(&self, provider: &dyn ModelProvider) -> RuntimeStatus {
+
         provider.status().await
     }
 
@@ -1395,13 +1515,9 @@ impl AssistantEngine {
         conversation.mode = request.mode.clone();
         conversation.updated_at = Utc::now();
         self.store.upsert_conversation(&conversation)?;
-        let lane = self
-            .store
-            .ensure_agent_lane(Some(conversation.id), conversation.title.clone())?;
-
         let run_request = AgentRunStartRequest {
             run_id: None,
-            lane_id: Some(lane.id),
+            lane_id: None,
             conversation_id: Some(conversation.id),
             goal: trimmed.to_string(),
             mode: request.mode.clone(),
@@ -1409,16 +1525,12 @@ impl AssistantEngine {
             model_id: request.model_id.clone(),
             provider: request.provider.clone(),
             autonomy_profile_id: None,
-            priority: Some(lane.priority.clone()),
+            priority: Some(AgentRunPriority::Normal),
             max_steps: None,
         };
         let mut agent_run = self.agent.start_run(&run_request, None);
         agent_run.status = AgentRunStatus::Running;
         self.store.upsert_agent_run(&agent_run)?;
-        self.add_and_notify_step(
-            &self.run_started_step(&agent_run, run_request.max_steps),
-            on_step,
-        )?;
 
         let mut user_message =
             ChatMessage::new(conversation.id, MessageRole::User, trimmed.to_string());
@@ -1446,16 +1558,33 @@ impl AssistantEngine {
             stored_episodes.iter().map(EpisodeSummary::from).collect();
         let full_history = self.store.list_messages(conversation.id)?;
 
-        let window_mgr = ContextWindowManager::default();
+        let (req_model, req_provider) = resolve_request_model_and_provider(
+            request.model_id.as_deref(),
+            request.provider.as_deref(),
+        );
+        let window_mgr = if let Some(mem_cfg) = request.memory_settings.as_ref() {
+            ContextWindowManager::new(mem_cfg.to_context_budget_for_model(&req_model, &req_provider))
+        } else {
+            ContextWindowManager::new(
+                aro_core::MemoryConfigurationSettings::default()
+                    .to_context_budget_for_model(&req_model, &req_provider),
+            )
+        };
+        let (fitted_sys, _) = window_mgr.fit_system_prompt_lossless_or_truncate(&base_system_prompt);
         let assembled = window_mgr.assemble_context(
-            &base_system_prompt,
+            &fitted_sys,
             &semantic_candidates,
             &episodic_summaries,
             &full_history,
         )?;
         let composite_system_prompt = window_mgr.render_system_prompt(&assembled);
 
-        let memory_sources = self.memory_context_sources(trimmed, 8).await?;
+        let top_k = request
+            .memory_settings
+            .as_ref()
+            .map(|s| s.top_k)
+            .unwrap_or(8);
+        let memory_sources = self.memory_context_sources(trimmed, top_k).await?;
         let mut context_sources = memory_sources.clone();
         let prefetch = self
             .prefetch_url_context(
@@ -1495,8 +1624,9 @@ impl AssistantEngine {
                 provider,
                 request.web_access,
                 request.search_settings.as_ref(),
-                run_request.max_steps,
+                AgentLoopBudget::from_env().capped_by(run_request.max_steps),
                 next_sequence,
+                &window_mgr,
                 Some(on_chunk),
                 on_step,
             )
@@ -1511,50 +1641,65 @@ impl AssistantEngine {
                 return Err(err);
             }
         };
-        next_sequence = outcome.next_sequence;
-        let mut assistant_message =
-            ChatMessage::new(conversation.id, MessageRole::Assistant, outcome.content);
-        assistant_message.id = temp_message_id;
-        assistant_message.token_estimate = outcome.token_estimate;
-        assistant_message.agent_run_id = Some(agent_run.id);
-        self.store.add_message(&assistant_message)?;
-        let final_history = self.store.list_messages(conversation.id)?;
-        let checkpoint = self
-            .agent
-            .checkpoint_step(&agent_run, next_sequence, &final_history);
-        next_sequence += 1;
-        if let Some(summary) = checkpoint
-            .output
-            .get("summary")
-            .and_then(|value| value.as_str())
-        {
-            agent_run.checkpoint_summary = Some(summary.to_string());
-        }
-        self.add_and_notify_step(&checkpoint, on_step)?;
-        agent_run.status = outcome.status;
-        agent_run.updated_at = Utc::now();
-        agent_run.last_error = outcome.last_error;
-        if matches!(agent_run.status, AgentRunStatus::Completed) {
-            self.add_and_notify_step(
-                &self
-                    .agent
-                    .final_step(&agent_run, next_sequence, &assistant_message.content),
-                on_step,
-            )?;
-            agent_run.completed_at = Some(agent_run.updated_at);
-        }
-        agent_run.heartbeat_at = Some(agent_run.updated_at);
-        self.store.upsert_agent_run(&agent_run)?;
+        let _ = outcome.next_sequence;
+        let is_pure_chat = outcome.tools_executed == 0 && agent_run.autonomy_profile_id.is_none();
+        if is_pure_chat {
+            let _ = self.store.delete_agent_run(agent_run.id);
+            let mut assistant_message =
+                ChatMessage::new(conversation.id, MessageRole::Assistant, outcome.content);
+            assistant_message.id = temp_message_id;
+            assistant_message.token_estimate = outcome.token_estimate;
+            assistant_message.agent_run_id = None;
+            self.store.upsert_message(&assistant_message)?;
 
-        conversation.updated_at = Utc::now();
-        self.store.upsert_conversation(&conversation)?;
+            conversation.updated_at = Utc::now();
+            self.store.upsert_conversation(&conversation)?;
 
-        Ok(SendMessageResponse {
-            conversation,
-            user_message,
-            assistant_message,
-            agent_run_id: Some(agent_run.id),
-        })
+            Ok(SendMessageResponse {
+                conversation,
+                user_message,
+                assistant_message,
+                agent_run_id: None,
+            })
+        } else {
+            let mut assistant_message =
+                ChatMessage::new(conversation.id, MessageRole::Assistant, outcome.content);
+            assistant_message.id = temp_message_id;
+            assistant_message.token_estimate = outcome.token_estimate;
+            assistant_message.agent_run_id = Some(agent_run.id);
+            let steps = self.store.list_agent_steps(agent_run.id).ok();
+            assistant_message.steps = steps;
+            self.store.upsert_message(&assistant_message)?;
+
+            agent_run.status = outcome.status;
+            agent_run.updated_at = Utc::now();
+            agent_run.last_error = outcome.last_error;
+            if matches!(agent_run.status, AgentRunStatus::Completed) {
+                agent_run.completed_at = Some(agent_run.updated_at);
+                let mut notif = NotificationItem::new(
+                    format!("Tâche terminée : {}", conversation.title),
+                    format!("L'agent ARO a terminé sa tâche pour '{}'.", conversation.title),
+                    NotificationKind::AgentCompletion,
+                    NotificationSource::Agent,
+                );
+                notif.action_url = Some(format!("conversation:{}", conversation.id));
+                notif.organization_id = None;
+                let _ = self.store.create_notification(&notif);
+            }
+
+            agent_run.heartbeat_at = Some(agent_run.updated_at);
+            self.store.upsert_agent_run(&agent_run)?;
+
+            conversation.updated_at = Utc::now();
+            self.store.upsert_conversation(&conversation)?;
+
+            Ok(SendMessageResponse {
+                conversation,
+                user_message,
+                assistant_message,
+                agent_run_id: None,
+            })
+        }
     }
 
     pub async fn regenerate_message_stream(
@@ -1564,6 +1709,7 @@ impl AssistantEngine {
         provider: &dyn ModelProvider,
         temp_message_id: uuid::Uuid,
         on_chunk: &mut (dyn FnMut(String) + Send),
+        memory_settings: Option<&aro_core::settings::MemoryConfigurationSettings>,
     ) -> AroResult<ChatMessage> {
         let mut conversation = self
             .store
@@ -1608,16 +1754,26 @@ impl AssistantEngine {
         let episodic_summaries: Vec<EpisodeSummary> =
             stored_episodes.iter().map(EpisodeSummary::from).collect();
 
-        let window_mgr = ContextWindowManager::default();
+        let (req_model, req_provider) = resolve_request_model_and_provider(None, None);
+        let window_mgr = if let Some(mem_cfg) = memory_settings {
+            ContextWindowManager::new(mem_cfg.to_context_budget_for_model(&req_model, &req_provider))
+        } else {
+            ContextWindowManager::new(
+                aro_core::MemoryConfigurationSettings::default()
+                    .to_context_budget_for_model(&req_model, &req_provider),
+            )
+        };
+        let (fitted_sys, _) = window_mgr.fit_system_prompt_lossless_or_truncate(&base_system_prompt);
         let assembled = window_mgr.assemble_context(
-            &base_system_prompt,
+            &fitted_sys,
             &semantic_candidates,
             &episodic_summaries,
             &clean_history,
         )?;
         let composite_system_prompt = window_mgr.render_system_prompt(&assembled);
 
-        let memory_sources = self.memory_context_sources(&last_user_content, 8).await?;
+        let top_k = memory_settings.map(|s| s.top_k).unwrap_or(8);
+        let memory_sources = self.memory_context_sources(&last_user_content, top_k).await?;
         let context_pack = self.agent.build_context_pack(
             &run,
             &assembled.working_messages,
@@ -1626,7 +1782,9 @@ impl AssistantEngine {
             EnvironmentSnapshot::desktop_local(None, None),
         );
         self.touch_recalled_memories(&memory_sources)?;
-        let max_gen_tokens = provider.max_tokens().min(1392);
+        let max_gen_tokens = provider
+            .max_tokens()
+            .min(window_mgr.budget().reserve_budget as u32);
         let generation_request = self.agent.model_request(
             &run,
             &context_pack,
@@ -2440,7 +2598,9 @@ impl AssistantEngine {
         let (output, title) = match request.tool_id.as_str() {
             TOOL_CORE_CONNECTOR_LIST => {
                 // Vrais connecteurs = serveurs MCP des plugins installés.
+                // Enrichi pour affichage pro : nom + icône + description + version.
                 let installed = self.plugins.list_installed().await;
+                let curated = aro_plugins::get_curated_marketplace();
                 let mut connectors: Vec<serde_json::Value> = Vec::new();
                 for plugin in &installed {
                     let accounts = self.plugins.list_accounts(Some(&plugin.id)).unwrap_or_default();
@@ -2462,10 +2622,68 @@ impl AssistantEngine {
                         "email": acc.email,
                     }));
 
+                    // Résolution display metadata : marketplace > skill icon > fallback par id.
+                    let curated_entry = curated.iter().find(|m| m.id == plugin.id);
+                    let fallback_icon = match plugin.id.as_str() {
+                        "filesystem-tools" => "📁",
+                        "web-search-tools" => "🌐",
+                        "git-assistant" => "🐈",
+                        "sqlite-database" => "🗄️",
+                        "python-analytics" => "🐍",
+                        "code-reviewer" => "🛡️",
+                        "google-workspace" => "📑",
+                        "openai-ecosystem" => "🤖",
+                        "github-developer" => "🐙",
+                        "slack-workspace" => "💬",
+                        _ => "🧩",
+                    };
+                    let icon = curated_entry
+                        .map(|m| m.icon.clone())
+                        .or_else(|| plugin.skills.first().and_then(|s| s.icon.clone()))
+                        .unwrap_or_else(|| fallback_icon.to_string());
+                    let description = curated_entry
+                        .map(|m| m.description.clone())
+                        .or_else(|| plugin.description.clone())
+                        .unwrap_or_default();
+                    let version = curated_entry
+                        .map(|m| m.version.clone())
+                        .or_else(|| plugin.version.clone())
+                        .unwrap_or_default();
+                    let category = curated_entry
+                        .map(|m| m.category.clone())
+                        .unwrap_or_default();
+                    // Spec-compliant branding: plugin.json has NO logo field
+                    // (closed schema). Custom marks travel via
+                    // extensions["com.aro.client"] and are resolved with the
+                    // same helper as the plugin manager (single source).
+                    let ext_branding =
+                        aro_plugins::branding_from_extensions(&plugin.extensions);
+                    let (ext_logo, ext_logo_kind) = match ext_branding.logo {
+                        Some(l) => {
+                            let kind = match ext_branding.logo_kind {
+                                Some(aro_plugins::LogoKind::File) => "file",
+                                _ => "emoji",
+                            };
+                            (Some(l), Some(kind.to_string()))
+                        }
+                        None => (None, None),
+                    };
+                    let ext_brand_color = ext_branding.brand_color;
+
                     for server in &plugin.mcp_servers {
                         connectors.push(json!({
                             "connectorId": plugin.id,
                             "pluginName": plugin.name,
+                            "name": plugin.name,
+                            "displayName": curated_entry.map(|m| m.name.clone()).unwrap_or_else(|| plugin.name.clone()),
+                            "icon": icon,
+                            "logo": ext_logo,
+                            "logoKind": ext_logo_kind,
+                            "brandColor": ext_brand_color,
+                            "description": description,
+                            "version": version,
+                            "category": category,
+                            "author": plugin.author,
                             "server": server.name,
                             "transport": server.transport_type,
                             "status": server.status,
@@ -2747,6 +2965,76 @@ struct AgentLoopOutcome {
     status: AgentRunStatus,
     last_error: Option<String>,
     next_sequence: i32,
+    tools_executed: usize,
+}
+
+/// Independent safety ceiling for the model/tool loop.
+///
+/// The model alone decides final/pause, so without this a misbehaving model
+/// loops forever (cost, duration, resources). The ceiling is deliberately
+/// independent of any model output: model iterations + wall-clock time.
+/// `0` on either axis disables that axis (explicit opt-out).
+#[derive(Debug, Clone, Copy)]
+struct AgentLoopBudget {
+    pub max_steps: u32,
+    pub max_wall: std::time::Duration,
+}
+
+impl AgentLoopBudget {
+    const DEFAULT_MAX_STEPS: u32 = 200;
+    const DEFAULT_MAX_WALL_SECS: u64 = 600;
+
+    fn from_env() -> Self {
+        Self {
+            max_steps: Self::env_u32("ARO_AGENT_MAX_STEPS", Self::DEFAULT_MAX_STEPS),
+            max_wall: std::time::Duration::from_secs(Self::env_u64(
+                "ARO_AGENT_MAX_WALL_SECS",
+                Self::DEFAULT_MAX_WALL_SECS,
+            )),
+        }
+    }
+
+    /// An explicit per-request cap tightens (never loosens) the ceiling.
+    fn capped_by(mut self, requested_max_steps: Option<u32>) -> Self {
+        if let Some(requested) = requested_max_steps {
+            if requested == 0 {
+                self.max_steps = 0;
+            } else if self.max_steps == 0 {
+                self.max_steps = requested;
+            } else {
+                self.max_steps = self.max_steps.min(requested);
+            }
+        }
+        self
+    }
+
+    fn breach(&self, iterations: u32, elapsed: std::time::Duration) -> Option<String> {
+        if self.max_steps > 0 && iterations > self.max_steps {
+            return Some(format!(
+                "agent safety ceiling reached: {iterations} model iterations without final/pause (max {})",
+                self.max_steps
+            ));
+        }
+        if !self.max_wall.is_zero() && elapsed > self.max_wall {
+            return Some(format!(
+                "agent wall-clock budget exceeded: {}s elapsed (max {}s)",
+                elapsed.as_secs(),
+                self.max_wall.as_secs()
+            ));
+        }
+        None
+    }
+
+    fn env_u32(name: &str, default: u32) -> u32 {
+        Self::env_u64(name, u64::from(default)).min(u64::from(u32::MAX)) as u32
+    }
+
+    fn env_u64(name: &str, default: u64) -> u64 {
+        std::env::var(name)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .unwrap_or(default)
+    }
 }
 
 struct PrefetchOutcome {
@@ -2829,6 +3117,12 @@ fn emit_final_chunks(on_chunk: &mut Option<&mut (dyn FnMut(String) + Send)>, con
 
 fn assistant_content_for_action(action: &AgentAction, validation_error: Option<&str>) -> String {
     if let Some(error) = validation_error {
+        if let Some(content) = action.content.as_deref().filter(|c| !c.trim().is_empty()) {
+            return content.to_string();
+        }
+        if let Some(reason) = action.reason.as_deref().filter(|r| !r.trim().is_empty()) {
+            return reason.to_string();
+        }
         return format!(
             "I could not continue because the model returned an invalid agent action: {error}"
         );
@@ -2845,6 +3139,42 @@ fn assistant_content_for_action(action: &AgentAction, validation_error: Option<&
             .clone()
             .unwrap_or_else(|| "I paused this run because more input is required.".to_string()),
     }
+}
+
+fn resolve_request_model_and_provider(
+    model_id: Option<&str>,
+    provider: Option<&str>,
+) -> (String, aro_core::ModelProviderKind) {
+    let model = model_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("default");
+
+    let kind = if let Some(p) = provider.filter(|s| !s.trim().is_empty()) {
+        match p.to_lowercase().as_str() {
+            "ollama" => aro_core::ModelProviderKind::Ollama,
+            "llama-cpp" | "llamacpp" => aro_core::ModelProviderKind::LlamaCpp,
+            "openai" => aro_core::ModelProviderKind::OpenAi,
+            "anthropic" => aro_core::ModelProviderKind::Anthropic,
+            "google" | "gemini" => aro_core::ModelProviderKind::Google,
+            "mistral" => aro_core::ModelProviderKind::Mistral,
+            "openai-compatible" => aro_core::ModelProviderKind::OpenAiCompatible,
+            "mock" => aro_core::ModelProviderKind::Mock,
+            _ => aro_core::ModelProviderKind::Ollama,
+        }
+    } else {
+        let m = model.to_lowercase();
+        if m.contains("gemini") {
+            aro_core::ModelProviderKind::Google
+        } else if m.contains("claude") {
+            aro_core::ModelProviderKind::Anthropic
+        } else if m.contains("gpt-") || m.contains("o1") || m.contains("o3") {
+            aro_core::ModelProviderKind::OpenAi
+        } else {
+            aro_core::ModelProviderKind::Ollama
+        }
+    };
+
+    (model.to_string(), kind)
 }
 
 fn make_title(input: &str) -> String {
@@ -3031,15 +3361,89 @@ mod tests {
 
     #[tokio::test]
     async fn tool_loop_runs_past_the_old_default_limit_until_final() {
-        assert_tool_loop_completes_after(12).await;
+        assert_tool_loop_completes_after(
+            12,
+            AgentLoopBudget {
+                max_steps: 1000,
+                max_wall: std::time::Duration::from_secs(3600),
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn tool_loop_runs_past_the_old_hard_cap_until_final() {
-        assert_tool_loop_completes_after(40).await;
+        assert_tool_loop_completes_after(
+            40,
+            AgentLoopBudget {
+                max_steps: 1000,
+                max_wall: std::time::Duration::from_secs(3600),
+            },
+        )
+        .await;
     }
 
-    async fn assert_tool_loop_completes_after(tool_calls_before_final: usize) {
+    #[tokio::test]
+    async fn tool_loop_stops_at_step_ceiling_with_failed_outcome() {
+        let (outcome, _) = run_loop_with_budget(
+            usize::MAX,
+            AgentLoopBudget {
+                max_steps: 5,
+                max_wall: std::time::Duration::from_secs(3600),
+            },
+        )
+        .await;
+        assert_eq!(outcome.status, AgentRunStatus::Failed);
+        let error = outcome.last_error.expect("ceiling error recorded");
+        assert!(
+            error.contains("safety ceiling"),
+            "unexpected error: {error}"
+        );
+        assert!(outcome.content.contains("ARO_AGENT_MAX_STEPS"));
+    }
+
+    #[tokio::test]
+    async fn tool_loop_stops_at_wall_clock_ceiling() {
+        let (outcome, _) = run_loop_with_budget(
+            usize::MAX,
+            AgentLoopBudget {
+                max_steps: 1_000_000,
+                max_wall: std::time::Duration::from_millis(1),
+            },
+        )
+        .await;
+        assert_eq!(outcome.status, AgentRunStatus::Failed);
+        let error = outcome.last_error.expect("ceiling error recorded");
+        assert!(
+            error.contains("wall-clock budget"),
+            "unexpected error: {error}"
+        );
+    }
+
+    async fn assert_tool_loop_completes_after(
+        tool_calls_before_final: usize,
+        budget: AgentLoopBudget,
+    ) {
+        let (outcome, steps) = run_loop_with_budget(tool_calls_before_final, budget).await;
+        assert_eq!(outcome.status, AgentRunStatus::Completed);
+        assert_eq!(outcome.content, "done after many steps");
+        assert!(outcome.last_error.is_none());
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|step| matches!(step.kind, AgentStepKind::Model))
+                .count(),
+            tool_calls_before_final + 1
+        );
+        assert!(steps
+            .iter()
+            .all(|step| !matches!(step.kind, AgentStepKind::Error)));
+    }
+
+    async fn run_loop_with_budget(
+        tool_calls_before_final: usize,
+        budget: AgentLoopBudget,
+    ) -> (AgentLoopOutcome, Vec<AgentStep>) {
         let db_path = std::env::temp_dir().join(format!(
             "aro-runtime-step-limit-test-{}.sqlite",
             uuid::Uuid::new_v4()
@@ -3075,30 +3479,99 @@ mod tests {
                 &provider,
                 WebAccessMode::Off,
                 None,
-                None,
+                budget,
                 1,
+                &ContextWindowManager::default(),
                 None,
                 &mut on_step,
             )
             .await
-            .expect("unbounded loop outcome");
-
-        assert_eq!(outcome.status, AgentRunStatus::Completed);
-        assert_eq!(outcome.content, "done after many steps");
-        assert!(outcome.last_error.is_none());
+            .expect("loop outcome");
         let steps = engine.store.list_agent_steps(run.id).expect("stored steps");
-        assert_eq!(
-            steps
-                .iter()
-                .filter(|step| matches!(step.kind, AgentStepKind::Model))
-                .count(),
-            tool_calls_before_final + 1
-        );
-        assert!(steps
-            .iter()
-            .all(|step| !matches!(step.kind, AgentStepKind::Error)));
 
         drop(engine);
         std::fs::remove_file(db_path).expect("remove temporary runtime store");
+        (outcome, steps)
+    }
+
+    #[tokio::test]
+    async fn pure_chat_does_not_create_agent_run_in_inbox() {
+        let db_path = std::env::temp_dir().join(format!(
+            "aro-pure-chat-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let engine = AssistantEngine::new(
+            SqliteMemoryStore::new(&db_path).expect("temporary runtime store"),
+        );
+        let provider = FinalAfterNProvider::new(0);
+
+        let response = engine
+            .send_message(
+                SendMessageRequest {
+                    conversation_id: None,
+                    content: "salut comment cava?".to_string(),
+                    mode: AssistantMode::Chat,
+                    system_prompt: None,
+                    model_id: None,
+                    provider: None,
+                    attachments: Vec::new(),
+                    web_access: WebAccessMode::Off,
+                    search_settings: None,
+                    memory_settings: None,
+                },
+                &provider,
+            )
+            .await
+            .expect("send message");
+
+        assert!(response.agent_run_id.is_none());
+        assert_eq!(engine.store.list_agent_runs().expect("runs").len(), 0);
+        let messages = engine.messages(response.conversation.id).expect("messages");
+        assert_eq!(messages.len(), 2);
+        assert!(messages[1].agent_run_id.is_none());
+        assert!(messages[1].steps.is_none());
+
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn tool_execution_preserves_message_steps_without_polluting_agent_inbox() {
+        let db_path = std::env::temp_dir().join(format!(
+            "aro-tool-chat-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let engine = AssistantEngine::new(
+            SqliteMemoryStore::new(&db_path).expect("temporary runtime store"),
+        );
+        let provider = FinalAfterNProvider::new(1);
+
+        let response = engine
+            .send_message(
+                SendMessageRequest {
+                    conversation_id: None,
+                    content: "cherche la meteo".to_string(),
+                    mode: AssistantMode::Chat,
+                    system_prompt: None,
+                    model_id: None,
+                    provider: None,
+                    attachments: Vec::new(),
+                    web_access: WebAccessMode::Off,
+                    search_settings: None,
+                    memory_settings: None,
+                },
+                &provider,
+            )
+            .await
+            .expect("send message");
+
+        assert!(response.agent_run_id.is_none());
+        assert_eq!(engine.store.list_agent_runs().expect("runs").len(), 0);
+        let messages = engine.messages(response.conversation.id).expect("messages");
+        assert_eq!(messages.len(), 2);
+        assert!(messages[1].steps.is_some());
+
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
     }
 }

@@ -1,6 +1,6 @@
 use aro_plugins::{
-    get_curated_marketplace, McpManifest, PluginManager, PluginManifest, PluginSourceType,
-    PluginStatus, CANONICAL_PLUGIN_SCHEMA_V1,
+    get_curated_marketplace, CreateCustomPluginRequest, McpManifest, PluginManager,
+    PluginManifest, PluginSourceType, PluginStatus, CANONICAL_PLUGIN_SCHEMA_V1,
 };
 use aro_skills::SkillRegistry;
 use std::fs;
@@ -794,5 +794,187 @@ async fn test_code_reviewer_marketplace_metadata_matches_scaffold() {
         .expect("install code-reviewer");
     assert_eq!(installed.mcp_servers.len(), 1);
     assert_eq!(installed.mcp_servers[0].name, "code-reviewer-server");
+}
+
+fn custom_request(name: &str) -> CreateCustomPluginRequest {
+    CreateCustomPluginRequest {
+        name: name.to_string(),
+        version: Some("1.0.0".to_string()),
+        description: Some("Custom logo test plugin".to_string()),
+        author: None,
+        license: None,
+        keywords: vec![],
+        mcp_servers: std::collections::HashMap::new(),
+        skills: vec![],
+        logo_emoji: None,
+        brand_color: None,
+        logo_data_url: None,
+    }
+}
+
+#[tokio::test]
+async fn test_install_custom_persists_emoji_branding() {
+    let temp = tempdir().unwrap();
+    let registry = Arc::new(SkillRegistry::new());
+    let manager = PluginManager::new(temp.path().to_path_buf(), registry.clone());
+
+    let mut req = custom_request("my-logo-plugin");
+    req.logo_emoji = Some("🚀".to_string());
+    req.brand_color = Some("#0A84FF".to_string());
+    let installed = manager.install_custom(req).await.expect("install custom");
+    assert_eq!(installed.logo.as_deref(), Some("🚀"));
+    assert_eq!(installed.logo_kind.as_deref(), Some("emoji"));
+    assert_eq!(installed.brand_color.as_deref(), Some("#0A84FF"));
+
+    // Branding survives a cold reload from disk (manifest extensions).
+    let registry2 = Arc::new(SkillRegistry::new());
+    let manager2 = PluginManager::new(temp.path().to_path_buf(), registry2);
+    manager2.load_all().await.expect("reload");
+    let reloaded = manager2
+        .get_plugin("my-logo-plugin")
+        .await
+        .expect("plugin reloaded");
+    assert_eq!(reloaded.logo.as_deref(), Some("🚀"));
+    assert_eq!(reloaded.brand_color.as_deref(), Some("#0A84FF"));
+
+    // No file logo → read returns None.
+    assert!(manager.read_plugin_logo("my-logo-plugin").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_install_custom_persists_uploaded_file_logo() {
+    let temp = tempdir().unwrap();
+    let registry = Arc::new(SkillRegistry::new());
+    let manager = PluginManager::new(temp.path().to_path_buf(), registry.clone());
+
+    // 1x1 transparent PNG.
+    let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    let mut req = custom_request("my-file-logo-plugin");
+    req.logo_data_url = Some(format!("data:image/png;base64,{png_b64}"));
+    req.brand_color = Some("#30D158".to_string());
+    let installed = manager.install_custom(req).await.expect("install custom");
+    assert_eq!(installed.logo.as_deref(), Some("file:logo.png"));
+    assert_eq!(installed.logo_kind.as_deref(), Some("file"));
+
+    let (mime, bytes) = manager
+        .read_plugin_logo("my-file-logo-plugin")
+        .await
+        .unwrap()
+        .expect("logo readable");
+    assert_eq!(mime, "image/png");
+    assert!(!bytes.is_empty());
+
+    let data_url = manager
+        .read_plugin_logo_data_url("my-file-logo-plugin")
+        .await
+        .unwrap()
+        .expect("data url");
+    assert!(data_url.starts_with("data:image/png;base64,"));
+}
+
+#[tokio::test]
+async fn test_install_custom_rejects_bad_names_and_logos() {
+    let temp = tempdir().unwrap();
+    let registry = Arc::new(SkillRegistry::new());
+    let manager = PluginManager::new(temp.path().to_path_buf(), registry.clone());
+
+    // Traversal name must fail BEFORE any directory is created.
+    let mut evil = custom_request("../../evil");
+    evil.logo_emoji = Some("🚀".to_string());
+    assert!(manager.install_custom(evil).await.is_err());
+    assert!(!temp.path().join("installed").join("evil").exists());
+
+    // Invalid emoji / color / payload are rejected.
+    let mut bad_emoji = custom_request("bad-emoji-plugin");
+    bad_emoji.logo_emoji = Some("not-an-emoji-but-a-long-string-here".to_string());
+    assert!(manager.install_custom(bad_emoji).await.is_err());
+
+    let mut bad_color = custom_request("bad-color-plugin");
+    bad_color.brand_color = Some("red".to_string());
+    assert!(manager.install_custom(bad_color).await.is_err());
+
+    let mut bad_file = custom_request("bad-file-plugin");
+    bad_file.logo_data_url = Some("data:image/png;base64,aGVsbG8=".to_string());
+    assert!(manager.install_custom(bad_file).await.is_err());
+}
+
+/// Chemin bout-en-bout de l'onglet « Dépôt Git » : dépôt git local minimal
+/// (plugin.json racine + un skill), installé via une URL `file://`.
+/// Skip silencieux si git est absent du PATH (CI sans git).
+#[tokio::test]
+async fn test_install_from_git_file_url_end_to_end() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+        == false
+    {
+        eprintln!("skipping git install test: git not available");
+        return;
+    }
+    let run = |dir: &std::path::Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git")
+            .status;
+        assert!(status.success(), "git {args:?} failed");
+    };
+
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("demo-git-plugin");
+    fs::create_dir_all(repo.join("skills").join("hello")).unwrap();
+    fs::write(
+        repo.join("plugin.json"),
+        r#"{
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+            "name": "demo-git-plugin",
+            "version": "1.0.0",
+            "description": "Fixture git install"
+        }"#,
+    )
+    .unwrap();
+    fs::write(
+        repo.join("skills").join("hello").join("SKILL.md"),
+        "---\nname: Hello\ndescription: Say hello\n---\n# Hello\nSay hello.\n",
+    )
+    .unwrap();
+    run(&repo, &["init", "-q"]);
+    run(&repo, &["config", "user.name", "ARO Test"]);
+    run(&repo, &["config", "user.email", "test@example.com"]);
+    run(&repo, &["add", "-A"]);
+    run(&repo, &["commit", "-qm", "init"]);
+
+    let registry = Arc::new(SkillRegistry::new());
+    let manager = PluginManager::new(temp.path().join("base"), registry.clone());
+
+    let url = format!("file://{}", repo.display().to_string().replace('\\', "/"));
+    let installed = manager
+        .install_from_git(&url)
+        .await
+        .expect("git install should succeed");
+    assert_eq!(installed.name, "demo-git-plugin");
+    assert_eq!(installed.source, PluginSourceType::Git);
+    assert!(installed.skills.iter().any(|s| s.id == "hello"));
+
+    // Un dépôt SANS plugin.json racine échoue avec un message clair,
+    // sans télécharger quoi que ce soit d'autre.
+    let empty = temp.path().join("not-a-plugin");
+    fs::create_dir_all(&empty).unwrap();
+    run(&empty, &["init", "-q"]);
+    run(&empty, &["config", "user.name", "ARO Test"]);
+    run(&empty, &["config", "user.email", "test@example.com"]);
+    fs::write(empty.join("README.md"), "# nope\n").unwrap();
+    run(&empty, &["add", "-A"]);
+    run(&empty, &["commit", "-qm", "init"]);
+    let bad_url = format!("file://{}", empty.display().to_string().replace('\\', "/"));
+    let err = format!(
+        "{:#}",
+        manager.install_from_git(&bad_url).await.unwrap_err()
+    );
+    assert!(err.contains("plugin.json"), "unexpected: {err}");
+    assert!(!err.contains("Updating files"), "unexpected: {err}");
 }
 

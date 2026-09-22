@@ -1,30 +1,24 @@
-use argon2::{
+﻿use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
 use aro_agent::{built_in_tool_descriptors, AgentRuntime, EnvironmentSnapshot};
 use aro_core::{
     AgentContextItem, AgentLaneStatus, AgentLaneView, AgentRun, AgentRunPriority,
-    AgentRunStartRequest, AgentRunStatus, AgentRunView, AgentStep, AgentStepKind, AgentStepStatus,
-    AppSettings, AssistantMode, AttachmentRef, AuthSession, ChatMessage, ContextSource,
-    Conversation, FileObject, FileStatus, FileUploadSession, Folder, LongTermMemory,
-    MembershipRole, MessageAttachment, MessageRole, ModelGenerationRequest, ModelProviderKind,
-    ModelResponseFormat, ModelSettings, OrganizationInvitation, PermissionProfile, Project,
-    RuntimeStatus, ToolDescriptor, ToolExecutionRequest, ToolExecutionResult, ToolExecutionStatus,
-    ToolStatus, WebAccessMode, WebFetchRequest, WebSearchRequest, TOOL_CORE_SEARCH_WEB,
-    TOOL_CORE_WEB_PAGE_READ,
+    AgentRunStartRequest, AgentRunStatus, AgentRunView, AppSettings, AssistantMode, AttachmentRef,
+    AuthSession, ChatMessage, ContextSource, Conversation, FileObject, FileStatus,
+    FileUploadSession, Folder, LongTermMemory, MembershipRole, MessageAttachment, MessageRole,
+    ModelGenerationRequest, ModelProviderConnection, ModelProviderKind, ModelResponseFormat,
+    ModelSettings, OrganizationInvitation, PermissionProfile, Project, RuntimeStatus,
+    ToolDescriptor, ToolExecutionRequest, ToolExecutionResult, ToolStatus, WebAccessMode,
+    WebFetchRequest, WebSearchRequest, TOOL_CORE_SEARCH_WEB, TOOL_CORE_WEB_PAGE_READ,
 };
 use aro_files::{mime_matches_declared, sha256_hex, sniff_mime, storage_key};
 use aro_integrations::{
     AuthMethod, AuthorizationContext, ConnectorErrorCode, OAuthClientProfile, OAuthProtocolEngine,
     OAuthProviderConfig, OwnerRef, OwnerType,
 };
-use aro_policy::{
-    AuditLevel, AuthorizationEvidence, AuthorizationRequest as PolicyAuthorizationRequest,
-    DataClassification, DecisionConstraints, EvaluationContext, PolicyEffect, PolicyEngine,
-    PolicyLayer, PolicyRule, PolicyTarget, ResourceRef, RiskLevel, SubjectKind, SubjectRef,
-};
-use aro_runtime::{LocalModelProvider, ModelProvider, ModelRouter};
+use aro_runtime::{ensure_loopback_url, LocalModelProvider, ModelProvider, ModelRouter};
 use aro_secrets::{AuthorizationAttemptAad, CredentialAad, CredentialEnvelope};
 use aro_store::{
     hash_secret, ConnectorClientProfileUpsert, IdempotencyBegin, IdempotencyCompletion,
@@ -34,7 +28,7 @@ use aro_store::{
     NewOrganizationMember, NewUserWithOrg, OrganizationPatch, PersistedCollection, TenantContext,
     UserPreferencesPatch, UserProfilePatch, IDEMPOTENCY_DEFAULT_TTL_SECONDS,
 };
-use aro_tools::{extract_urls, result_context_items, web_request_likely, WebAccessPolicy};
+use aro_tools::{extract_urls, web_request_likely, WebAccessPolicy};
 use aro_vector::{memories_to_context_sources, MemoryVectorScope};
 use axum::{
     body::{Body, Bytes},
@@ -48,7 +42,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use futures_util::{stream, Stream};
+use futures_util::Stream;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -59,9 +53,14 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::{
+    agent_tools::{execute_api_tool, explicit_web_policy, memory_from_value},
     auth::{generate_refresh_token, ApiError, AuthContext},
     ApiState,
 };
+
+// Handler submodules (extractions): re-exported so existing
+// `handlers::…` paths (routes, tests) keep working unchanged.
+pub use crate::{handlers_notify::*, handlers_plugins::*};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -397,8 +396,8 @@ pub async fn auth_mfa_totp_enable(
         return Err(ApiError::bad_request("TOTP setup has not been initiated"));
     };
 
-    // Preuve de possession exigée : un code valide généré par le secret.
-    // Sans ceci, n'importe quel code à 6 caractères activait le MFA.
+    // Preuve de possession exigÃ©e : un code valide gÃ©nÃ©rÃ© par le secret.
+    // Sans ceci, n'importe quel code Ã  6 caractÃ¨res activait le MFA.
     if !crate::auth::verify_totp_code(&secret, &payload.code, Utc::now().timestamp()) {
         return Err(ApiError::bad_request("invalid MFA code"));
     }
@@ -414,8 +413,8 @@ pub async fn auth_mfa_totp_enable(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TotpDisableRequest {
-    /// Code TOTP courant : exigé quand le MFA est actif, pour qu'un simple
-    /// vol de session ne suffise pas à le désactiver.
+    /// Code TOTP courant : exigÃ© quand le MFA est actif, pour qu'un simple
+    /// vol de session ne suffise pas Ã  le dÃ©sactiver.
     #[serde(default)]
     pub code: Option<String>,
 }
@@ -898,6 +897,7 @@ pub async fn membership_create(
     auth: AuthContext,
     Json(request): Json<MembershipCreateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::billing::require_team_plan(&state, &auth).await?;
     if !state.invitation_delivery_enabled {
         return Err(ApiError::service_unavailable(
             "invitation delivery is not configured",
@@ -1794,7 +1794,7 @@ fn render_success_page() -> String {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Connexion Réussie - ARO</title>
+    <title>Connexion RÃ©ussie - ARO</title>
     <style>
         body {{
             font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -1869,10 +1869,10 @@ fn render_success_page() -> String {
 </head>
 <body>
     <div class="container">
-        <div class="icon">✓</div>
-        <h1>Connexion réussie !</h1>
-        <p>Votre compte a été associé à ARO avec succès. Vous pouvez maintenant fermer cette fenêtre et retourner sur l'application ARO.</p>
-        <p class="btn">Vous pouvez fermer cette fenêtre.</p>
+        <div class="icon">âœ“</div>
+        <h1>Connexion rÃ©ussie !</h1>
+        <p>Votre compte a Ã©tÃ© associÃ© Ã  ARO avec succÃ¨s. Vous pouvez maintenant fermer cette fenÃªtre et retourner sur l'application ARO.</p>
+        <p class="btn">Vous pouvez fermer cette fenÃªtre.</p>
     </div>
 </body>
 </html>
@@ -1964,10 +1964,10 @@ fn render_error_page(details: &str) -> String {
 </head>
 <body>
     <div class="container">
-        <div class="icon">✕</div>
-        <h1>Échec de connexion</h1>
+        <div class="icon">âœ•</div>
+        <h1>Ã‰chec de connexion</h1>
         <p>Une erreur est survenue lors de l'authentification : {escaped_details}</p>
-        <p class="btn">Vous pouvez fermer cette fenêtre.</p>
+        <p class="btn">Vous pouvez fermer cette fenÃªtre.</p>
     </div>
 </body>
 </html>
@@ -2246,8 +2246,8 @@ pub async fn integration_delete(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateProjectRequest {
-    /// Id client optionnel pour une création idempotente (sync desktop :
-    /// le même projet repoussé ne doit pas être dupliqué côté serveur).
+    /// Id client optionnel pour une crÃ©ation idempotente (sync desktop :
+    /// le mÃªme projet repoussÃ© ne doit pas Ãªtre dupliquÃ© cÃ´tÃ© serveur).
     #[serde(default)]
     pub id: Option<Uuid>,
     pub name: String,
@@ -2277,7 +2277,7 @@ pub struct UpdateProjectRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateFolderRequest {
-    /// Id client optionnel pour une création idempotente (voir projets).
+    /// Id client optionnel pour une crÃ©ation idempotente (voir projets).
     #[serde(default)]
     pub id: Option<Uuid>,
     pub name: String,
@@ -2326,7 +2326,7 @@ pub async fn project_create(
     if trimmed_name.is_empty() {
         return Err(ApiError::bad_request("Project name cannot be empty"));
     }
-    // Création idempotente : si le client renvoie un id déjà connu, on ne
+    // CrÃ©ation idempotente : si le client renvoie un id dÃ©jÃ  connu, on ne
     // duplique pas, on retourne l'existant.
     if let Some(id) = payload.id {
         if let Some(existing) = state.store.get_project(auth.tenant_context(), id).await? {
@@ -2344,6 +2344,7 @@ pub async fn project_create(
         icon: payload.icon.unwrap_or_else(|| "folder-tree".into()),
         created_at: now,
         updated_at: now,
+        organization_id: Some(auth.organization_id.to_string()),
     };
     let saved = state
         .store
@@ -2442,6 +2443,7 @@ pub async fn folder_create(
         icon: payload.icon.unwrap_or_else(|| "folder".into()),
         created_at: now,
         updated_at: now,
+        organization_id: Some(auth.organization_id.to_string()),
     };
     let saved = state
         .store
@@ -2902,7 +2904,7 @@ pub struct AssistantStreamRequest {
     pub content: String,
     pub mode: AssistantMode,
     pub system_prompt: Option<String>,
-    /// Surcharge modèle du composer (ignorée si inexploitable côté serveur).
+    /// Surcharge modÃ¨le du composer (ignorÃ©e si inexploitable cÃ´tÃ© serveur).
     #[serde(default)]
     pub model_id: Option<String>,
     #[serde(default)]
@@ -2913,6 +2915,12 @@ pub struct AssistantStreamRequest {
     pub web_access: WebAccessMode,
     #[serde(default)]
     pub search_settings: Option<aro_core::settings::SearchSettings>,
+    /// Portee du prompt envoye : "full" (client epais type desktop, prompt
+    /// deja compile : utilise tel quel) ou "personal" (client fin type
+    /// mobile : le serveur complete avec les instructions du mode et les
+    /// souvenirs rappelees, comme le harnais desktop). Absent = historique.
+    #[serde(default)]
+    pub prompt_scope: Option<String>,
 }
 
 pub async fn assistant_stream(
@@ -2952,187 +2960,251 @@ pub async fn assistant_stream(
         "conversation generation is already running",
     )
     .await?;
-    let result = async {
-        let conversation = state
-            .store
-            .upsert_conversation(auth.tenant_context(), &conversation)
-            .await?;
-        let mut user_message = ChatMessage::new(
-            conversation.id,
-            MessageRole::User,
-            effective_content.clone(),
-        );
-        user_message.attachments = request
-            .attachments
-            .iter()
-            .map(MessageAttachment::from)
-            .collect();
-        let user_message = state
-            .store
-            .add_message(auth.tenant_context(), &user_message)
-            .await?;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
 
-        let system_prompt = request
-            .system_prompt
-            .clone()
-            .unwrap_or_else(|| request.mode.system_instruction());
-        let runtime = AgentRuntime::new();
-        let mut agent_run_id = None;
-        let mut web_sources = Vec::new();
-        let mut web_summaries = Vec::new();
-        if !matches!(request.web_access, WebAccessMode::Off)
-            && (!extract_urls(&effective_content, 1).is_empty()
-                || matches!(request.web_access, WebAccessMode::On)
-                || web_request_likely(&effective_content))
-        {
-            let run = create_immediate_api_run(
-                &state,
-                &auth,
-                &runtime,
-                conversation.id,
-                effective_content.clone(),
-                request.mode.clone(),
-                Some(system_prompt.clone()),
-            )
-            .await?;
-            let enrichment = collect_web_context_for_run(
-                &state,
-                &auth,
-                &run,
-                &effective_content,
-                request.web_access.clone(),
-                2,
-                request.search_settings.clone(),
-            )
-            .await?;
-            web_sources = enrichment.sources;
-            web_summaries = enrichment.summaries;
-            let context_pack = runtime.build_context_pack(
-                &run,
-                std::slice::from_ref(&user_message),
-                &web_sources,
-                &[],
-                EnvironmentSnapshot::api_durable(None, None),
-            );
-            state
+    tokio::spawn(async move {
+        let task_result = async {
+            let conversation = state
                 .store
-                .add_agent_step(
-                    auth.user_id,
-                    auth.organization_id,
-                    &runtime.context_step_at(&run, enrichment.next_sequence, &context_pack),
+                .upsert_conversation(auth.tenant_context(), &conversation)
+                .await?;
+            let mut user_message = ChatMessage::new(
+                conversation.id,
+                MessageRole::User,
+                effective_content.clone(),
+            );
+            user_message.attachments = request
+                .attachments
+                .iter()
+                .map(MessageAttachment::from)
+                .collect();
+            let user_message = state
+                .store
+                .add_message(auth.tenant_context(), &user_message)
+                .await?;
+
+            let system_prompt = request
+                .system_prompt
+                .clone()
+                .unwrap_or_else(|| request.mode.system_instruction());
+            let runtime = AgentRuntime::new();
+            let mut agent_run_id = None;
+            let mut web_sources = Vec::new();
+            let mut web_summaries = Vec::new();
+            if !matches!(request.web_access, WebAccessMode::Off)
+                && (!extract_urls(&effective_content, 1).is_empty()
+                    || matches!(request.web_access, WebAccessMode::On)
+                    || web_request_likely(&effective_content))
+            {
+                let run = create_immediate_api_run(
+                    &state,
+                    &auth,
+                    &runtime,
+                    conversation.id,
+                    effective_content.clone(),
+                    request.mode.clone(),
+                    Some(system_prompt.clone()),
                 )
                 .await?;
-            agent_run_id = Some(run.id);
-        }
+                let enrichment = collect_web_context_for_run(
+                    &state,
+                    &auth,
+                    &run,
+                    &effective_content,
+                    request.web_access.clone(),
+                    2,
+                    request.search_settings.clone(),
+                )
+                .await?;
+                web_sources = enrichment.sources;
+                web_summaries = enrichment.summaries;
+                let context_pack = runtime.build_context_pack(
+                    &run,
+                    std::slice::from_ref(&user_message),
+                    &web_sources,
+                    &[],
+                    EnvironmentSnapshot::api_durable(None, None),
+                );
+                let step = runtime.context_step_at(&run, enrichment.next_sequence, &context_pack);
+                state
+                    .store
+                    .add_agent_step(
+                        auth.user_id,
+                        auth.organization_id,
+                        &step,
+                    )
+                    .await?;
+                let _ = tx.send(Ok(Event::default().event("step").data(sse_json_data(&json!({
+                    "conversationId": conversation.id,
+                    "step": step
+                })))));
+                agent_run_id = Some(run.id);
+            }
 
-        // Le modèle ne voit pas le contexte web tout seul : on l'ajoute au
-        // prompt système quand la pré-lecture en a ramené.
-        let mut generation_system_prompt = system_prompt.clone();
-        let web_context = web_summaries
-            .iter()
-            .filter(|summary| !summary.trim().is_empty())
-            .take(3)
-            .map(|summary| format!("- {}", summary.replace('\n', " ")))
-            .chain(web_sources.iter().take(5).map(|source| {
-                let mut line = format!("- {}", source.title);
-                if let Some(uri) = &source.uri {
-                    line.push_str(&format!(" ({uri})"));
+            // Le modÃ¨le ne voit pas le contexte web tout seul : on l'ajoute au
+            // prompt systÃ¨me quand la prÃ©-lecture en a ramenÃ©.
+            let mut generation_system_prompt = system_prompt.clone();
+            let web_context = web_summaries
+                .iter()
+                .filter(|summary| !summary.trim().is_empty())
+                .take(3)
+                .map(|summary| format!("- {}", summary.replace('\n', " ")))
+                .chain(web_sources.iter().take(5).map(|source| {
+                    let mut line = format!("- {}", source.title);
+                    if let Some(uri) = &source.uri {
+                        line.push_str(&format!(" ({uri})"));
+                    }
+                    let excerpt = source.excerpt.replace('\n', " ");
+                    if !excerpt.trim().is_empty() {
+                        line.push_str(&format!(
+                            ": {}",
+                            excerpt.chars().take(220).collect::<String>()
+                        ));
+                    }
+                    line
+                }))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !web_context.trim().is_empty() {
+                generation_system_prompt.push_str("\n\nContexte web collectÃ© :\n");
+                generation_system_prompt.push_str(&web_context);
+            }
+
+            // Clients fins (mobile) : le prompt envoye est partiel (personnalite
+            // seule). Le serveur complete comme le harnais desktop : consignes
+            // du mode + souvenirs rappeles. Les clients epais envoient
+            // prompt_scope "full" (prompt deja compile : inchange). Absent =
+            // historique (inchange, compat ascendante).
+            if request.prompt_scope.as_deref() == Some("personal") {
+                let mode_instructions = request.mode.system_instruction();
+                if !mode_instructions.trim().is_empty()
+                    && !generation_system_prompt.contains(mode_instructions.trim())
+                {
+                    generation_system_prompt =
+                        format!("{mode_instructions}\n\n{generation_system_prompt}");
                 }
-                let excerpt = source.excerpt.replace('\n', " ");
-                if !excerpt.trim().is_empty() {
-                    line.push_str(&format!(
-                        ": {}",
-                        excerpt.chars().take(220).collect::<String>()
-                    ));
+                match state
+                    .store
+                    .search_memories(auth.user_id, auth.organization_id, &effective_content, 8)
+                    .await
+                {
+                    Ok(memories) => {
+                        let recalled = memories
+                            .iter()
+                            .filter(|memory| !memory.content.trim().is_empty())
+                            .take(8)
+                            .map(|memory| {
+                                let excerpt: String = memory.content.chars().take(500).collect();
+                                format!("- {}", excerpt.replace('\n', " "))
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if !recalled.trim().is_empty() {
+                            generation_system_prompt
+                                .push_str("\n\nSouvenirs pertinents de l'utilisateur :\n");
+                            generation_system_prompt.push_str(&recalled);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(?err, "thin-client memory recall failed, continuing");
+                    }
                 }
-                line
-            }))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !web_context.trim().is_empty() {
-            generation_system_prompt.push_str("\n\nContexte web collecté :\n");
-            generation_system_prompt.push_str(&web_context);
-        }
+            }
 
-        // Historique récent (sans le message utilisateur qui vient d'être
-        // enregistré : il part dans `user_input`).
-        let stored_messages = state
-            .store
-            .list_messages(auth.tenant_context(), conversation.id)
-            .await
-            .unwrap_or_default();
-        let mut history = stored_messages;
-        if history
-            .last()
-            .is_some_and(|last| last.id == user_message.id)
-        {
-            history.pop();
-        }
-        if history.len() > 20 {
-            history = history.split_off(history.len() - 20);
-        }
+            // Historique recent (sans le message utilisateur qui vient d'etre
+            // enregistre : il part dans `user_input`).
+            let stored_messages = state
+                .store
+                .list_messages(auth.tenant_context(), conversation.id)
+                .await
+                .unwrap_or_default();
+            let mut history = stored_messages;
+            if history
+                .last()
+                .is_some_and(|last| last.id == user_message.id)
+            {
+                history.pop();
+            }
+            if history.len() > 20 {
+                history = history.split_off(history.len() - 20);
+            }
 
-        let mut chunks = Vec::new();
-        let generation = generate_server_assistant_text(
-            &state,
-            &auth,
-            &request.mode,
-            &generation_system_prompt,
-            &history,
-            &effective_content,
-            request.model_id.clone(),
-            request.provider.clone(),
-            &mut |chunk: String| {
-                if !chunk.is_empty() {
-                    chunks.push(chunk);
-                }
-            },
-        )
-        .await;
-        let response_text = generation.text;
-        let mut assistant_message = ChatMessage::new(
-            conversation.id,
-            MessageRole::Assistant,
-            response_text.clone(),
-        );
-        assistant_message.token_estimate = generation.token_estimate;
-        let assistant_message = state
-            .store
-            .add_message(auth.tenant_context(), &assistant_message)
-            .await?;
+            let tx_chunk = tx.clone();
+            let generation = generate_server_assistant_text(
+                &state,
+                &auth,
+                &request.mode,
+                &generation_system_prompt,
+                &history,
+                &effective_content,
+                request.model_id.clone(),
+                request.provider.clone(),
+                &mut |chunk: String| {
+                    if !chunk.is_empty() {
+                        let _ = tx_chunk.send(Ok(Event::default()
+                            .event("chunk")
+                            .data(sse_json_data(&json!({ "content": chunk })))));
+                    }
+                },
+            )
+            .await;
+            let response_text = generation.text;
+            // Souverainete UX : une indisponibilite n'est JAMAIS persistee
+            // comme reponse assistant (sinon l'historique est pollue par des
+            // erreurs). Le client recoit `assistantMessage: null` +
+            // `unavailable: true` et affiche une notice ephemere + Reessayer.
+            // Le message utilisateur, lui, a bien ete envoye : il est garde.
+            let unavailable = generation.model_label == "unavailable";
+            let assistant_message_payload = if unavailable {
+                Value::Null
+            } else {
+                let mut assistant_message = ChatMessage::new(
+                    conversation.id,
+                    MessageRole::Assistant,
+                    response_text.clone(),
+                );
+                assistant_message.token_estimate = generation.token_estimate;
+                let assistant_message = state
+                    .store
+                    .add_message(auth.tenant_context(), &assistant_message)
+                    .await?;
+                serde_json::to_value(&assistant_message).unwrap_or(Value::Null)
+            };
 
-        if chunks.is_empty() && !response_text.is_empty() {
-            chunks = response_text
-                .split_inclusive(' ')
-                .map(str::to_string)
-                .collect();
-        }
-        let events = chunks
-            .into_iter()
-            .map(|chunk| {
-                Ok(Event::default()
-                    .event("chunk")
-                    .data(sse_json_data(&json!({ "content": chunk }))))
-            })
-            .chain(std::iter::once(Ok(Event::default().event("done").data(
-                sse_json_data(&json!({
+            let _ = tx.send(Ok(Event::default().event("done").data(sse_json_data(
+                &json!({
                     "conversation": conversation,
                     "userMessage": user_message,
-                    "assistantMessage": assistant_message,
+                    "assistantMessage": assistant_message_payload,
+                    "unavailable": unavailable,
                     "agentRunId": agent_run_id,
                     "modelId": generation.model_label
-                })),
+                }),
             ))));
 
-        Ok(Sse::new(stream::iter(events)).keep_alive(
-            axum::response::sse::KeepAlive::new()
-                .interval(Duration::from_secs(15))
-                .text("keep-alive"),
-        ))
-    }
-    .await;
-    release_redis_lock(lock).await;
-    result
+            Ok::<(), ApiError>(())
+        }
+        .await;
+
+        if let Err(err) = task_result {
+            tracing::error!(?err, "assistant stream generation failed");
+            let _ = tx.send(Ok(Event::default()
+                .event("error")
+                .data(sse_json_data(&json!({ "error": err.message() })))));
+        }
+
+        release_redis_lock(lock).await;
+    });
+
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+
+    Ok(Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3193,9 +3265,9 @@ pub async fn tools_code_execute(
     auth: AuthContext,
     Json(request): Json<Value>,
 ) -> Result<Json<ToolExecutionResult>, ApiError> {
-    // Les exécutions directes contournent le service durable : interdites
+    // Les exÃ©cutions directes contournent le service durable : interdites
     // sauf activation explicite (ARO_AGENT_DIRECT_TOOL_EXECUTION), comme
-    // `agent_tool_execute`. Sans ceci, tout compte authentifié exécutait
+    // `agent_tool_execute`. Sans ceci, tout compte authentifiÃ© exÃ©cutait
     // du code arbitraire sur le serveur.
     if !state.agent_direct_tool_execution_enabled {
         return Err(ApiError::not_found(
@@ -4242,6 +4314,380 @@ pub async fn settings_update(
     ))
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderExecutability {
+    pub provider_id: String,
+    pub executable: bool,
+    pub reason: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantStatusResponse {
+    pub can_generate: bool,
+    pub source: &'static str,
+    pub active_label: String,
+    pub mock_active: bool,
+    pub ollama_reachable: bool,
+    pub ollama_models: Vec<String>,
+    pub llamacpp_reachable: bool,
+    pub server_cloud_ready: bool,
+    pub guidance: &'static str,
+    pub providers: Vec<ProviderExecutability>,
+    pub runnable_model_ids: Vec<String>,
+}
+
+/// Pre-check UX (mobile + web) : le client sait AVANT d'envoyer si le serveur
+/// peut generer, par quel chemin, et quoi faire sinon. Aucun secret expose :
+/// uniquement des presence flags et des noms de modeles.
+pub async fn assistant_status(
+    State(state): State<ApiState>,
+    auth: AuthContext,
+) -> Result<Json<AssistantStatusResponse>, ApiError> {
+    state
+        .store
+        .ensure_org_access(auth.user_id, auth.organization_id)
+        .await?;
+    let settings = state
+        .store
+        .get_app_settings(auth.user_id, auth.organization_id)
+        .await?;
+    Ok(Json(
+        assistant_status_for(&state, auth.organization_id, &settings.model).await,
+    ))
+}
+
+async fn assistant_status_for(
+    state: &ApiState,
+    organization_id: Uuid,
+    model: &ModelSettings,
+) -> AssistantStatusResponse {
+    let ollama_endpoint = std::env::var("ARO_OLLAMA_ENDPOINT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| model.ollama_endpoint.clone());
+    let llama_cpp_endpoint = std::env::var("ARO_LLAMA_CPP_ENDPOINT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| model.llama_cpp_endpoint.clone());
+
+    let ollama_models = list_ollama_chat_models(&ollama_endpoint, AI_STATUS_PROBE_TIMEOUT)
+        .await
+        .unwrap_or_default();
+    let llamacpp_model =
+        discover_llamacpp_chat_model_with_timeout(&llama_cpp_endpoint, AI_STATUS_PROBE_TIMEOUT)
+            .await;
+
+    // Consentement + cles : en erreur on retombe sur le deni par defaut.
+    let consent = state
+        .store
+        .get_org_ai_cloud_consent(organization_id)
+        .await
+        .ok();
+    let keyed: std::collections::HashSet<String> = state
+        .store
+        .list_org_provider_key_status(organization_id)
+        .await
+        .map(|statuses| {
+            statuses
+                .into_iter()
+                .filter(|status| status.configured)
+                .map(|status| status.provider_id)
+                .collect()
+        })
+        .unwrap_or_default();
+    let consented = consent.as_ref().filter(|consent| consent.enabled);
+    let consented_ids: &[String] = consented
+        .map(|consent| consent.provider_ids.as_slice())
+        .unwrap_or(&[]);
+
+    let mut providers = Vec::new();
+    let mut runnable: Vec<String> = Vec::new();
+    let mut runnable_push = |id: &str| {
+        if runnable.len() < 200 && !runnable.iter().any(|known| known == id) {
+            runnable.push(id.to_string());
+        }
+    };
+    for connection in &model.providers {
+        if !connection.enabled {
+            providers.push(ProviderExecutability {
+                provider_id: connection.id.clone(),
+                executable: false,
+                reason: "disabled",
+            });
+            continue;
+        }
+        match connection.kind {
+            ModelProviderKind::Mock => {
+                providers.push(ProviderExecutability {
+                    provider_id: connection.id.clone(),
+                    executable: true,
+                    reason: "demo",
+                });
+                for model_ref in &connection.models {
+                    runnable_push(&model_ref.model_id);
+                }
+            }
+            ModelProviderKind::Ollama => {
+                let reachable = !ollama_models.is_empty();
+                providers.push(ProviderExecutability {
+                    provider_id: connection.id.clone(),
+                    executable: reachable,
+                    reason: if reachable {
+                        "local-ok"
+                    } else {
+                        "local-unreachable"
+                    },
+                });
+                if reachable {
+                    for name in &ollama_models {
+                        runnable_push(name);
+                    }
+                }
+            }
+            ModelProviderKind::LlamaCpp => {
+                let reachable = llamacpp_model.is_some();
+                providers.push(ProviderExecutability {
+                    provider_id: connection.id.clone(),
+                    executable: reachable,
+                    reason: if reachable {
+                        "local-ok"
+                    } else {
+                        "local-unreachable"
+                    },
+                });
+                if let Some(name) = llamacpp_model.as_deref() {
+                    runnable_push(name);
+                }
+            }
+            _ => {
+                let covered = consented_ids.iter().any(|id| id == &connection.id);
+                if !covered {
+                    providers.push(ProviderExecutability {
+                        provider_id: connection.id.clone(),
+                        executable: false,
+                        reason: "cloud-no-consent",
+                    });
+                } else if !keyed.contains(&connection.id) {
+                    providers.push(ProviderExecutability {
+                        provider_id: connection.id.clone(),
+                        executable: false,
+                        reason: "cloud-no-key",
+                    });
+                } else {
+                    providers.push(ProviderExecutability {
+                        provider_id: connection.id.clone(),
+                        executable: true,
+                        reason: "cloud-ready",
+                    });
+                    for model_ref in &connection.models {
+                        runnable_push(&model_ref.model_id);
+                    }
+                }
+            }
+        }
+    }
+
+    let local_ready = providers.iter().any(|provider| {
+        provider.executable
+            && (provider.reason == "local-ok")
+            && model
+                .connection(&provider.provider_id)
+                .is_some_and(|connection| connection.kind.is_local())
+    });
+    let server_cloud_ready = providers
+        .iter()
+        .any(|provider| provider.executable && provider.reason == "cloud-ready");
+    let mock_ready = providers
+        .iter()
+        .any(|provider| provider.executable && provider.reason == "demo");
+    let source = if local_ready {
+        "local"
+    } else if server_cloud_ready {
+        "server-cloud"
+    } else if mock_ready {
+        "demo"
+    } else {
+        "none"
+    };
+    let guidance = if local_ready || server_cloud_ready {
+        "ok"
+    } else if mock_ready {
+        "demo-mode"
+    } else if consented.is_some() {
+        "contact-admin"
+    } else {
+        "start-local-engine"
+    };
+    AssistantStatusResponse {
+        can_generate: source != "none",
+        source,
+        active_label: model.active_model_ref.model_id.clone(),
+        mock_active: model.active_model_ref.provider_kind == ModelProviderKind::Mock,
+        ollama_reachable: !ollama_models.is_empty(),
+        ollama_models: ollama_models.into_iter().take(100).collect(),
+        llamacpp_reachable: llamacpp_model.is_some(),
+        server_cloud_ready,
+        guidance,
+        providers,
+        runnable_model_ids: runnable,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCloudConsentRequest {
+    pub enabled: bool,
+    pub provider_ids: Vec<String>,
+    pub data_residency: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCloudStatusResponse {
+    pub consent: aro_store::OrgAiCloudConsent,
+    pub keys: Vec<aro_store::OrgProviderKeyStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCloudKeyRequest {
+    pub api_key: String,
+}
+
+/// Etat non-secret de l'opt-in (admin : les cles ne transitent que par PUT).
+pub async fn ai_cloud_status(
+    State(state): State<ApiState>,
+    auth: AuthContext,
+) -> Result<Json<AiCloudStatusResponse>, ApiError> {
+    state
+        .store
+        .ensure_org_admin(auth.user_id, auth.organization_id)
+        .await?;
+    Ok(Json(AiCloudStatusResponse {
+        consent: state
+            .store
+            .get_org_ai_cloud_consent(auth.organization_id)
+            .await?,
+        keys: state
+            .store
+            .list_org_provider_key_status(auth.organization_id)
+            .await?,
+    }))
+}
+
+/// Active/coupe l'opt-in cloud (admin). Sans consentement actif, le serveur
+/// ne fait AUCUN appel tiers, meme avec des cles deposees.
+pub async fn ai_cloud_set_consent(
+    State(state): State<ApiState>,
+    auth: AuthContext,
+    Json(request): Json<AiCloudConsentRequest>,
+) -> Result<Json<AiCloudStatusResponse>, ApiError> {
+    state
+        .store
+        .ensure_org_admin(auth.user_id, auth.organization_id)
+        .await?;
+    let consent = state
+        .store
+        .set_org_ai_cloud_consent(
+            auth.organization_id,
+            request.enabled,
+            &request.provider_ids,
+            request.data_residency.as_deref(),
+            auth.user_id,
+        )
+        .await?;
+    tracing::info!(
+        organization_id = %auth.organization_id,
+        admin_id = %auth.user_id,
+        enabled = request.enabled,
+        providers = ?request.provider_ids,
+        "org AI cloud consent updated"
+    );
+    Ok(Json(AiCloudStatusResponse {
+        consent,
+        keys: state
+            .store
+            .list_org_provider_key_status(auth.organization_id)
+            .await?,
+    }))
+}
+
+/// Depose (ou remplace) une cle provider chiffree au repos (admin).
+/// La cle n'est LIISIBLE nulle part : ni GET, ni logs, ni statut.
+pub async fn ai_cloud_put_key(
+    State(state): State<ApiState>,
+    auth: AuthContext,
+    Path(provider_id): Path<String>,
+    Json(request): Json<AiCloudKeyRequest>,
+) -> Result<Json<AiCloudStatusResponse>, ApiError> {
+    state
+        .store
+        .ensure_org_admin(auth.user_id, auth.organization_id)
+        .await?;
+    if request.api_key.trim().is_empty() {
+        return Err(ApiError::bad_request("API key must not be empty"));
+    }
+    state
+        .store
+        .set_org_provider_key(
+            auth.organization_id,
+            provider_id.trim(),
+            request.api_key.trim(),
+            &state.secrets_key,
+        )
+        .await?;
+    tracing::info!(
+        organization_id = %auth.organization_id,
+        admin_id = %auth.user_id,
+        provider = %provider_id.trim(),
+        "org provider key stored"
+    );
+    Ok(Json(AiCloudStatusResponse {
+        consent: state
+            .store
+            .get_org_ai_cloud_consent(auth.organization_id)
+            .await?,
+        keys: state
+            .store
+            .list_org_provider_key_status(auth.organization_id)
+            .await?,
+    }))
+}
+
+/// Revoque une cle (admin). Effet immediat sur les generations suivantes.
+pub async fn ai_cloud_delete_key(
+    State(state): State<ApiState>,
+    auth: AuthContext,
+    Path(provider_id): Path<String>,
+) -> Result<Json<AiCloudStatusResponse>, ApiError> {
+    state
+        .store
+        .ensure_org_admin(auth.user_id, auth.organization_id)
+        .await?;
+    state
+        .store
+        .delete_org_provider_key(auth.organization_id, provider_id.trim())
+        .await?;
+    tracing::info!(
+        organization_id = %auth.organization_id,
+        admin_id = %auth.user_id,
+        provider = %provider_id.trim(),
+        "org provider key revoked"
+    );
+    Ok(Json(AiCloudStatusResponse {
+        consent: state
+            .store
+            .get_org_ai_cloud_consent(auth.organization_id)
+            .await?,
+        keys: state
+            .store
+            .list_org_provider_key_status(auth.organization_id)
+            .await?,
+    }))
+}
+
 pub async fn preferences_get(
     State(state): State<ApiState>,
     auth: AuthContext,
@@ -4579,10 +5025,6 @@ pub async fn memory_index_reindex(
             .reindex(&memories, &memory_vector_scope(&auth))
             .await?,
     ))
-}
-
-fn memory_from_value(value: serde_json::Value) -> Result<LongTermMemory, ApiError> {
-    serde_json::from_value(value).map_err(|err| ApiError::bad_request(err.to_string()))
 }
 
 fn memory_vector_scope(auth: &AuthContext) -> MemoryVectorScope {
@@ -5594,13 +6036,13 @@ fn integration_callback_page(attempt_id: Option<Uuid>, status: &str) -> Response
     let (safe_status, message) = match status {
         "authorized" => (
             "authorized",
-            "Connexion autorisée. Vous pouvez revenir dans ARO.",
+            "Connexion autorisÃ©e. Vous pouvez revenir dans ARO.",
         ),
-        "denied" => ("denied", "Autorisation refusée."),
-        "expired" => ("expired", "Cette tentative de connexion a expiré."),
-        "cancelled" => ("cancelled", "Cette tentative de connexion a été annulée."),
+        "denied" => ("denied", "Autorisation refusÃ©e."),
+        "expired" => ("expired", "Cette tentative de connexion a expirÃ©."),
+        "cancelled" => ("cancelled", "Cette tentative de connexion a Ã©tÃ© annulÃ©e."),
         "processing" => ("processing", "Connexion en cours de finalisation."),
-        _ => ("failed", "La connexion n’a pas pu être finalisée."),
+        _ => ("failed", "La connexion nâ€™a pas pu Ãªtre finalisÃ©e."),
     };
     let deep_link = attempt_id.map(|attempt_id| {
         format!("aro://integrations/complete?attempt={attempt_id}&status={safe_status}")
@@ -5614,7 +6056,7 @@ fn integration_callback_page(attempt_id: Option<Uuid>, status: &str) -> Response
         .map(|url| format!(r#"<p><a href="{url}">Revenir dans ARO</a></p>"#))
         .unwrap_or_default();
     let html = format!(
-        "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">{refresh}<title>ARO — Intégration</title></head><body><main><h1>ARO</h1><p>{message}</p>{link}</main></body></html>"
+        "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">{refresh}<title>ARO â€” IntÃ©gration</title></head><body><main><h1>ARO</h1><p>{message}</p>{link}</main></body></html>"
     );
     let mut response = Html(html).into_response();
     let headers = response.headers_mut();
@@ -5975,7 +6417,7 @@ async fn collect_web_context_for_run(
         });
     }
     // Le composer peut surcharger la config de recherche (prioritaire),
-    // sinon on retombe sur les réglages stockés de l'utilisateur.
+    // sinon on retombe sur les rÃ©glages stockÃ©s de l'utilisateur.
     if let Some(search) = search_override {
         policy =
             policy.with_search_settings(Some(search.provider), search.api_key, search.endpoint);
@@ -6038,237 +6480,6 @@ async fn collect_web_context_for_run(
     })
 }
 
-async fn execute_api_tool(
-    state: &ApiState,
-    auth: &AuthContext,
-    run: &AgentRun,
-    request: ToolExecutionRequest,
-    policy: &WebAccessPolicy,
-    sequence: i32,
-) -> Result<ToolExecutionResult, ApiError> {
-    let (authorization_request, authorization_decision) =
-        authorize_api_tool(state, auth, run, &request, policy).await?;
-    let permits_execution = authorization_decision.permits_execution();
-    state
-        .store
-        .record_permission_evaluation(
-            auth.tenant_context(),
-            &authorization_request,
-            &authorization_decision,
-            Some(if permits_execution {
-                "authorized_pending_execution"
-            } else {
-                "blocked_before_execution"
-            }),
-        )
-        .await?;
-
-    if !permits_execution {
-        let result = blocked_tool_result(
-            &request,
-            authorization_decision
-                .error_code
-                .as_deref()
-                .unwrap_or("permission_denied"),
-            &authorization_decision.reason,
-        );
-        persist_api_tool_execution(state, auth, run, &request, &result, sequence).await?;
-        return Ok(result);
-    }
-
-    let result = match state.tools.execute(request.clone(), policy).await {
-        Ok(result) => result,
-        Err(err) => failed_tool_result(&request, err.to_string()),
-    };
-    persist_api_tool_execution(state, auth, run, &request, &result, sequence).await?;
-    Ok(result)
-}
-
-async fn authorize_api_tool(
-    state: &ApiState,
-    auth: &AuthContext,
-    run: &AgentRun,
-    request: &ToolExecutionRequest,
-    web_policy: &WebAccessPolicy,
-) -> Result<
-    (
-        PolicyAuthorizationRequest,
-        aro_policy::AuthorizationDecision,
-    ),
-    ApiError,
-> {
-    let now = Utc::now();
-    let ephemeral_agent_id = format!("agent-run:{}", run.id);
-    let expires_at = now + ChronoDuration::minutes(5);
-    let canonical_intent = serde_json::to_vec(&json!({
-        "subjectId": ephemeral_agent_id.clone(),
-        "action": "network.read",
-        "resourceId": request.tool_id.clone(),
-        "runId": run.id,
-        "conversationId": run.conversation_id,
-        "input": request.input.clone(),
-    }))
-    .map_err(|_| ApiError::internal("tool authorization intent could not be canonicalized"))?;
-    let intent_digest = format!("sha256:{:x}", Sha256::digest(canonical_intent));
-    let authorization_request = PolicyAuthorizationRequest {
-        id: request.invocation_id,
-        intent_digest,
-        subject: SubjectRef {
-            kind: SubjectKind::Agent,
-            id: ephemeral_agent_id.clone(),
-            actor_user_id: Some(auth.user_id),
-            organization_id: auth.organization_id,
-            parent_subject_id: None,
-            attributes: Default::default(),
-        },
-        action: "network.read".to_string(),
-        resource: ResourceRef {
-            kind: "tool".to_string(),
-            id: request.tool_id.clone(),
-            organization_id: auth.organization_id,
-            owner_id: None,
-            classification: DataClassification::Internal,
-            relations: Default::default(),
-            attributes: Default::default(),
-        },
-        context: EvaluationContext {
-            workspace_id: None,
-            conversation_id: run.conversation_id,
-            agent_id: Some(ephemeral_agent_id.clone()),
-            run_id: Some(run.id),
-            task_id: None,
-            tool_id: Some(request.tool_id.clone()),
-            plugin_id: None,
-            skill_id: None,
-            mcp_server_id: None,
-            environment: state.deployment.environment.clone(),
-            model_id: run.model_id.clone(),
-            provider_id: run.model_provider_id.clone(),
-            external_provider: true,
-            risk: RiskLevel::Moderate,
-            amount_minor: None,
-            actions_already_used: 0,
-            cost_minor: None,
-            budget_already_used_minor: 0,
-            device_id: None,
-            ip_address: None,
-            origin: "api.tool-execution".to_string(),
-            attributes: Default::default(),
-        },
-        requested_scopes: vec!["network.read".to_string()],
-        evidence: AuthorizationEvidence::default(),
-        requested_at: request.requested_at,
-        expires_at: Some(expires_at),
-    };
-
-    let mut policies = state
-        .store
-        .list_active_policy_rules(auth.tenant_context(), now)
-        .await?;
-    let legacy_constraints = DecisionConstraints {
-        read_only: true,
-        allowed_resource_ids: vec![request.tool_id.clone()],
-        allowed_scopes: vec!["network.read".to_string()],
-        allowed_tool_ids: vec![request.tool_id.clone()],
-        allowed_environments: vec![state.deployment.environment.clone()],
-        max_actions: Some(1),
-        valid_until: Some(expires_at),
-        external_transfer_allowed: true,
-        audit_level: AuditLevel::Enhanced,
-        ..DecisionConstraints::default()
-    };
-    let legacy_target = PolicyTarget {
-        subject_ids: vec![ephemeral_agent_id],
-        organization_ids: vec![auth.organization_id],
-        actions: vec!["network.read".to_string()],
-        resource_kinds: vec!["tool".to_string()],
-        resource_ids: vec![request.tool_id.clone()],
-        environments: vec![state.deployment.environment.clone()],
-        tool_ids: vec![request.tool_id.clone()],
-        ..PolicyTarget::default()
-    };
-    let legacy_allowed = web_policy.allow_network && !web_policy.allowed_domains.is_empty();
-    policies.push(PolicyRule {
-        id: if legacy_allowed {
-            "legacy.agent-permission-profile.network-allow".to_string()
-        } else {
-            "legacy.agent-permission-profile.network-deny".to_string()
-        },
-        version: 1,
-        layer: PolicyLayer::LegacyAdapter,
-        priority: 0,
-        effect: if legacy_allowed {
-            PolicyEffect::Allow
-        } else {
-            PolicyEffect::Deny
-        },
-        target: legacy_target,
-        constraints: legacy_constraints,
-        reason: if legacy_allowed {
-            "The legacy agent profile grants one read-only network tool call within its domain allowlist."
-                .to_string()
-        } else {
-            "The effective legacy agent profile does not grant network access with a non-empty domain allowlist."
-                .to_string()
-        },
-        valid_from: Some(now),
-        valid_until: Some(expires_at),
-        enabled: true,
-    });
-
-    let decision = PolicyEngine.evaluate(&authorization_request, &policies, now);
-    Ok((authorization_request, decision))
-}
-
-async fn persist_api_tool_execution(
-    state: &ApiState,
-    auth: &AuthContext,
-    run: &AgentRun,
-    request: &ToolExecutionRequest,
-    result: &ToolExecutionResult,
-    sequence: i32,
-) -> Result<(), ApiError> {
-    let status = match result.status {
-        ToolExecutionStatus::Completed => AgentStepStatus::Completed,
-        ToolExecutionStatus::Running => AgentStepStatus::Running,
-        ToolExecutionStatus::Failed | ToolExecutionStatus::Blocked => AgentStepStatus::Failed,
-    };
-    let step = AgentStep {
-        id: request.invocation_id,
-        run_id: run.id,
-        sequence,
-        kind: AgentStepKind::Tool,
-        status,
-        title: result.title.clone(),
-        input: json!({
-            "toolId": request.tool_id,
-            "input": request.input,
-            "requestedAt": request.requested_at,
-        }),
-        output: serde_json::to_value(result).unwrap_or(Value::Null),
-        error: result.error.clone(),
-        started_at: result.started_at,
-        finished_at: Some(result.finished_at),
-    };
-    state
-        .store
-        .add_agent_step(auth.user_id, auth.organization_id, &step)
-        .await?;
-    for artifact in &result.artifacts {
-        state
-            .store
-            .add_agent_artifact(auth.user_id, auth.organization_id, artifact)
-            .await?;
-    }
-    for item in result_context_items(result, run.conversation_id) {
-        state
-            .store
-            .add_agent_context_item(auth.user_id, auth.organization_id, &item)
-            .await?;
-    }
-    Ok(())
-}
-
 fn web_policy_for_api(_state: &ApiState, _web_access: WebAccessMode) -> WebAccessPolicy {
     // A streamed assistant request must never silently make a third-party network call.
     // Explicit, user-approved tool requests use `explicit_web_policy` below and carry a
@@ -6276,61 +6487,8 @@ fn web_policy_for_api(_state: &ApiState, _web_access: WebAccessMode) -> WebAcces
     WebAccessPolicy::disabled()
 }
 
-fn explicit_web_policy(
-    state: &ApiState,
-    permission_profile: &aro_core::PermissionProfile,
-    web_access: WebAccessMode,
-) -> WebAccessPolicy {
-    if matches!(web_access, WebAccessMode::Off)
-        || !state.agent_web_access_enabled
-        || !state.agent_direct_tool_execution_enabled
-    {
-        WebAccessPolicy::disabled()
-    } else {
-        WebAccessPolicy::from_permission_profile(permission_profile)
-    }
-}
-
-fn failed_tool_result(request: &ToolExecutionRequest, error: String) -> ToolExecutionResult {
-    ToolExecutionResult {
-        invocation_id: request.invocation_id,
-        run_id: request.run_id,
-        tool_id: request.tool_id.clone(),
-        status: ToolExecutionStatus::Failed,
-        title: format!("{} failed", request.tool_id),
-        output: json!({ "error": error }),
-        summary: error.clone(),
-        context_sources: Vec::new(),
-        artifacts: Vec::new(),
-        error: Some(error),
-        started_at: request.requested_at,
-        finished_at: Utc::now(),
-    }
-}
-
-fn blocked_tool_result(
-    request: &ToolExecutionRequest,
-    error_code: &str,
-    reason: &str,
-) -> ToolExecutionResult {
-    ToolExecutionResult {
-        invocation_id: request.invocation_id,
-        run_id: request.run_id,
-        tool_id: request.tool_id.clone(),
-        status: ToolExecutionStatus::Blocked,
-        title: format!("{} blocked by policy", request.tool_id),
-        output: json!({ "errorCode": error_code, "reason": reason }),
-        summary: reason.to_string(),
-        context_sources: Vec::new(),
-        artifacts: Vec::new(),
-        error: Some(format!("{error_code}: {reason}")),
-        started_at: request.requested_at,
-        finished_at: Utc::now(),
-    }
-}
-
-/// Sérialisation SSE infaillible (`Event::data` ne peut pas échouer,
-/// contrairement à `json_data(...).expect(..)` qui paniquait le stream).
+/// SÃ©rialisation SSE infaillible (`Event::data` ne peut pas Ã©chouer,
+/// contrairement Ã  `json_data(...).expect(..)` qui paniquait le stream).
 fn sse_json_data(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "{\"error\":\"serialization\"}".to_string())
 }
@@ -6341,11 +6499,11 @@ struct ServerGeneration {
     model_label: String,
 }
 
-/// Génère la réponse assistant côté serveur pour `/assistant/stream` :
-/// 1. provider actif s'il est local (mock/ollama/llama.cpp — aucune clé requise) ;
-/// 2. sinon repli local-first : premier vrai modèle de chat trouvé sur
-///    l'Ollama local (cohérent avec `fallbackPolicy: "local-first"`) ;
-/// 3. sinon message d'erreur honnête et actionnable — jamais de fausse réponse.
+/// GÃ©nÃ¨re la rÃ©ponse assistant cÃ´tÃ© serveur pour `/assistant/stream` :
+/// 1. provider actif s'il est local (mock/ollama/llama.cpp â€” aucune clÃ© requise) ;
+/// 2. sinon repli local-first : premier vrai modÃ¨le de chat trouvÃ© sur
+///    l'Ollama local (cohÃ©rent avec `fallbackPolicy: "local-first"`) ;
+/// 3. sinon message d'erreur honnÃªte et actionnable â€” jamais de fausse rÃ©ponse.
 #[allow(clippy::too_many_arguments)]
 async fn generate_server_assistant_text(
     state: &ApiState,
@@ -6368,6 +6526,15 @@ async fn generate_server_assistant_text(
     };
     let model_settings = app_settings.model.clone();
 
+    // Surcharge explicite du composer (mobile/web/desktop) : quand elle est
+    // presente, AUCUNE substitution silencieuse n'est autorisee. Soit le
+    // modele demande est servi tel quel (local ou cloud opt-in), soit on
+    // echoue honnetement en le nommant. Sans surcharge : cascade complete.
+    let explicit_model = requested_model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
     let request_for = |settings: &ModelSettings| ModelGenerationRequest {
         mode: mode.clone(),
         system_prompt: system_prompt.to_string(),
@@ -6378,9 +6545,9 @@ async fn generate_server_assistant_text(
         response_format: ModelResponseFormat::DirectText,
     };
 
-    // 0. Surcharge explicite du composer : honorée uniquement si elle
-    // pointe vers un provider local (les clés distantes restent sur le
-    // desktop). Sinon, on retombe sur la résolution standard ci-dessous.
+    // 0. Surcharge explicite du composer : honorÃ©e uniquement si elle
+    // pointe vers un provider local (les clÃ©s distantes restent sur le
+    // desktop). Sinon, on retombe sur la rÃ©solution standard ci-dessous.
     if let Some(wanted_model) = requested_model_id
         .as_deref()
         .map(str::trim)
@@ -6447,9 +6614,9 @@ async fn generate_server_assistant_text(
         }
     }
 
-    // 1. Provider actif s'il est local : les clés API restent dans le
-    // trousseau du desktop et ne sont jamais envoyées au serveur.
-    if model_settings.active_model_ref.provider_kind.is_local() {
+    // 1. Provider actif s'il est local : les clÃ©s API restent dans le
+    // trousseau du desktop et ne sont jamais envoyÃ©es au serveur.
+    if explicit_model.is_none() && model_settings.active_model_ref.provider_kind.is_local() {
         let label = model_settings.active_model_ref.model_id.clone();
         match ModelRouter::from_active(&model_settings, None) {
             Ok(router) => match router
@@ -6477,60 +6644,270 @@ async fn generate_server_assistant_text(
         }
     }
 
-    // 2. Repli Ollama local : on interroge /api/tags et on prend le premier
-    // modèle de chat réel (les embeddings seuls ne savent pas répondre).
+    // Endpoints locaux resolus tot : les replis 1b/2/2b partagent la meme base.
+    // Les variables d'environnement priment (deploiement), puis les reglages
+    // d'organisation (personnalisation admin).
     let ollama_endpoint = std::env::var("ARO_OLLAMA_ENDPOINT")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| model_settings.ollama_endpoint.clone());
-    if let Some(model_id) = discover_ollama_chat_model(&ollama_endpoint).await {
-        let mut fallback = model_settings.clone();
-        fallback.provider = ModelProviderKind::Ollama;
-        fallback.model_id = model_id.clone();
-        fallback.ollama_endpoint = ollama_endpoint;
-        match LocalModelProvider::from_settings(&fallback) {
-            Ok(provider) => match provider
-                .generate_stream(request_for(&fallback), on_chunk)
-                .await
+    let llama_cpp_endpoint = std::env::var("ARO_LLAMA_CPP_ENDPOINT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| model_settings.llama_cpp_endpoint.clone());
+
+    // Une seule interrogation /api/tags pour les replis 1b + 2.
+    let ollama_models = list_ollama_chat_models(&ollama_endpoint, OLLAMA_DISCOVERY_TIMEOUT)
+        .await
+        .unwrap_or_default();
+
+    // 1b. MEME modele sur l'Ollama local : soit la surcharge explicite
+    // (prioritaire : l'utilisateur aura exactement ce qu'il a selectionne),
+    // soit le modele actif quand il est distant/inutilisable. 100% prive,
+    // aucune cle requise, et le desktop garde son provider distant inchange.
+    let wanted_local = explicit_model.unwrap_or_else(|| {
+        if model_settings.active_model_ref.provider_kind.is_local() {
+            ""
+        } else {
+            model_settings.active_model_ref.model_id.trim()
+        }
+    });
+    // Sans surcharge et avec un actif local, l'etape 1 a deja repondu ou
+    // echoue en stream : on ne re-essaie pas le meme moteur ici.
+    let same_engine_failed =
+        explicit_model.is_none() && model_settings.active_model_ref.provider_kind.is_local();
+    if !same_engine_failed
+        && !wanted_local.is_empty()
+        && ollama_models.iter().any(|name| name == wanted_local)
+    {
+        match try_local_engine(
+            &model_settings,
+            ModelProviderKind::Ollama,
+            ollama_endpoint.clone(),
+            wanted_local.to_string(),
+            mode,
+            system_prompt,
+            history,
+            user_input,
+            on_chunk,
+        )
+        .await
+        {
+            LocalAttempt::Served(generation) => return generation,
+            LocalAttempt::StreamedFail => {
+                return unavailable_with_hint(
+                    &model_settings,
+                    &ollama_models,
+                    explicit_model,
+                    on_chunk,
+                )
+            }
+            LocalAttempt::SilentFail => {}
+        }
+    }
+
+    // 2. Repli Ollama local : premier vrai modele de chat disponible
+    // (les embeddings seuls ne savent pas repondre). Jamais avec une
+    // surcharge explicite : pas de substitution silencieuse.
+    if explicit_model.is_none() {
+        if let Some(model_id) = ollama_models.first().cloned() {
+            match try_local_engine(
+                &model_settings,
+                ModelProviderKind::Ollama,
+                ollama_endpoint.clone(),
+                model_id,
+                mode,
+                system_prompt,
+                history,
+                user_input,
+                on_chunk,
+            )
+            .await
             {
-                Ok(generation) if !generation.content.trim().is_empty() => {
-                    return ServerGeneration {
-                        text: generation.content,
-                        token_estimate: generation.token_estimate,
-                        model_label: model_id,
-                    }
+                LocalAttempt::Served(generation) => return generation,
+                LocalAttempt::StreamedFail => {
+                    return unavailable_with_hint(
+                        &model_settings,
+                        &ollama_models,
+                        explicit_model,
+                        on_chunk,
+                    )
                 }
-                Ok(_) => {}
-                Err(err) => {
-                    let unavail = ServerGeneration::unavailable(format!("Ollama: {err}"));
-                    on_chunk(unavail.text.clone());
-                    return unavail;
-                }
-            },
-            Err(err) => {
-                let unavail = ServerGeneration::unavailable(format!("Ollama: {err}"));
-                on_chunk(unavail.text.clone());
-                return unavail;
+                LocalAttempt::SilentFail => {}
             }
         }
     }
 
-    // 3. Rien d'exploitable : on le dit clairement au lieu d'inventer.
-    let active_label = model_settings.active_model_ref.model_id.clone();
-    let unavail = ServerGeneration::unavailable(format!(
-        "le provider actif ({active_label}) demande une clé API conservée sur le desktop, et aucun modèle de chat Ollama n'est joignable sur le serveur. Démarrez Ollama avec un modèle de chat (`ollama pull gemma3:1b`), ou utilisez l'application desktop."
-    ));
-    on_chunk(unavail.text.clone());
-    unavail
+    // 2b. Repli llama.cpp local (moteur oublie de la cascade historique) :
+    // meme contrat prive que l'etape 2, via son API OpenAI-compatible.
+    // Comme l'etape 2 : jamais avec une surcharge explicite.
+    if explicit_model.is_none() {
+        if let Some(model_id) = discover_llamacpp_chat_model(&llama_cpp_endpoint).await {
+            match try_local_engine(
+                &model_settings,
+                ModelProviderKind::LlamaCpp,
+                llama_cpp_endpoint,
+                model_id,
+                mode,
+                system_prompt,
+                history,
+                user_input,
+                on_chunk,
+            )
+            .await
+            {
+                LocalAttempt::Served(generation) => return generation,
+                LocalAttempt::StreamedFail => {
+                    return unavailable_with_hint(
+                        &model_settings,
+                        &ollama_models,
+                        explicit_model,
+                        on_chunk,
+                    )
+                }
+                LocalAttempt::SilentFail => {}
+            }
+        }
+    }
+
+    // 3. Cloud serveur si opt-in gouverne (consentement org + cle chiffree),
+    // sinon erreur honnete et actionnable.
+    if let Some(generation) = try_server_cloud(
+        state,
+        auth,
+        &model_settings,
+        requested_model_id.as_deref(),
+        requested_provider_id.as_deref(),
+        mode,
+        system_prompt,
+        history,
+        user_input,
+        on_chunk,
+    )
+    .await
+    {
+        return generation;
+    }
+
+    // 4. Rien d'exploitable : on le dit clairement au lieu d'inventer.
+    // Avec une surcharge explicite, on nomme le modele demande : aucune
+    // substitution silencieuse n'a eu lieu, et aucune n'aura lieu.
+    unavailable_with_hint(&model_settings, &ollama_models, explicit_model, on_chunk)
 }
 
-/// Interroge `{endpoint}/api/tags` et retourne le premier modèle de chat
-/// (on écarte les modèles d'embeddings seuls comme `nomic-embed-text`).
-async fn discover_ollama_chat_model(endpoint: &str) -> Option<String> {
+/// Delai de decouverte des moteurs locaux pour la generation (un appel HTTP
+/// local rapide ; la generation elle-meme n'est pas bornee ici).
+const OLLAMA_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Version courte pour le endpoint de statut (pre-check UX explicite).
+const AI_STATUS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Resultat d'une tentative sur moteur local.
+/// `StreamedFail` (des chunks sont deja partis) impose l'arret : enchainer un
+/// autre moteur melangerait deux reponses dans le stream.
+enum LocalAttempt {
+    Served(ServerGeneration),
+    SilentFail,
+    StreamedFail,
+}
+
+/// Tentative sur un moteur local (Ollama / llama.cpp) : `Served` si une vraie
+/// reponse est produite, sinon echec silencieux (details en logs). Ne laisse
+/// jamais passer une erreur moteur brute vers l'UI.
+#[allow(clippy::too_many_arguments)]
+async fn try_local_engine(
+    model_settings: &ModelSettings,
+    kind: ModelProviderKind,
+    endpoint: String,
+    model_id: String,
+    mode: &AssistantMode,
+    system_prompt: &str,
+    history: &[ChatMessage],
+    user_input: &str,
+    on_chunk: &mut (dyn FnMut(String) + Send),
+) -> LocalAttempt {
+    let mut fallback = model_settings.clone();
+    match kind {
+        ModelProviderKind::Ollama => {
+            fallback.provider = ModelProviderKind::Ollama;
+            fallback.ollama_endpoint = endpoint;
+        }
+        ModelProviderKind::LlamaCpp => {
+            fallback.provider = ModelProviderKind::LlamaCpp;
+            fallback.llama_cpp_endpoint = endpoint;
+        }
+        _ => return LocalAttempt::SilentFail,
+    }
+    fallback.model_id = model_id.clone();
+    // `ensure_loopback_url` (dans from_settings) garantit qu'on ne parle
+    // qu'a la machine locale : aucun contenu ne quitte le serveur ici.
+    let provider = match LocalModelProvider::from_settings(&fallback) {
+        Ok(provider) => provider,
+        Err(err) => {
+            tracing::warn!(?err, engine = ?kind, "local engine unusable, trying next fallback");
+            return LocalAttempt::SilentFail;
+        }
+    };
+    let request = ModelGenerationRequest {
+        mode: mode.clone(),
+        system_prompt: system_prompt.to_string(),
+        messages: history.to_vec(),
+        user_input: user_input.to_string(),
+        temperature: fallback.temperature,
+        max_tokens: fallback.max_tokens,
+        response_format: ModelResponseFormat::DirectText,
+    };
+    let mut forwarded = false;
+    let mut counting = |chunk: String| {
+        if !chunk.is_empty() {
+            forwarded = true;
+        }
+        on_chunk(chunk);
+    };
+    match provider.generate_stream(request, &mut counting).await {
+        Ok(generation) if !generation.content.trim().is_empty() => {
+            LocalAttempt::Served(ServerGeneration {
+                text: generation.content,
+                token_estimate: generation.token_estimate,
+                model_label: model_id,
+            })
+        }
+        Ok(_) => {
+            if forwarded {
+                LocalAttempt::StreamedFail
+            } else {
+                LocalAttempt::SilentFail
+            }
+        }
+        Err(err) => {
+            tracing::warn!(?err, engine = ?kind, model = %model_id, "local engine failed, trying next fallback");
+            if forwarded {
+                LocalAttempt::StreamedFail
+            } else {
+                LocalAttempt::SilentFail
+            }
+        }
+    }
+}
+
+/// Vrai si ce nom de modele Ollama peut chatter (on ecarte les embeddings).
+fn is_ollama_chat_model(name: &str) -> bool {
+    !name.to_lowercase().contains("embed")
+}
+
+/// Interroge `{endpoint}/api/tags` et retourne TOUS les modeles de chat,
+/// dans l'ordre du serveur. `None` = moteur injoignable (pas une erreur).
+async fn list_ollama_chat_models(endpoint: &str, timeout: Duration) -> Option<Vec<String>> {
+    // Souverainete : on ne sonde que la machine locale. Un endpoint non
+    // loopback (admin mal configure ou hostile) n'est jamais interroge :
+    // aucun contenu, aucun secret ne sort.
+    if ensure_loopback_url(endpoint).is_err() {
+        tracing::warn!("refusing to probe non-loopback Ollama endpoint");
+        return None;
+    }
     let url = format!("{}/api/tags", endpoint.trim_end_matches('/'));
     let response = reqwest::Client::new()
         .get(url)
-        .timeout(Duration::from_secs(5))
+        .timeout(timeout)
         .send()
         .await
         .ok()?;
@@ -6538,20 +6915,287 @@ async fn discover_ollama_chat_model(endpoint: &str) -> Option<String> {
         return None;
     }
     let body: Value = response.json().await.ok()?;
-    body.get("models")?.as_array()?.iter().find_map(|model| {
-        let name = model.get("name")?.as_str()?;
-        let lower = name.to_lowercase();
-        if lower.contains("embed") {
+    let models = body
+        .get("models")?
+        .as_array()?
+        .iter()
+        .filter_map(|model| model.get("name")?.as_str())
+        .filter(|name| is_ollama_chat_model(name))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    Some(models)
+}
+
+/// Interroge l'API OpenAI-compatible de llama.cpp (`GET /v1/models`) et
+/// retourne le premier modele. `None` = moteur injoignable.
+async fn discover_llamacpp_chat_model(endpoint: &str) -> Option<String> {
+    discover_llamacpp_chat_model_with_timeout(endpoint, OLLAMA_DISCOVERY_TIMEOUT).await
+}
+
+async fn discover_llamacpp_chat_model_with_timeout(
+    endpoint: &str,
+    timeout: Duration,
+) -> Option<String> {
+    if ensure_loopback_url(endpoint).is_err() {
+        tracing::warn!("refusing to probe non-loopback llama.cpp endpoint");
+        return None;
+    }
+    let url = format!("{}/v1/models", endpoint.trim_end_matches('/'));
+    let response = reqwest::Client::new()
+        .get(url)
+        .timeout(timeout)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: Value = response.json().await.ok()?;
+    body.get("data")?.as_array()?.iter().find_map(|model| {
+        let id = model.get("id")?.as_str()?;
+        if id.trim().is_empty() {
             return None;
         }
-        Some(name.to_string())
+        Some(id.to_string())
     })
+}
+
+/// Message final honnete et actionnable quand rien n'est exploitable cote
+/// serveur. Le detail technique reste dans les logs, jamais dans l'UI.
+/// (Caracteres accentues en \u00e9chappements : ce fichier contient
+/// historiquement du FR double-encode ; les \u{} restent lisibles partout.)
+fn unavailable_with_hint(
+    model_settings: &ModelSettings,
+    ollama_models: &[String],
+    explicit_model: Option<&str>,
+    on_chunk: &mut (dyn FnMut(String) + Send),
+) -> ServerGeneration {
+    // Surcharge explicite non servie : on nomme le modele demande et on
+    // affirme l'absence de substitution (contrat du selecteur).
+    if let Some(wanted) = explicit_model {
+        let unavail = ServerGeneration::unavailable(format!(
+            "Le mod\u{00e8}le demand\u{00e9} ({wanted}) n'est utilisable depuis ce client ni en local ni via le cloud : v\u{00e9}rifiez qu'il est install\u{00e9} sur le serveur (Ollama) ou couvert par l'opt-in cloud (R\u{00e9}glages \u{203a} Mod\u{00e8}les). Aucun autre mod\u{00e8}le n'a \u{00e9}t\u{00e9} substitu\u{00e9}."
+        ));
+        on_chunk(unavail.text.clone());
+        return unavail;
+    }
+    let active_label = model_settings.active_model_ref.model_id.clone();
+    let local_hint = if ollama_models.is_empty() {
+        "Aucun mod\u{00e8}le de chat local n'est joignable sur le serveur. D\u{00e9}marrez Ollama avec un mod\u{00e8}le de chat (`ollama pull gemma3:1b`), ou demandez \u{00e0} l'administrateur d'activer la g\u{00e9}n\u{00e9}ration cloud pour votre organisation (R\u{00e9}glages \u{203a} Mod\u{00e8}les)."
+    } else {
+        "Des mod\u{00e8}les locaux sont visibles mais indisponibles : v\u{00e9}rifiez qu'Ollama r\u{00e9}pond sur le serveur, ou demandez \u{00e0} l'administrateur d'activer la g\u{00e9}n\u{00e9}ration cloud (R\u{00e9}glages \u{203a} Mod\u{00e8}les)."
+    };
+    let unavail = ServerGeneration::unavailable(format!(
+        "Le mod\u{00e8}le actif ({active_label}) n'est pas utilisable depuis ce client : sa cl\u{00e9} reste sur le desktop. {local_hint}"
+    ));
+    on_chunk(unavail.text.clone());
+    unavail
+}
+
+/// Etape 3 (opt-in gouverne) : generation cloud cote serveur.
+/// Double verrou INDISSOCIABLE : consentement org actif ET cle chiffree
+/// presente pour le provider vise. Sans les deux : None (erreur honnete).
+/// Les cles desktop ne sont jamais demandees ni utilisees ici : ce chemin
+/// n'emploie que des cles serveur explicitement deposees par un admin.
+/// Succes = reponse marquee "server-cloud" + audit SANS contenu ni cle.
+#[allow(clippy::too_many_arguments)]
+async fn try_server_cloud(
+    state: &ApiState,
+    auth: &AuthContext,
+    model_settings: &ModelSettings,
+    requested_model_id: Option<&str>,
+    requested_provider_id: Option<&str>,
+    mode: &AssistantMode,
+    system_prompt: &str,
+    history: &[ChatMessage],
+    user_input: &str,
+    on_chunk: &mut (dyn FnMut(String) + Send),
+) -> Option<ServerGeneration> {
+    let consent = state
+        .store
+        .get_org_ai_cloud_consent(auth.organization_id)
+        .await
+        .ok()?;
+    if !consent.enabled {
+        return None;
+    }
+    let wanted_model = requested_model_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    // 3a. Override explicite : honore UNIQUEMENT si le provider vise est
+    // utilisable cote serveur. Sinon None immediat (pas de substitution
+    // surprise vers un autre provider cloud).
+    if let Some(provider_id) = requested_provider_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let Some(connection) = model_settings.connection(provider_id) else {
+            return None;
+        };
+        return server_cloud_attempt(
+            state,
+            auth,
+            model_settings,
+            connection,
+            &consent,
+            wanted_model,
+            mode,
+            system_prompt,
+            history,
+            user_input,
+            on_chunk,
+        )
+        .await;
+    }
+
+    // 3b. Actif org s'il est distant et couvert par l'opt-in. Avec une
+    // surcharge explicite, seul l'ID demande est accepte (jamais de
+    // substitution : server_cloud_attempt exige un modele reference).
+    let active = &model_settings.active_model_ref;
+    if !active.provider_kind.is_local() {
+        if let Some(connection) = model_settings.connection(&active.provider_id) {
+            if let Some(generation) = server_cloud_attempt(
+                state,
+                auth,
+                model_settings,
+                connection,
+                &consent,
+                wanted_model.or(Some(active.model_id.as_str())),
+                mode,
+                system_prompt,
+                history,
+                user_input,
+                on_chunk,
+            )
+            .await
+            {
+                return Some(generation);
+            }
+        }
+    }
+
+    // 3c. Premier provider distant consenti avec cle deposee. Avec une
+    // surcharge explicite, seuls les modeles demandes passent (meme regle).
+    for connection in &model_settings.providers {
+        if connection.kind.is_local() || !connection.enabled {
+            continue;
+        }
+        if let Some(generation) = server_cloud_attempt(
+            state,
+            auth,
+            model_settings,
+            connection,
+            &consent,
+            wanted_model,
+            mode,
+            system_prompt,
+            history,
+            user_input,
+            on_chunk,
+        )
+        .await
+        {
+            return Some(generation);
+        }
+    }
+    None
+}
+
+/// Une tentative cloud : la connexion doit etre distante, activee, couverte
+/// par le consentement, ET avec une cle serveur deposee. Tout manque = None.
+#[allow(clippy::too_many_arguments)]
+async fn server_cloud_attempt(
+    state: &ApiState,
+    auth: &AuthContext,
+    model_settings: &ModelSettings,
+    connection: &ModelProviderConnection,
+    consent: &aro_store::OrgAiCloudConsent,
+    wanted_model: Option<&str>,
+    mode: &AssistantMode,
+    system_prompt: &str,
+    history: &[ChatMessage],
+    user_input: &str,
+    on_chunk: &mut (dyn FnMut(String) + Send),
+) -> Option<ServerGeneration> {
+    if connection.kind.is_local() || !connection.enabled {
+        return None;
+    }
+    if !consent.provider_ids.iter().any(|id| id == &connection.id) {
+        return None;
+    }
+    let key = state
+        .store
+        .get_org_provider_key(auth.organization_id, &connection.id, &state.secrets_key)
+        .await
+        .ok()??;
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return None;
+    }
+    // Modele demande s'il est reference par la connexion, sinon son premier
+    // modele (from_model_ref exige un modele connu : jamais d'ID invente).
+    let model = wanted_model
+        .filter(|wanted| {
+            connection
+                .models
+                .iter()
+                .any(|model| model.model_id == **wanted)
+        })
+        .or_else(|| {
+            connection
+                .models
+                .first()
+                .map(|model| model.model_id.as_str())
+        })?;
+    let model_ref =
+        aro_core::ModelRef::new(connection.id.clone(), connection.kind.clone(), model, model);
+    let router = match ModelRouter::from_model_ref(model_settings, &model_ref, Some(key)) {
+        Ok(router) => router,
+        Err(err) => {
+            tracing::warn!(?err, provider = %connection.id, "server cloud router unusable");
+            return None;
+        }
+    };
+    let request = ModelGenerationRequest {
+        mode: mode.clone(),
+        system_prompt: system_prompt.to_string(),
+        messages: history.to_vec(),
+        user_input: user_input.to_string(),
+        temperature: model_settings.temperature,
+        max_tokens: model_settings.max_tokens,
+        response_format: ModelResponseFormat::DirectText,
+    };
+    match router.generate_stream(request, on_chunk).await {
+        Ok(generation) if !generation.content.trim().is_empty() => {
+            // Audit entreprise : qui/quand/quoi, JAMAIS le contenu ni la cle.
+            tracing::info!(
+                organization_id = %auth.organization_id,
+                user_id = %auth.user_id,
+                provider = %connection.id,
+                provider_kind = ?connection.kind,
+                model = %model,
+                source = "server-cloud",
+                "server cloud generation served under org opt-in"
+            );
+            Some(ServerGeneration {
+                text: generation.content,
+                token_estimate: generation.token_estimate,
+                model_label: format!("{model} (cloud)"),
+            })
+        }
+        Ok(_) => None,
+        Err(err) => {
+            tracing::warn!(?err, provider = %connection.id, "server cloud generation failed");
+            None
+        }
+    }
 }
 
 impl ServerGeneration {
     fn unavailable(reason: String) -> Self {
         Self {
-            text: format!("Je n'ai pas pu générer de réponse côté serveur : {reason}"),
+            text: format!("Je n'ai pas pu g\u{00e9}n\u{00e9}rer de r\u{00e9}ponse c\u{00f4}t\u{00e9} serveur : {reason}"),
             token_estimate: None,
             model_label: "unavailable".to_string(),
         }
@@ -6773,6 +7417,17 @@ mod tests {
     }
 
     #[test]
+    fn ollama_chat_filter_keeps_chat_models_only() {
+        assert!(is_ollama_chat_model("gemma3:1b"));
+        assert!(is_ollama_chat_model(
+            "brnpistone/Qwen3-4B-AgentCoder-q6-k:latest"
+        ));
+        assert!(is_ollama_chat_model("phi3:mini"));
+        assert!(!is_ollama_chat_model("nomic-embed-text:latest"));
+        assert!(!is_ollama_chat_model("mxbai-EMBED-large"));
+    }
+
+    #[test]
     fn replay_response_marks_replayed_requests() {
         let response = idempotency_http_response(
             IdempotencyResponse {
@@ -6793,189 +7448,4 @@ mod tests {
 
 pub async fn well_known_jwks(State(state): State<ApiState>) -> Json<Value> {
     Json(state.jwt.jwks())
-}
-
-// =========================================================================
-// AGENT PLUGINS (https://agent-plugins.org/)
-// =========================================================================
-
-#[derive(Debug, Deserialize)]
-pub struct TogglePluginPayload {
-    pub enabled: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CallPluginMcpPayload {
-    pub tool_name: String,
-    #[serde(default)]
-    pub arguments: Value,
-}
-
-pub async fn plugins_list_installed(
-    State(state): State<ApiState>,
-    auth: AuthContext,
-) -> Result<Json<Vec<aro_plugins::InstalledPlugin>>, ApiError> {
-    state
-        .store
-        .ensure_org_access(auth.user_id, auth.organization_id)
-        .await?;
-    let list = state.plugins.list_installed().await;
-    Ok(Json(list))
-}
-
-pub async fn plugins_list_marketplace(
-    State(state): State<ApiState>,
-    auth: AuthContext,
-) -> Result<Json<Vec<aro_plugins::MarketplacePlugin>>, ApiError> {
-    state
-        .store
-        .ensure_org_access(auth.user_id, auth.organization_id)
-        .await?;
-    let list = state.plugins.list_marketplace().await;
-    Ok(Json(list))
-}
-
-pub async fn plugins_install(
-    State(state): State<ApiState>,
-    auth: AuthContext,
-    Json(payload): Json<aro_plugins::InstallPluginRequest>,
-) -> Result<Json<aro_plugins::InstalledPlugin>, ApiError> {
-    state
-        .store
-        .ensure_org_admin(auth.user_id, auth.organization_id)
-        .await?;
-    let installed = match payload.source {
-        aro_plugins::PluginSourceType::Marketplace => {
-            state
-                .plugins
-                .install_from_marketplace(&payload.target)
-                .await?
-        }
-        aro_plugins::PluginSourceType::Local => {
-            state
-                .plugins
-                .install_from_directory(std::path::Path::new(&payload.target))
-                .await?
-        }
-        aro_plugins::PluginSourceType::Git => {
-            state.plugins.install_from_git(&payload.target).await?
-        }
-    };
-    Ok(Json(installed))
-}
-
-pub async fn plugins_install_custom(
-    State(state): State<ApiState>,
-    auth: AuthContext,
-    Json(payload): Json<aro_plugins::CreateCustomPluginRequest>,
-) -> Result<Json<aro_plugins::InstalledPlugin>, ApiError> {
-    state
-        .store
-        .ensure_org_admin(auth.user_id, auth.organization_id)
-        .await?;
-    let installed = state.plugins.install_custom(payload).await?;
-    Ok(Json(installed))
-}
-
-pub async fn plugins_get(
-    State(state): State<ApiState>,
-    auth: AuthContext,
-    axum::extract::Path(plugin_id): axum::extract::Path<String>,
-) -> Result<Json<aro_plugins::InstalledPlugin>, ApiError> {
-    state
-        .store
-        .ensure_org_access(auth.user_id, auth.organization_id)
-        .await?;
-    let plugin = state
-        .plugins
-        .get_plugin(&plugin_id)
-        .await
-        .ok_or_else(|| ApiError::not_found(format!("Plugin '{plugin_id}' not found")))?;
-    Ok(Json(plugin))
-}
-
-pub async fn plugins_toggle(
-    State(state): State<ApiState>,
-    auth: AuthContext,
-    axum::extract::Path(plugin_id): axum::extract::Path<String>,
-    Json(payload): Json<TogglePluginPayload>,
-) -> Result<Json<aro_plugins::InstalledPlugin>, ApiError> {
-    state
-        .store
-        .ensure_org_admin(auth.user_id, auth.organization_id)
-        .await?;
-    let updated = state
-        .plugins
-        .set_enabled(&plugin_id, payload.enabled)
-        .await?;
-    Ok(Json(updated))
-}
-
-pub async fn plugins_uninstall(
-    State(state): State<ApiState>,
-    auth: AuthContext,
-    axum::extract::Path(plugin_id): axum::extract::Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    state
-        .store
-        .ensure_org_admin(auth.user_id, auth.organization_id)
-        .await?;
-    state.plugins.uninstall(&plugin_id).await?;
-    Ok(Json(serde_json::json!({ "success": true })))
-}
-
-pub async fn plugins_mcp_test(
-    State(state): State<ApiState>,
-    auth: AuthContext,
-    axum::extract::Path((plugin_id, server_name)): axum::extract::Path<(String, String)>,
-) -> Result<Json<Vec<aro_mcp::McpTool>>, ApiError> {
-    state
-        .store
-        .ensure_org_admin(auth.user_id, auth.organization_id)
-        .await?;
-    let tools = state
-        .plugins
-        .test_mcp_server(&plugin_id, &server_name)
-        .await?;
-    Ok(Json(tools))
-}
-
-pub async fn plugins_mcp_call(
-    State(state): State<ApiState>,
-    auth: AuthContext,
-    axum::extract::Path((plugin_id, server_name)): axum::extract::Path<(String, String)>,
-    Json(payload): Json<CallPluginMcpPayload>,
-) -> Result<Json<aro_mcp::CallToolResult>, ApiError> {
-    state
-        .store
-        .ensure_org_access(auth.user_id, auth.organization_id)
-        .await?;
-    let result = state
-        .plugins
-        .call_mcp_tool(
-            &plugin_id,
-            &server_name,
-            &payload.tool_name,
-            payload.arguments,
-        )
-        .await?;
-    Ok(Json(result))
-}
-
-pub async fn plugins_skill_invoke(
-    State(state): State<ApiState>,
-    auth: AuthContext,
-    axum::extract::Path((plugin_id, skill_id)): axum::extract::Path<(String, String)>,
-    Json(payload): Json<Value>,
-) -> Result<Json<aro_skills::SkillOutput>, ApiError> {
-    state
-        .store
-        .ensure_org_access(auth.user_id, auth.organization_id)
-        .await?;
-    let output = state
-        .plugins
-        .invoke_skill(&plugin_id, &skill_id, &payload)
-        .await?;
-    Ok(Json(output))
 }

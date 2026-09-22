@@ -382,7 +382,25 @@ impl ModelRouter {
             let content = body
                 .choices
                 .first()
-                .map(|choice| choice.message.content.clone())
+                .map(|choice| {
+                    let text = choice.message.content.clone().unwrap_or_default();
+                    let reasoning = choice
+                        .message
+                        .reasoning_content
+                        .as_deref()
+                        .or(choice.message.reasoning.as_deref());
+                    if let Some(r) = reasoning.filter(|r| !r.trim().is_empty()) {
+                        if text.is_empty() {
+                            format!("<think>{}</think>\n", r.trim())
+                        } else if !text.contains("<think>") {
+                            format!("<think>{}</think>\n{}", r.trim(), text)
+                        } else {
+                            text
+                        }
+                    } else {
+                        text
+                    }
+                })
                 .unwrap_or_default();
             Ok(ModelGeneration {
                 content,
@@ -614,7 +632,15 @@ impl ModelProvider for ModelRouter {
     }
 
     fn max_tokens(&self) -> u32 {
-        self.settings.max_tokens
+        let profile = aro_core::resolve_model_profile(
+            &self.model_ref.model_id,
+            &self.model_ref.provider_kind,
+        );
+        if self.settings.max_tokens >= 512 {
+            self.settings.max_tokens.max(profile.max_output_tokens)
+        } else {
+            profile.max_output_tokens
+        }
     }
 }
 
@@ -877,14 +903,26 @@ impl ModelProvider for OllamaProvider {
             "model": self.settings.model_id,
             "messages": messages,
             "stream": true,
+            // Garde le modele charge en memoire : les requetes suivantes
+            // (mobile/web) demarrent sans le cout du chargement a froid.
+            "keep_alive": "10m",
             "options": {
                 "temperature": request.temperature,
                 "num_predict": request.max_tokens
             }
         });
         if request.response_format == ModelResponseFormat::AgentActionJson {
-            if let Some(obj) = body.as_object_mut() {
-                obj.insert("format".to_string(), json!("json"));
+            let model_lower = self.settings.model_id.to_lowercase();
+            let is_reasoning_model = model_lower.contains("deepseek")
+                || model_lower.contains("r1")
+                || model_lower.contains("reason")
+                || model_lower.contains("think")
+                || model_lower.contains("qwq")
+                || model_lower.contains("qwen");
+            if !is_reasoning_model {
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert("format".to_string(), json!("json"));
+                }
             }
         }
         let mut response = self
@@ -911,6 +949,7 @@ impl ModelProvider for OllamaProvider {
         let mut full_content = String::new();
         let mut eval_count = None;
         let mut line_buffer = String::new();
+        let mut in_thinking = false;
 
         while let Some(chunk) = response
             .chunk()
@@ -929,16 +968,47 @@ impl ModelProvider for OllamaProvider {
                     continue;
                 }
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    if let Some(content) = val.pointer("/message/content").and_then(|v| v.as_str())
-                    {
-                        full_content.push_str(content);
-                        on_chunk(content.to_string());
-                    }
                     if let Some(ec) = val.get("eval_count").and_then(|v| v.as_u64()) {
                         eval_count = Some(ec as u32);
                     }
+
+                    // Handle dedicated thinking delta if emitted by Ollama
+                    if let Some(thinking_chunk) = val
+                        .pointer("/message/thinking")
+                        .or_else(|| val.pointer("/message/thought"))
+                        .and_then(|v| v.as_str())
+                    {
+                        if !thinking_chunk.is_empty() {
+                            if !in_thinking {
+                                in_thinking = true;
+                                full_content.push_str("<think>");
+                                on_chunk("<think>".to_string());
+                            }
+                            full_content.push_str(thinking_chunk);
+                            on_chunk(thinking_chunk.to_string());
+                        }
+                    }
+
+                    // Handle standard content delta
+                    if let Some(content) = val.pointer("/message/content").and_then(|v| v.as_str())
+                    {
+                        if !content.is_empty() {
+                            if in_thinking {
+                                in_thinking = false;
+                                full_content.push_str("</think>\n");
+                                on_chunk("</think>\n".to_string());
+                            }
+                            full_content.push_str(content);
+                            on_chunk(content.to_string());
+                        }
+                    }
                 }
             }
+        }
+
+        if in_thinking {
+            full_content.push_str("</think>\n");
+            on_chunk("</think>\n".to_string());
         }
 
         Ok(ModelGeneration {
@@ -961,18 +1031,34 @@ impl ModelProvider for OllamaProvider {
         })];
         messages.extend(request.messages.iter().map(ollama_message));
 
+        let mut body = json!({
+            "model": self.settings.model_id,
+            "messages": messages,
+            "stream": false,
+            "options": {
+                "temperature": request.temperature,
+                "num_predict": request.max_tokens
+            }
+        });
+        if request.response_format == ModelResponseFormat::AgentActionJson {
+            let model_lower = self.settings.model_id.to_lowercase();
+            let is_reasoning_model = model_lower.contains("deepseek")
+                || model_lower.contains("r1")
+                || model_lower.contains("reason")
+                || model_lower.contains("think")
+                || model_lower.contains("qwq")
+                || model_lower.contains("qwen");
+            if !is_reasoning_model {
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert("format".to_string(), json!("json"));
+                }
+            }
+        }
+
         let response = self
             .client
             .post(&endpoint)
-            .json(&json!({
-                "model": self.settings.model_id,
-                "messages": messages,
-                "stream": false,
-                "options": {
-                    "temperature": request.temperature,
-                    "num_predict": request.max_tokens
-                }
-            }))
+            .json(&body)
             .send()
             .await
             .map_err(|err| AroError::RuntimeUnavailable(err.to_string()))?;
@@ -995,8 +1081,22 @@ impl ModelProvider for OllamaProvider {
             .await
             .map_err(|err| AroError::RuntimeUnavailable(err.to_string()))?;
 
+        let raw_content = body.message.content.trim().to_string();
+        let thinking = body.message.thinking.or(body.message.thought);
+        let content = if let Some(t) = thinking.filter(|t| !t.trim().is_empty()) {
+            if raw_content.is_empty() {
+                format!("<think>{}</think>\n", t.trim())
+            } else if !raw_content.contains("<think>") {
+                format!("<think>{}</think>\n{}", t.trim(), raw_content)
+            } else {
+                raw_content
+            }
+        } else {
+            raw_content
+        };
+
         Ok(ModelGeneration {
-            content: body.message.content,
+            content,
             provider_detail: "ollama local provider".to_string(),
             token_estimate: body.eval_count,
         })
@@ -1078,7 +1178,15 @@ impl ModelProvider for OllamaProvider {
     }
 
     fn max_tokens(&self) -> u32 {
-        self.settings.max_tokens
+        let profile = aro_core::resolve_model_profile(
+            &self.settings.model_id,
+            &ModelProviderKind::Ollama,
+        );
+        if self.settings.max_tokens >= 512 {
+            self.settings.max_tokens.max(profile.max_output_tokens)
+        } else {
+            profile.max_output_tokens
+        }
     }
 }
 
@@ -1124,14 +1232,23 @@ impl ModelProvider for LlamaCppProvider {
             "stream": true
         });
         if request.response_format == ModelResponseFormat::AgentActionJson {
-            if let Some(obj) = body.as_object_mut() {
-                obj.insert(
-                    "response_format".to_string(),
-                    json!({ "type": "json_object" }),
-                );
+            let model_lower = self.settings.model_id.to_lowercase();
+            let is_reasoning_model = model_lower.contains("deepseek")
+                || model_lower.contains("r1")
+                || model_lower.contains("reason")
+                || model_lower.contains("think")
+                || model_lower.contains("qwq")
+                || model_lower.contains("qwen");
+            if !is_reasoning_model {
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert(
+                        "response_format".to_string(),
+                        json!({ "type": "json_object" }),
+                    );
+                }
             }
         }
-        let mut response = self
+        let response = self
             .client
             .post(&endpoint)
             .json(&body)
@@ -1151,43 +1268,7 @@ impl ModelProvider for LlamaCppProvider {
             )));
         }
 
-        let mut full_content = String::new();
-        let mut line_buffer = String::new();
-
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|err| AroError::RuntimeUnavailable(err.to_string()))?
-        {
-            let text = String::from_utf8_lossy(&chunk);
-            line_buffer.push_str(&text);
-
-            while let Some(newline_idx) = line_buffer.find('\n') {
-                let line = line_buffer[..newline_idx].to_string();
-                line_buffer = line_buffer[newline_idx + 1..].to_string();
-
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-
-                if let Some(data_str) = trimmed.strip_prefix("data: ") {
-                    let data_trimmed = data_str.trim();
-                    if data_trimmed == "[DONE]" {
-                        break;
-                    }
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(data_trimmed) {
-                        if let Some(content) = val
-                            .pointer("/choices/0/delta/content")
-                            .and_then(|v| v.as_str())
-                        {
-                            full_content.push_str(content);
-                            on_chunk(content.to_string());
-                        }
-                    }
-                }
-            }
-        }
+        let full_content = parse_openai_sse(response, on_chunk).await?;
 
         Ok(ModelGeneration {
             content: full_content,
@@ -1241,7 +1322,25 @@ impl ModelProvider for LlamaCppProvider {
         let content = body
             .choices
             .first()
-            .map(|choice| choice.message.content.clone())
+            .map(|choice| {
+                let text = choice.message.content.clone().unwrap_or_default();
+                let reasoning = choice
+                    .message
+                    .reasoning_content
+                    .as_deref()
+                    .or(choice.message.reasoning.as_deref());
+                if let Some(r) = reasoning.filter(|r| !r.trim().is_empty()) {
+                    if text.is_empty() {
+                        format!("<think>{}</think>\n", r.trim())
+                    } else if !text.contains("<think>") {
+                        format!("<think>{}</think>\n{}", r.trim(), text)
+                    } else {
+                        text
+                    }
+                } else {
+                    text
+                }
+            })
             .unwrap_or_default();
 
         Ok(ModelGeneration {
@@ -1295,7 +1394,15 @@ impl ModelProvider for LlamaCppProvider {
     }
 
     fn max_tokens(&self) -> u32 {
-        self.settings.max_tokens
+        let profile = aro_core::resolve_model_profile(
+            &self.settings.model_id,
+            &ModelProviderKind::LlamaCpp,
+        );
+        if self.settings.max_tokens >= 512 {
+            self.settings.max_tokens.max(profile.max_output_tokens)
+        } else {
+            profile.max_output_tokens
+        }
     }
 }
 
@@ -1359,41 +1466,99 @@ async fn parse_openai_sse(
     mut response: reqwest::Response,
     on_chunk: &mut (dyn FnMut(String) + Send),
 ) -> AroResult<String> {
-    parse_sse_lines(&mut response, |data, full_content| {
+    let mut in_thinking = false;
+    let mut result = parse_sse_lines(&mut response, |data, full_content| {
         if data == "[DONE]" {
             return;
         }
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
+            if let Some(reasoning) = value
+                .pointer("/choices/0/delta/reasoning_content")
+                .or_else(|| value.pointer("/choices/0/delta/reasoning"))
+                .and_then(|value| value.as_str())
+            {
+                if !reasoning.is_empty() {
+                    if !in_thinking {
+                        in_thinking = true;
+                        full_content.push_str("<think>");
+                        on_chunk("<think>".to_string());
+                    }
+                    full_content.push_str(reasoning);
+                    on_chunk(reasoning.to_string());
+                }
+            }
+
             if let Some(content) = value
                 .pointer("/choices/0/delta/content")
                 .and_then(|value| value.as_str())
             {
-                full_content.push_str(content);
-                on_chunk(content.to_string());
-            }
-        }
-    })
-    .await
-}
-
-async fn parse_anthropic_sse(
-    mut response: reqwest::Response,
-    on_chunk: &mut (dyn FnMut(String) + Send),
-) -> AroResult<String> {
-    parse_sse_lines(&mut response, |data, full_content| {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
-            if value.get("type").and_then(|value| value.as_str()) == Some("content_block_delta") {
-                if let Some(content) = value
-                    .pointer("/delta/text")
-                    .and_then(|value| value.as_str())
-                {
+                if !content.is_empty() {
+                    if in_thinking {
+                        in_thinking = false;
+                        full_content.push_str("</think>\n");
+                        on_chunk("</think>\n".to_string());
+                    }
                     full_content.push_str(content);
                     on_chunk(content.to_string());
                 }
             }
         }
     })
-    .await
+    .await?;
+
+    if in_thinking {
+        result.push_str("</think>\n");
+        on_chunk("</think>\n".to_string());
+    }
+
+    Ok(result)
+}
+
+async fn parse_anthropic_sse(
+    mut response: reqwest::Response,
+    on_chunk: &mut (dyn FnMut(String) + Send),
+) -> AroResult<String> {
+    let mut in_thinking = false;
+    let mut result = parse_sse_lines(&mut response, |data, full_content| {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
+            let block_type = value.get("type").and_then(|value| value.as_str());
+            if block_type == Some("content_block_delta") {
+                if let Some(thinking) = value.pointer("/delta/thinking").and_then(|value| value.as_str()) {
+                    if !thinking.is_empty() {
+                        if !in_thinking {
+                            in_thinking = true;
+                            full_content.push_str("<think>");
+                            on_chunk("<think>".to_string());
+                        }
+                        full_content.push_str(thinking);
+                        on_chunk(thinking.to_string());
+                    }
+                }
+                if let Some(content) = value
+                    .pointer("/delta/text")
+                    .and_then(|value| value.as_str())
+                {
+                    if !content.is_empty() {
+                        if in_thinking {
+                            in_thinking = false;
+                            full_content.push_str("</think>\n");
+                            on_chunk("</think>\n".to_string());
+                        }
+                        full_content.push_str(content);
+                        on_chunk(content.to_string());
+                    }
+                }
+            }
+        }
+    })
+    .await?;
+
+    if in_thinking {
+        result.push_str("</think>\n");
+        on_chunk("</think>\n".to_string());
+    }
+
+    Ok(result)
 }
 
 async fn parse_google_sse(
@@ -1480,7 +1645,12 @@ struct OllamaModelTag {
 
 #[derive(Debug, Deserialize)]
 struct OllamaMessage {
+    #[serde(default)]
     content: String,
+    #[serde(default)]
+    thinking: Option<String>,
+    #[serde(default)]
+    thought: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1506,7 +1676,12 @@ struct OpenAiChoice {
 
 #[derive(Debug, Deserialize)]
 struct OpenAiMessage {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

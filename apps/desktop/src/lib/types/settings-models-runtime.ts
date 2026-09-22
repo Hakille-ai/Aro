@@ -94,11 +94,32 @@ export interface MemoryConfigurationSettings {
   autoMemorize: boolean;
 }
 
+export interface NotificationSettings {
+  desktopNotificationsEnabled: boolean;
+  soundEnabled: boolean;
+  agentCompletionNotifications: boolean;
+  routineNotifications: boolean;
+  emailNotificationsEnabled: boolean;
+  emailOnAgentCompletion: boolean;
+  emailOnRoutineSummary: boolean;
+  emailRecipient?: string | null;
+  emailProvider: string;
+  smtpHost?: string | null;
+  smtpPort?: number | null;
+  smtpUser?: string | null;
+  smtpPassword?: string | null;
+  smtpFrom?: string | null;
+  smtpTlsMode?: string | null;
+  apiKey?: string | null;
+  authConfigured: boolean;
+}
+
 export interface AppSettings {
   model: ModelSettings;
   voice: VoiceSettings;
   search: SearchSettings;
   memory: MemoryConfigurationSettings;
+  notification?: NotificationSettings;
   retainHistory: boolean;
   speakResponses: boolean;
 }

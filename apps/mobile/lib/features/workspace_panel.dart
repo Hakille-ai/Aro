@@ -3,8 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/api.dart';
+import '../core/plans.dart';
 import '../core/workspace.dart';
 import '../ui/design.dart';
+import 'artifacts.dart';
+import 'file_preview.dart';
 import 'settings.dart';
 import 'settings_catalog.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -21,9 +24,15 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
   List<Json> plans = [], files = [], runs = [];
   bool loading = true, overview = true;
   final address = TextEditingController();
+  final outputSearch = TextEditingController();
+  final fileSearch = TextEditingController();
+  String outputFilter = 'Tous';
+  final Map<String, ArtifactStatus> artifactStatus = {};
   @override
   void dispose() {
     address.dispose();
+    outputSearch.dispose();
+    fileSearch.dispose();
     super.dispose();
   }
 
@@ -170,9 +179,10 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
                     Row(
                       children: [
                         Expanded(
-                          child: TextButton(
-                            onPressed: () {},
-                            child: const Text('Activité'),
+                          child: TextButton.icon(
+                            onPressed: loading ? null : load,
+                            icon: const Icon(LucideIcons.refreshCw, size: 14),
+                            label: const Text('Actualiser'),
                           ),
                         ),
                         Expanded(
@@ -285,9 +295,25 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
                   padding: const EdgeInsets.all(20),
                   children: [
                     const Notice(
-                      'Fichiers de votre espace cloud. Les fichiers du PC restent sur leur appareil.',
+                      'Fichiers de votre espace cloud. Touchez un fichier pour l’apercevoir. Les fichiers du PC restent sur leur appareil.',
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: fileSearch,
+                      decoration: const InputDecoration(
+                        hintText: 'Rechercher un fichier… (quick open)',
+                        prefixIcon: Icon(LucideIcons.search, size: 16),
+                        isDense: true,
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                    const SizedBox(height: 12),
+                    if (_visibleFiles().isEmpty && files.isNotEmpty)
+                      const EmptyState(
+                        icon: LucideIcons.search,
+                        title: 'Aucun fichier trouvé',
+                        subtitle: 'Modifiez la recherche.',
+                      ),
                     if (files.isEmpty)
                       const EmptyState(
                         icon: LucideIcons.fileText,
@@ -295,15 +321,24 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
                         subtitle:
                             'Joignez un document depuis le chat pour le retrouver ici.',
                       ),
-                    for (final file in files)
+                    for (final file in _visibleFiles())
                       Card(
                         child: ListTile(
-                          leading: const Icon(LucideIcons.fileText),
+                          leading: Icon(
+                            _fileIcon(
+                              '${file['originalName'] ?? file['name'] ?? ''}',
+                            ),
+                            size: 18,
+                          ),
                           title: Text(
                             '${file['originalName'] ?? file['name'] ?? 'Fichier'}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
                           subtitle: Text(
                             '${file['status'] ?? ''} · ${file['sizeBytes'] ?? 0} octets',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
                           trailing: IconButton(
                             tooltip: 'Supprimer le fichier',
@@ -324,6 +359,14 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
                             },
                             icon: const Icon(LucideIcons.trash2, size: 18),
                           ),
+                          onTap: () {
+                            HapticFeedback.selectionClick();
+                            openFilePreview(
+                              context: context,
+                              workspace: w,
+                              file: file,
+                            );
+                          },
                         ),
                       ),
                   ],
@@ -331,10 +374,24 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
                 ListView(
                   padding: const EdgeInsets.all(20),
                   children: [
-                    FilledButton.icon(
-                      onPressed: createPlan,
-                      icon: const Icon(LucideIcons.plus),
-                      label: const Text('Nouveau plan'),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: FilledButton.icon(
+                            onPressed: createPlan,
+                            icon: const Icon(LucideIcons.plus, size: 18),
+                            label: const Text('Nouveau plan'),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: generateAiPlan,
+                            icon: const Icon(LucideIcons.sparkles, size: 18),
+                            label: const Text('Générer avec l’IA'),
+                          ),
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 20),
                     if (plans.isEmpty)
@@ -342,44 +399,126 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
                         icon: LucideIcons.listTodo,
                         title: 'Aucun plan de projet',
                         subtitle:
-                            "Créez ou demandez à l’assistant d’établir un plan d’action.",
+                            'Créez un plan ou demandez à l’assistant d’établir une feuille de route.',
                       ),
                     for (final plan in plans)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 16),
                         child: Card(
                           child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
                               ListTile(
-                                title: Text('${plan['title']}'),
-                                subtitle: Text('${plan['description'] ?? ''}'),
-                                trailing: IconButton(
-                                  tooltip: 'Ajouter une étape',
-                                  onPressed: () => addStep(plan),
-                                  icon: const Icon(LucideIcons.plus),
+                                title: Text(
+                                  '${plan['title']}',
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: Text(
+                                  _planProgressLabel(plan),
+                                  style: const TextStyle(fontSize: 11),
+                                ),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      tooltip: 'Ajouter une étape',
+                                      onPressed: () => addStep(plan),
+                                      icon: const Icon(
+                                        LucideIcons.plus,
+                                        size: 18,
+                                      ),
+                                    ),
+                                    PopupMenuButton<String>(
+                                      tooltip: 'Actions du plan',
+                                      onSelected: (v) {
+                                        if (v == 'status') {
+                                          updatePlanStatus(plan);
+                                        } else if (v == 'delete') {
+                                          deletePlan(plan);
+                                        }
+                                      },
+                                      itemBuilder: (_) => const [
+                                        PopupMenuItem(
+                                          value: 'status',
+                                          child: Text('Changer le statut'),
+                                        ),
+                                        PopupMenuItem(
+                                          value: 'delete',
+                                          child: Text('Supprimer'),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  16,
+                                  0,
+                                  16,
+                                  8,
+                                ),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(999),
+                                  child: LinearProgressIndicator(
+                                    value: _planProgressValue(plan),
+                                    minHeight: 6,
+                                  ),
                                 ),
                               ),
                               for (final task in records(plan['tasks']))
-                                CheckboxListTile(
-                                  value: task['completed'] == true,
-                                  title: Text('${task['text']}'),
-                                  onChanged: (v) => perform(context, () async {
-                                    final tasks = records(plan['tasks']);
-                                    for (final t in tasks) {
-                                      if (t['id'] == task['id']) {
-                                        t['completed'] = v;
-                                        t['status'] = v == true
-                                            ? 'completed'
-                                            : 'pending';
-                                      }
-                                    }
-                                    await w.api.request(
-                                      'PATCH',
-                                      '/collections/plans/${plan['id']}',
-                                      body: {...plan, 'tasks': tasks},
-                                    );
-                                    await load();
-                                  }),
+                                ListTile(
+                                  leading: IconButton(
+                                    tooltip:
+                                        'Statut : ${taskStatusLabel('${task['status'] ?? (task['completed'] == true ? 'completed' : 'pending')}')} (toucher pour changer)',
+                                    onPressed: () => cycleTask(plan, task),
+                                    icon: Icon(
+                                      taskStatusIcon(
+                                        '${task['status'] ?? (task['completed'] == true ? 'completed' : 'pending')}',
+                                      ),
+                                      size: 20,
+                                      color: taskStatusColor(
+                                        '${task['status'] ?? (task['completed'] == true ? 'completed' : 'pending')}',
+                                      ),
+                                    ),
+                                  ),
+                                  title: Text(
+                                    '${task['text']}',
+                                    style: (task['status'] == 'completed' ||
+                                            task['completed'] == true)
+                                        ? const TextStyle(
+                                            decoration:
+                                                TextDecoration.lineThrough,
+                                            color: Color(0xff86868b),
+                                          )
+                                        : null,
+                                  ),
+                                  subtitle:
+                                      (task['status'] == 'error' &&
+                                          '${task['error'] ?? ''}'.isNotEmpty)
+                                      ? Text(
+                                          '${task['error']}',
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            color: Color(0xffff3b30),
+                                          ),
+                                        )
+                                      : Text(
+                                          taskStatusLabel(
+                                            '${task['status'] ?? (task['completed'] == true ? 'completed' : 'pending')}',
+                                          ),
+                                          style: const TextStyle(fontSize: 11),
+                                        ),
+                                  trailing: IconButton(
+                                    tooltip: 'Supprimer l’étape',
+                                    onPressed: () => deleteStep(plan, task),
+                                    icon: const Icon(
+                                      LucideIcons.trash2,
+                                      size: 16,
+                                    ),
+                                  ),
+                                  onTap: () => cycleTask(plan, task),
                                 ),
                             ],
                           ),
@@ -526,8 +665,12 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
       },
       child: Padding(
         padding: const EdgeInsets.all(10),
+        // Cellule de grille a hauteur derivee de la largeur : le contenu
+        // textuel DOIT s'ecraser (ellipsis), jamais deborder, y compris
+        // quand le clavier reduit la hauteur (panneau monte hors ecran).
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
             Container(
               padding: const EdgeInsets.all(8),
@@ -537,19 +680,23 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
               ),
               child: Icon(icon, size: 18, color: color),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 8),
             Text(
               title,
               textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
             ),
-            const SizedBox(height: 5),
+            const SizedBox(height: 4),
             Text(
               subtitle,
               textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 10, color: Color(0xff86868b)),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             const Icon(
               LucideIcons.chevronRight,
               size: 12,
@@ -561,26 +708,193 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
     ),
   );
   Widget outputsView() {
-    final outputs = [
+    final attachments = [
       for (final message in w.messages)
         if (message['role'] == 'assistant') ...records(message['attachments']),
     ];
+    final artifacts = extractCodeArtifacts(w.messages);
+    for (final a in artifacts) {
+      if (artifactStatus.containsKey(a.id)) a.status = artifactStatus[a.id]!;
+    }
+    final query = outputSearch.text.trim().toLowerCase();
+    final visible = artifacts.where((a) {
+      if (outputFilter == 'En attente' && a.status != ArtifactStatus.pending) {
+        return false;
+      }
+      if (outputFilter == 'Enregistrés' && a.status != ArtifactStatus.applied) {
+        return false;
+      }
+      if (outputFilter == 'Rejetés' && a.status != ArtifactStatus.rejected) {
+        return false;
+      }
+      if (query.isNotEmpty &&
+          !'${a.title} ${a.language} ${a.code}'.toLowerCase().contains(query)) {
+        return false;
+      }
+      return true;
+    }).toList();
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
-        if (outputs.isEmpty)
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Sorties (${artifacts.length})',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            if (attachments.isNotEmpty)
+              Text(
+                '${attachments.length} pièce${attachments.length > 1 ? 's' : ''} jointe${attachments.length > 1 ? 's' : ''}',
+                style: const TextStyle(fontSize: 11, color: Color(0xff86868b)),
+              ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: outputSearch,
+          decoration: const InputDecoration(
+            hintText: 'Rechercher un livrable…',
+            prefixIcon: Icon(LucideIcons.search, size: 16),
+            isDense: true,
+          ),
+          onChanged: (_) => setState(() {}),
+        ),
+        const SizedBox(height: 10),
+        Wrap(
+          spacing: 8,
+          children: [
+            for (final f in ['Tous', 'En attente', 'Enregistrés', 'Rejetés'])
+              ChoiceChip(
+                label: Text(f, style: const TextStyle(fontSize: 12)),
+                selected: outputFilter == f,
+                onSelected: (_) {
+                  HapticFeedback.selectionClick();
+                  setState(() => outputFilter = f);
+                },
+              ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        if (attachments.isNotEmpty) ...[
+          for (final output in attachments)
+            Card(
+              child: ListTile(
+                leading: const Icon(LucideIcons.paperclip, size: 18),
+                title: Text(
+                  '${output['displayName'] ?? 'Fichier joint'}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: const Text('Pièce jointe de la réponse'),
+              ),
+            ),
+          const SizedBox(height: 8),
+        ],
+        if (artifacts.isEmpty)
           const EmptyState(
             icon: LucideIcons.fileText,
             title: 'Aucun fichier généré',
-            subtitle: 'Les livrables joints aux réponses apparaîtront ici.',
+            subtitle:
+                'Les blocs de code et diffs des réponses apparaîtront ici, avec copie et enregistrement.',
+          )
+        else if (visible.isEmpty)
+          const EmptyState(
+            icon: LucideIcons.search,
+            title: 'Aucun résultat',
+            subtitle: 'Modifiez la recherche ou le filtre.',
           ),
-        for (final output in outputs)
-          ListTile(
-            leading: const Icon(LucideIcons.fileText),
-            title: Text('${output['displayName'] ?? 'Fichier'}'),
+        for (final a in visible)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Card(
+              child: ListTile(
+                leading: Icon(
+                  a.isDiff ? LucideIcons.gitCompare : LucideIcons.fileCode,
+                  size: 18,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                title: Text(
+                  a.title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(
+                  a.isDiff
+                      ? 'diff · +${a.added} −${a.removed} · ${a.status.name}'
+                      : '${a.language} · ${a.code.split('\n').length} lignes · ${a.status.name}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                trailing: const Icon(LucideIcons.chevronRight, size: 16),
+                onTap: () {
+                  HapticFeedback.selectionClick();
+                  openArtifactDetail(
+                    context: context,
+                    workspace: w,
+                    artifact: a,
+                    onChanged: () {
+                      artifactStatus[a.id] = a.status;
+                      if (mounted) setState(() {});
+                    },
+                  ).then((_) {
+                    artifactStatus[a.id] = a.status;
+                    if (mounted) setState(() {});
+                  });
+                },
+              ),
+            ),
           ),
       ],
     );
+  }
+
+  List<Json> _visibleFiles() {
+    final q = fileSearch.text.trim().toLowerCase();
+    if (q.isEmpty) return files;
+    return files
+        .where(
+          (f) =>
+              '${f['originalName'] ?? f['name'] ?? ''}'.toLowerCase().contains(
+                q,
+              ),
+        )
+        .toList();
+  }
+
+  IconData _fileIcon(String name) {
+    final lower = name.toLowerCase();
+    if (lower.endsWith('.png') ||
+        lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.gif') ||
+        lower.endsWith('.webp')) {
+      return LucideIcons.image;
+    }
+    if (lower.endsWith('.pdf')) return LucideIcons.fileText;
+    if (lower.endsWith('.md')) return LucideIcons.bookOpen;
+    if (lower.endsWith('.json') || lower.endsWith('.csv')) {
+      return LucideIcons.table;
+    }
+    if (lower.endsWith('.dart') ||
+        lower.endsWith('.ts') ||
+        lower.endsWith('.js') ||
+        lower.endsWith('.py') ||
+        lower.endsWith('.rs')) {
+      return LucideIcons.fileCode;
+    }
+    return LucideIcons.fileText;
+  }
+
+  Future<void> _rememberBrowserUrl(String url) async {
+    final key = 'aro.browser.history';
+    final current = w.preferences.getStringList(key) ?? [];
+    final next = [url, ...current.where((u) => u != url)].take(30).toList();
+    await w.preferences.setStringList(key, next);
   }
 
   Widget browserView() => ListView(
@@ -602,7 +916,8 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
       const SizedBox(height: 12),
       FilledButton(
         onPressed: () => perform(context, () async {
-          final uri = Uri.tryParse(address.text.trim());
+          final raw = address.text.trim();
+          final uri = Uri.tryParse(raw);
           if (uri == null ||
               uri.host.isEmpty ||
               !['https', 'http'].contains(uri.scheme)) {
@@ -611,12 +926,13 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
           if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
             throw const ApiException(0, 'Impossible d’ouvrir cette adresse.');
           }
+          await _rememberBrowserUrl(raw);
         }),
         child: const Text('Ouvrir dans le navigateur'),
       ),
       const SizedBox(height: 16),
       const Text(
-        'Sur mobile, les sites s’ouvrent actuellement dans le navigateur de votre appareil.',
+        'Sur mobile, les sites s’ouvrent dans le navigateur de votre appareil, avec historique local dans Réglages › Navigateur.',
         style: TextStyle(fontSize: 12, color: Color(0xff86868b)),
       ),
     ],
@@ -711,5 +1027,116 @@ class _WorkspacePanelState extends State<WorkspacePanel> {
       );
       await load();
     });
+  }
+
+  double _planProgressValue(Json plan) {
+    final p = planProgress(records(plan['tasks']));
+    if (p.total == 0) return 0;
+    return p.completed / p.total;
+  }
+
+  String _planProgressLabel(Json plan) {
+    final p = planProgress(records(plan['tasks']));
+    final status = '${plan['status'] ?? 'active'}';
+    if (p.total == 0) return 'Aucune étape · $status';
+    return '${p.completed}/${p.total} tâches · ${p.percentage}% · $status';
+  }
+
+  Future<void> cycleTask(Json plan, Json task) async {
+    await perform(context, () async {
+      final tasks = records(plan['tasks']);
+      for (final t in tasks) {
+        if (t['id'] == task['id']) {
+          final current =
+              '${t['status'] ?? (t['completed'] == true ? 'completed' : 'pending')}';
+          final next = cycleTaskStatus(current);
+          t['status'] = next;
+          t['completed'] = next == 'completed';
+          if (next != 'error') t['error'] = null;
+          if (next == 'error' && '${t['error'] ?? ''}'.isEmpty) {
+            t['error'] = 'À vérifier';
+          }
+        }
+      }
+      await w.api.request(
+        'PATCH',
+        '/collections/plans/${plan['id']}',
+        body: {...plan, 'tasks': tasks},
+      );
+      await load();
+    });
+  }
+
+  Future<void> deleteStep(Json plan, Json task) async {
+    if (!await confirmDelete(context, '${task['text'] ?? 'Étape'}')) return;
+    if (!mounted) return;
+    await perform(context, () async {
+      final tasks = records(
+        plan['tasks'],
+      ).where((t) => t['id'] != task['id']).toList();
+      await w.api.request(
+        'PATCH',
+        '/collections/plans/${plan['id']}',
+        body: {...plan, 'tasks': tasks},
+      );
+      await load();
+    });
+  }
+
+  Future<void> updatePlanStatus(Json plan) async {
+    final current = '${plan['status'] ?? 'active'}';
+    final next = await showDialog<String>(
+      context: context,
+      builder: (_) => SimpleDialog(
+        title: const Text('Statut du plan'),
+        children: [
+          for (final s in ['active', 'completed', 'archived'])
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, s),
+              child: Row(
+                children: [
+                  if (s == current) const Icon(LucideIcons.check, size: 16),
+                  if (s == current) const SizedBox(width: 8),
+                  Text(s),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+    if (next == null || !mounted) return;
+    await perform(context, () async {
+      await w.api.request(
+        'PATCH',
+        '/collections/plans/${plan['id']}',
+        body: {...plan, 'status': next},
+      );
+      await load();
+    });
+  }
+
+  Future<void> deletePlan(Json plan) async {
+    if (!await confirmDelete(context, '${plan['title'] ?? 'Plan'}')) return;
+    if (!mounted) return;
+    await perform(context, () async {
+      await w.api.request('DELETE', '/collections/plans/${plan['id']}');
+      await load();
+    });
+  }
+
+  Future<void> generateAiPlan() async {
+    final value = await editFields(context, 'Générer avec l’IA', const [
+      SettingField('text', 'Objectif', required: true),
+    ], {});
+    if (value == null || !mounted) return;
+    final objective = '${value['text'] ?? ''}'.trim();
+    if (objective.isEmpty) return;
+    // Ferme le panneau pour montrer la génération dans le chat.
+    widget.onClose?.call();
+    await w.send(
+      'Établis un plan de travail détaillé pour : $objective. '
+      'Crée-le avec tes outils de plan afin qu’il apparaisse dans l’onglet Plan.',
+    );
+    await load();
   }
 }

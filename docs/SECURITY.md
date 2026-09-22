@@ -8,6 +8,7 @@ ARO is cloud-persisted with local inference by default. Security decisions shoul
 - Model endpoints must be loopback hosts such as `127.0.0.1`, `localhost`, or `::1`.
 - Proprietary provider endpoints must use clean HTTPS URLs without embedded credentials, query strings, or fragments.
 - Proprietary provider API keys stay in the desktop OS credential store by default. They must not be written to `settings.json`, PostgreSQL `app_settings`, browser `localStorage`, logs, or audit payloads.
+- Exception (governed server cloud opt-in): an organization admin may explicitly allow server-side generation for selected providers. Then provider keys are stored in `org_provider_keys` encrypted at rest with `ARO_SECRETS_KEY` (`pgp_sym_encrypt`), readable only through the generation path, never returned by any GET/status/log. Revocation is immediate via key delete or consent toggle.
 - Desktop clients never receive PostgreSQL credentials. They authenticate to the Axum API with tenant-scoped JWT access tokens and refresh tokens whose durable desktop copy lives in the OS credential store.
 - Desktop clients never receive Redis URLs or credentials. Redis is a server-side API dependency only.
 - PostgreSQL rows are scoped by active organization membership. Tenant-sensitive writes are guarded in repositories and foreign keys.
@@ -26,6 +27,18 @@ ARO is cloud-persisted with local inference by default. Security decisions shoul
 - The packaged desktop renderer has no general internet `connect-src` capability and no direct opener permission. External navigation goes through the Rust `open_url` command, which accepts only bounded, credential-free HTTPS URLs. Synced plugin, MCP and hook records are sanitized again when they are hydrated so legacy secret-bearing records cannot re-enter renderer state.
 - Model files are not committed to Git.
 - Voice runtimes and models are downloaded under `vendor/voice/` and ignored by Git.
+
+## Sovereign AI (Zones Of Trust)
+
+Principle: by default, no conversation content ever leaves the self-hosted server. No third-party key lives on the server. Cloud is a governed exception, never the default path.
+
+- **Zone 1 — Device (desktop):** OS keyring keys, personal credentials, local inference. Unchanged.
+- **Zone 2 — Self-hosted server / LAN:** PostgreSQL, Ollama/llama.cpp (loopback only, enforced by `ensure_loopback_url` on every local attempt including discovery probes). Serves mobile + browser clients. Secrets at rest encrypted with `ARO_SECRETS_KEY`.
+- **Zone 3 — Third parties:** default-DENY. Opening requires BOTH an explicit org-admin opt-in row (`org_ai_cloud_consent`: enabled + provider allow-list + declared data residency + accepting admin + timestamp) AND a deposited encrypted provider key. Either switch off re-closes the zone immediately.
+- Every server-cloud generation is audit-logged with org, provider, model and source — never content, never keys. Clients display the source (`local` / `server-cloud` / `demo`) so users always know where their words were processed.
+- Mobile drafts live in the OS keystore (`flutter_secure_storage`), with one-time migration from the legacy cleartext slot and a cleartext fallback only if the keystore is unavailable (never a crash for a draft).
+- Unavailable generations are never persisted as assistant messages; clients show an ephemeral notice + retry instead of fake history.
+- The `Mock` provider is demo-only: clients must surface it as demo (factice) and never present its echo as model output.
 
 ## Data Controls
 

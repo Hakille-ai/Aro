@@ -21,10 +21,16 @@ use aro_core::{
     TOOL_CORE_SKILL_LIST, TOOL_CORE_WEB_PAGE_READ, TOOL_CORE_WORKSPACE_GREP,
     TOOL_CORE_WORKSPACE_LIST, TOOL_CORE_WORKSPACE_READ, TOOL_CORE_WORKSPACE_SEARCH,
     TOOL_CORE_WORKSPACE_WRITE, TOOL_DESCRIPTOR_SCHEMA_VERSION, TOOL_DOCUMENT_CREATE,
+    TOOL_CORE_BROWSER_NAVIGATE, TOOL_CORE_BROWSER_ACTION, TOOL_CORE_COMPUTER_USE,
+    TOOL_BROWSER_NAVIGATE, TOOL_BROWSER_ACTION, TOOL_COMPUTER_USE,
     TOOL_MEMORY_DELETE, TOOL_MEMORY_FORGET, TOOL_MEMORY_LIST, TOOL_MEMORY_RECALL,
     TOOL_MEMORY_SAVE, TOOL_MEMORY_SEARCH, TOOL_MEMORY_UPDATE, TOOL_WEB_FETCH, TOOL_WEB_SEARCH,
+    TOOL_CORE_NOTIFICATION_SEND, TOOL_NOTIFICATION_SEND, TOOL_CORE_EMAIL_SEND, TOOL_EMAIL_SEND,
+    TOOL_CORE_NOTIFICATION_SCHEDULE, TOOL_NOTIFICATION_SCHEDULE,
     normalize_tool_id,
 };
+
+
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -225,8 +231,14 @@ impl AgentRuntime {
     }
 
     pub fn parse_model_action(&self, output: &str) -> AgentAction {
-        parse_agent_action(output)
-            .unwrap_or_else(|| AgentAction::final_response(output.trim().to_string()))
+        parse_agent_action(output).unwrap_or_else(|| {
+            let trimmed = output.trim();
+            if trimmed.is_empty() {
+                AgentAction::final_response("Je n'ai pas pu obtenir de réponse valide du modèle. Veuillez relancer la demande.")
+            } else {
+                AgentAction::final_response(trimmed.to_string())
+            }
+        })
     }
 
     pub fn validate_action(
@@ -238,6 +250,11 @@ impl AgentRuntime {
             AgentActionType::Final => {
                 let content = action.content.as_deref().unwrap_or_default().trim();
                 if content.is_empty() {
+                    if let Some(reason) = action.reason.as_deref() {
+                        if !reason.trim().is_empty() {
+                            return Ok(());
+                        }
+                    }
                     Err("final action must include non-empty content".to_string())
                 } else {
                     Ok(())
@@ -293,7 +310,7 @@ impl AgentRuntime {
                 "Response contract:\n- Answer the user directly in natural text.\n- Do not wrap the answer in JSON.\n- Use Markdown only when it improves readability.\n- Cite source IDs only when context sources materially affect the answer."
             }
             ModelResponseFormat::AgentActionJson => {
-                "Response contract:\nReturn exactly one JSON object and no markdown. Use {\"type\":\"final\",\"content\":\"...\"} when answering the user, {\"type\":\"tool\",\"toolId\":\"core.search.web\",\"input\":{\"query\":\"...\"},\"reason\":\"...\"} or another listed tool when external, current, file, or page context is required, or {\"type\":\"pause\",\"reason\":\"...\"} when user input is required. For URLs the user provides, prefer core.web.page.read. Cite source IDs in final content when context sources matter."
+                "Response contract:\nReturn exactly one JSON object and no markdown. Use {\"type\":\"final\",\"content\":\"...\"} when answering the user, {\"type\":\"tool\",\"toolId\":\"core.search.web\",\"input\":{\"query\":\"...\"},\"reason\":\"...\"} or another listed tool (including core.browser.navigate, core.browser.action, core.computer.use, core.workspace.write/read) when external, web, browser, computer, file, or page context is required, or {\"type\":\"pause\",\"reason\":\"...\"} when user input is required. For URLs or web browsing, prefer core.browser.navigate or core.web.page.read. Cite source IDs in final content when context sources matter. If you reason inside <think>...</think> tags, you must always output your final answer or JSON action after </think>."
             }
         };
         ModelGenerationRequest {
@@ -524,6 +541,10 @@ impl Default for ToolRegistry {
             // Web tools
             core_web_search_descriptor(),
             core_web_page_read_descriptor(),
+            core_browser_navigate_descriptor(),
+            core_browser_action_descriptor(),
+            // System & computer use tools
+            core_computer_use_descriptor(),
             // Workspace tools
             workspace_write_descriptor(),
             workspace_read_descriptor(),
@@ -561,7 +582,12 @@ impl Default for ToolRegistry {
             // Connector/plugin tools
             connector_list_descriptor(),
             connector_call_descriptor(),
+            // Communication & notification tools
+            notification_send_descriptor(),
+            email_send_descriptor(),
+            notification_schedule_descriptor(),
         ];
+
         for descriptor in &descriptors {
             descriptor
                 .validate()
@@ -860,6 +886,297 @@ fn core_web_page_read_descriptor() -> ToolDescriptor {
         },
         aliases: vec![TOOL_WEB_FETCH.to_string()],
         tags: vec!["web".to_string(), "read-only".to_string()],
+    }
+}
+
+fn core_browser_navigate_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
+        id: TOOL_CORE_BROWSER_NAVIGATE.to_string(),
+        version: "1.0.0".to_string(),
+        name: "Navigate in-app browser".to_string(),
+        description: "Navigate the integrated in-app browser to a URL, rendering the page and extracting content."
+            .to_string(),
+        category: ToolCategory::Web,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "minLength": 1 },
+                "target": { "type": "string" }
+            },
+            "required": ["url"],
+            "additionalProperties": false
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string" },
+                "title": { "type": "string" },
+                "content": { "type": "string" },
+                "excerpt": { "type": "string" },
+                "status": { "type": "integer" },
+                "browserState": { "type": "string" }
+            },
+            "required": ["url", "title", "content", "status"],
+            "additionalProperties": false
+        }),
+        permissions: vec![ToolPermissionRequirement {
+            action: "network.read".to_string(),
+            resource: "destination:${input.url}".to_string(),
+        }],
+        risk: ToolRisk {
+            level: ToolRiskLevel::Low,
+            effects: vec![ToolPermissionEffect::ExternalRead],
+            confirmation: ToolConfirmationPolicy::Never,
+        },
+        capabilities: vec!["browser.navigate".to_string(), "web.inspect".to_string()],
+        execution: ToolExecutionSpec {
+            kind: ToolExecutionKind::Backend,
+            handler: "browser.navigate.v1".to_string(),
+            environment: ToolExecutionEnvironment::CloudWorker,
+            streaming: false,
+            idempotency: ToolIdempotency::Recommended,
+            side_effects: ToolSideEffects::ReadOnly,
+        },
+        timeout_ms: 20_000,
+        retry: ToolRetryPolicy {
+            max_attempts: 2,
+            strategy: ToolRetryStrategy::ExponentialJitter,
+            base_delay_ms: 250,
+            max_delay_ms: 2_000,
+        },
+        limits: ToolUsageLimits {
+            max_concurrency: 10,
+            rate_per_minute: 60,
+            max_input_bytes: 8 * 1_024,
+            max_output_bytes: 2 * 1_024 * 1_024,
+        },
+        dependencies: Vec::new(),
+        observability: ToolObservability {
+            record_input: ToolDataCaptureMode::MetadataOnly,
+            record_output: ToolDataCaptureMode::ReferenceOnly,
+            metrics_namespace: "aro_tool_browser_navigate".to_string(),
+            cost_unit: Some("request".to_string()),
+        },
+        status: ToolStatus::Active,
+        provenance: ToolProvenance {
+            kind: ToolProvenanceKind::Core,
+            package: "aro-tools".to_string(),
+            signature: None,
+        },
+        owner: ToolOwner {
+            kind: ToolOwnerKind::Team,
+            id: "platform-browser".to_string(),
+        },
+        aliases: vec![TOOL_BROWSER_NAVIGATE.to_string(), "browser_navigate".to_string()],
+        tags: vec!["browser".to_string(), "web".to_string()],
+    }
+}
+
+fn core_browser_action_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
+        id: TOOL_CORE_BROWSER_ACTION.to_string(),
+        version: "1.0.0".to_string(),
+        name: "Perform in-app browser action".to_string(),
+        description: "Perform an interaction in the integrated browser such as clicking a selector, typing text, or scrolling."
+            .to_string(),
+        category: ToolCategory::Web,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["click", "type", "scroll", "inspect", "screenshot"] },
+                "selector": { "type": "string" },
+                "text": { "type": "string" }
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string" },
+                "success": { "type": "boolean" },
+                "message": { "type": "string" }
+            },
+            "required": ["action", "success"],
+            "additionalProperties": false
+        }),
+        permissions: vec![ToolPermissionRequirement {
+            action: "browser.interact".to_string(),
+            resource: "browser:active".to_string(),
+        }],
+        risk: ToolRisk {
+            level: ToolRiskLevel::Medium,
+            effects: vec![ToolPermissionEffect::ReversibleWrite],
+            confirmation: ToolConfirmationPolicy::Never,
+        },
+        capabilities: vec!["browser.action".to_string(), "browser.interact".to_string()],
+        execution: ToolExecutionSpec {
+            kind: ToolExecutionKind::Backend,
+            handler: "browser.action.v1".to_string(),
+            environment: ToolExecutionEnvironment::Browser,
+            streaming: false,
+            idempotency: ToolIdempotency::Unsupported,
+            side_effects: ToolSideEffects::Reversible,
+        },
+        timeout_ms: 15_000,
+        retry: ToolRetryPolicy {
+            max_attempts: 1,
+            strategy: ToolRetryStrategy::None,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        },
+        limits: ToolUsageLimits {
+            max_concurrency: 5,
+            rate_per_minute: 60,
+            max_input_bytes: 8 * 1_024,
+            max_output_bytes: 512 * 1_024,
+        },
+        dependencies: Vec::new(),
+        observability: ToolObservability {
+            record_input: ToolDataCaptureMode::MetadataOnly,
+            record_output: ToolDataCaptureMode::ReferenceOnly,
+            metrics_namespace: "aro_tool_browser_action".to_string(),
+            cost_unit: Some("action".to_string()),
+        },
+        status: ToolStatus::Active,
+        provenance: ToolProvenance {
+            kind: ToolProvenanceKind::Core,
+            package: "aro-tools".to_string(),
+            signature: None,
+        },
+        owner: ToolOwner {
+            kind: ToolOwnerKind::Team,
+            id: "platform-browser".to_string(),
+        },
+        aliases: vec![TOOL_BROWSER_ACTION.to_string(), "browser_action".to_string()],
+        tags: vec!["browser".to_string(), "interaction".to_string()],
+    }
+}
+
+fn core_computer_use_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
+        id: TOOL_CORE_COMPUTER_USE.to_string(),
+        version: "1.0.0".to_string(),
+        name: "Computer use and system control".to_string(),
+        description: "Interact with and inspect the user's computer: control system audio volume (get/set/mute), capture screen screenshots, inspect network and WiFi state, launch applications or open files and URLs, and inspect system resources (battery, CPU, RAM, OS)."
+            .to_string(),
+        category: ToolCategory::System,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "The computer control action to perform",
+                    "enum": [
+                        "system_status",
+                        "system_info",
+                        "info",
+                        "volume_get",
+                        "volume_set",
+                        "volume_mute",
+                        "volume_unmute",
+                        "volume",
+                        "get_volume",
+                        "set_volume",
+                        "volume_up",
+                        "volume_down",
+                        "mute",
+                        "unmute",
+                        "screenshot",
+                        "screen_capture",
+                        "take_screenshot",
+                        "network_info",
+                        "wifi_status",
+                        "wifi",
+                        "app_launch",
+                        "open",
+                        "launch",
+                        "app_inspect"
+                    ]
+                },
+                "level": { "type": "integer", "minimum": 0, "maximum": 100, "description": "Audio volume percentage (0 to 100)" },
+                "delta": { "type": "integer", "description": "Relative volume delta in percent (e.g. +10, -10)" },
+                "mute": { "type": "boolean", "description": "Mute (true) or unmute (false) system audio" },
+                "target": { "type": "string", "description": "Application name, file path, or URL to open" },
+                "app": { "type": "string", "description": "Application name to open" },
+                "url": { "type": "string", "description": "URL to open in browser" },
+                "path": { "type": "string", "description": "File or directory path to open" },
+                "args": { "type": "array", "items": { "type": "string" }, "description": "Arguments for launched application" }
+            },
+            "required": ["action"]
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string" },
+                "status": { "type": "string" },
+                "message": { "type": "string" }
+            },
+            "required": ["action", "status"],
+            "additionalProperties": false
+        }),
+        permissions: vec![ToolPermissionRequirement {
+            action: "system.control".to_string(),
+            resource: "system:workstation".to_string(),
+        }],
+        risk: ToolRisk {
+            level: ToolRiskLevel::High,
+            effects: vec![ToolPermissionEffect::SensitiveData],
+            confirmation: ToolConfirmationPolicy::Policy,
+        },
+        capabilities: vec!["computer.use".to_string(), "system.inspect".to_string()],
+        execution: ToolExecutionSpec {
+            kind: ToolExecutionKind::Backend,
+            handler: "computer.use.v1".to_string(),
+            environment: ToolExecutionEnvironment::Desktop,
+            streaming: false,
+            idempotency: ToolIdempotency::Unsupported,
+            side_effects: ToolSideEffects::ReadOnly,
+        },
+        timeout_ms: 20_000,
+        retry: ToolRetryPolicy {
+            max_attempts: 1,
+            strategy: ToolRetryStrategy::None,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        },
+        limits: ToolUsageLimits {
+            max_concurrency: 2,
+            rate_per_minute: 30,
+            max_input_bytes: 8 * 1_024,
+            max_output_bytes: 2 * 1_024 * 1_024,
+        },
+        dependencies: Vec::new(),
+        observability: ToolObservability {
+            record_input: ToolDataCaptureMode::MetadataOnly,
+            record_output: ToolDataCaptureMode::ReferenceOnly,
+            metrics_namespace: "aro_tool_computer_use".to_string(),
+            cost_unit: Some("action".to_string()),
+        },
+        status: ToolStatus::Active,
+        provenance: ToolProvenance {
+            kind: ToolProvenanceKind::Core,
+            package: "aro-tools".to_string(),
+            signature: None,
+        },
+        owner: ToolOwner {
+            kind: ToolOwnerKind::Team,
+            id: "platform-system".to_string(),
+        },
+        aliases: vec![
+            TOOL_COMPUTER_USE.to_string(),
+            "computer_use".to_string(),
+            "volume_control".to_string(),
+            "screen_capture".to_string(),
+            "screenshot".to_string(),
+            "system_info".to_string(),
+            "app_launch".to_string(),
+            "network_info".to_string(),
+        ],
+        tags: vec!["system".to_string(), "computer-use".to_string()],
     }
 }
 
@@ -2590,7 +2907,7 @@ fn connector_list_descriptor() -> ToolDescriptor {
         id: TOOL_CORE_CONNECTOR_LIST.to_string(),
         version: "1.0.0".to_string(),
         name: "List connectors".to_string(),
-        description: "List all connected third-party service integrations (plugins/connectors) that the agent can use, such as GitHub, Slack, Google Drive, databases, and APIs.".to_string(),
+        description: "List all connected third-party service integrations (plugins/connectors) that the agent can use, such as GitHub, Slack, Google Drive, databases, and APIs. Each entry includes connectorId, displayName/pluginName, icon (emoji), description, version, server, status, and accounts. After calling, always enumerate each connector by its displayName in your final answer and include the raw JSON in a ```connectors fenced block so the UI can render pro cards.".to_string(),
         category: ToolCategory::Integration,
         input_schema: json!({
             "type": "object",
@@ -2683,7 +3000,174 @@ fn connector_call_descriptor() -> ToolDescriptor {
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+// Communication & Notification Tools
+// ─────────────────────────────────────────────────────────────
+
+fn notification_send_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
+        id: TOOL_CORE_NOTIFICATION_SEND.to_string(),
+        version: "1.0.0".to_string(),
+        name: "Send Notification".to_string(),
+        description: "Send an immediate in-app and desktop system notification to the user. Use when a goal is completed, an important checkpoint is reached, or when user attention is needed.".to_string(),
+        category: ToolCategory::Communication,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "minLength": 1 },
+                "body": { "type": "string", "minLength": 1 },
+                "kind": { "type": "string", "enum": ["info", "success", "warning", "error", "agent-completion", "routine"] },
+                "priority": { "type": "string", "enum": ["low", "normal", "high", "urgent"] },
+                "action_url": { "type": "string" }
+            },
+            "required": ["title", "body"],
+            "additionalProperties": false
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "success": { "type": "boolean" },
+                "id": { "type": "string" },
+                "delivered": { "type": "boolean" }
+            },
+            "required": ["success", "id", "delivered"],
+            "additionalProperties": false
+        }),
+        permissions: vec![],
+        risk: ToolRisk { level: ToolRiskLevel::Low, effects: vec![], confirmation: ToolConfirmationPolicy::Never },
+        capabilities: vec!["notification.send".to_string()],
+        execution: ToolExecutionSpec {
+            kind: ToolExecutionKind::Backend,
+            handler: "notification.send.v1".to_string(),
+            environment: ToolExecutionEnvironment::Desktop,
+            streaming: false,
+            idempotency: ToolIdempotency::Unsupported,
+            side_effects: ToolSideEffects::Reversible,
+        },
+        timeout_ms: 10_000,
+        retry: ToolRetryPolicy { max_attempts: 1, strategy: ToolRetryStrategy::None, base_delay_ms: 0, max_delay_ms: 0 },
+        limits: ToolUsageLimits { max_concurrency: 5, rate_per_minute: 60, max_input_bytes: 16 * 1024, max_output_bytes: 8 * 1024 },
+        dependencies: vec![],
+        observability: ToolObservability { record_input: ToolDataCaptureMode::None, record_output: ToolDataCaptureMode::None, metrics_namespace: "aro_tool_notification_send".to_string(), cost_unit: None },
+        status: ToolStatus::Active,
+        provenance: ToolProvenance { kind: ToolProvenanceKind::Core, package: "aro-runtime".to_string(), signature: None },
+        owner: ToolOwner { kind: ToolOwnerKind::Team, id: "platform-agent".to_string() },
+        aliases: vec![TOOL_NOTIFICATION_SEND.to_string(), "send_notification".to_string()],
+        tags: vec!["notification".to_string(), "alert".to_string(), "communication".to_string()],
+    }
+}
+
+fn email_send_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
+        id: TOOL_CORE_EMAIL_SEND.to_string(),
+        version: "1.0.0".to_string(),
+        name: "Send Email".to_string(),
+        description: "Send an email report, summary, or notification to the user or designated recipient. Ideal for comprehensive task completion reports, routine execution summaries, and urgent alerts.".to_string(),
+        category: ToolCategory::Communication,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "to": { "type": "string" },
+                "subject": { "type": "string", "minLength": 1 },
+                "body": { "type": "string", "minLength": 1 },
+                "html": { "type": "string" }
+            },
+            "required": ["subject", "body"],
+            "additionalProperties": false
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "success": { "type": "boolean" },
+                "message_id": { "type": "string" },
+                "recipient": { "type": "string" }
+            },
+            "required": ["success", "message_id", "recipient"],
+            "additionalProperties": false
+        }),
+        permissions: vec![ToolPermissionRequirement { action: "email.send".to_string(), resource: "email:*".to_string() }],
+        risk: ToolRisk { level: ToolRiskLevel::Medium, effects: vec![ToolPermissionEffect::ExternalWrite], confirmation: ToolConfirmationPolicy::Policy },
+        capabilities: vec!["email.send".to_string()],
+        execution: ToolExecutionSpec {
+            kind: ToolExecutionKind::Backend,
+            handler: "email.send.v1".to_string(),
+            environment: ToolExecutionEnvironment::CloudWorker,
+            streaming: false,
+            idempotency: ToolIdempotency::Unsupported,
+            side_effects: ToolSideEffects::Reversible,
+        },
+        timeout_ms: 30_000,
+        retry: ToolRetryPolicy { max_attempts: 2, strategy: ToolRetryStrategy::ExponentialJitter, base_delay_ms: 500, max_delay_ms: 3000 },
+        limits: ToolUsageLimits { max_concurrency: 3, rate_per_minute: 20, max_input_bytes: 256 * 1024, max_output_bytes: 16 * 1024 },
+        dependencies: vec![],
+        observability: ToolObservability { record_input: ToolDataCaptureMode::MetadataOnly, record_output: ToolDataCaptureMode::None, metrics_namespace: "aro_tool_email_send".to_string(), cost_unit: Some("email-dispatch".to_string()) },
+        status: ToolStatus::Active,
+        provenance: ToolProvenance { kind: ToolProvenanceKind::Core, package: "aro-runtime".to_string(), signature: None },
+        owner: ToolOwner { kind: ToolOwnerKind::Team, id: "platform-agent".to_string() },
+        aliases: vec![TOOL_EMAIL_SEND.to_string(), "send_email".to_string()],
+        tags: vec!["email".to_string(), "report".to_string(), "communication".to_string()],
+    }
+}
+
+fn notification_schedule_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
+        id: TOOL_CORE_NOTIFICATION_SCHEDULE.to_string(),
+        version: "1.0.0".to_string(),
+        name: "Schedule Notification".to_string(),
+        description: "Schedule a future notification or reminder for the user after a specific delay in seconds or at a specific ISO timestamp.".to_string(),
+        category: ToolCategory::Communication,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "minLength": 1 },
+                "body": { "type": "string", "minLength": 1 },
+                "delay_seconds": { "type": "integer", "minimum": 1 },
+                "trigger_at": { "type": "string" },
+                "kind": { "type": "string", "enum": ["info", "success", "warning", "error", "routine"] }
+            },
+            "required": ["title", "body"],
+            "additionalProperties": false
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "success": { "type": "boolean" },
+                "schedule_id": { "type": "string" },
+                "scheduled_time": { "type": "string" }
+            },
+            "required": ["success", "schedule_id", "scheduled_time"],
+            "additionalProperties": false
+        }),
+        permissions: vec![],
+        risk: ToolRisk { level: ToolRiskLevel::Low, effects: vec![], confirmation: ToolConfirmationPolicy::Never },
+        capabilities: vec!["notification.schedule".to_string()],
+        execution: ToolExecutionSpec {
+            kind: ToolExecutionKind::Backend,
+            handler: "notification.schedule.v1".to_string(),
+            environment: ToolExecutionEnvironment::Desktop,
+            streaming: false,
+            idempotency: ToolIdempotency::Unsupported,
+            side_effects: ToolSideEffects::Reversible,
+        },
+        timeout_ms: 10_000,
+        retry: ToolRetryPolicy { max_attempts: 1, strategy: ToolRetryStrategy::None, base_delay_ms: 0, max_delay_ms: 0 },
+        limits: ToolUsageLimits { max_concurrency: 5, rate_per_minute: 60, max_input_bytes: 16 * 1024, max_output_bytes: 8 * 1024 },
+        dependencies: vec![],
+        observability: ToolObservability { record_input: ToolDataCaptureMode::None, record_output: ToolDataCaptureMode::None, metrics_namespace: "aro_tool_notification_schedule".to_string(), cost_unit: None },
+        status: ToolStatus::Active,
+        provenance: ToolProvenance { kind: ToolProvenanceKind::Core, package: "aro-runtime".to_string(), signature: None },
+        owner: ToolOwner { kind: ToolOwnerKind::Team, id: "platform-agent".to_string() },
+        aliases: vec![TOOL_NOTIFICATION_SCHEDULE.to_string(), "schedule_notification".to_string()],
+        tags: vec!["notification".to_string(), "schedule".to_string(), "reminder".to_string()],
+    }
+}
+
+
 pub(crate) fn compact_excerpt(content: &str, max_chars: usize) -> String {
+
     let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.chars().count() <= max_chars {
         normalized
@@ -2751,29 +3235,195 @@ pub(crate) fn render_environment_snapshot(environment: &EnvironmentSnapshot) -> 
     parts.join(". ")
 }
 
-fn parse_agent_action(output: &str) -> Option<AgentAction> {
-    let candidate = json_candidate(output)?;
-    let mut value: Value = serde_json::from_str(candidate).ok()?;
-    if value.get("type").is_none() {
-        if let Some(action_type) = value.get("action").cloned() {
-            value
-                .as_object_mut()?
-                .insert("type".to_string(), action_type);
+fn strip_think_tags(input: &str) -> (String, Option<String>) {
+    let mut clean = String::new();
+    let mut thinking = String::new();
+    let mut remainder = input;
+
+    while let Some(start) = remainder.find("<think>") {
+        clean.push_str(&remainder[..start]);
+        if let Some(end) = remainder[start..].find("</think>") {
+            let think_content = remainder[start + 7..start + end].trim();
+            if !thinking.is_empty() && !think_content.is_empty() {
+                thinking.push_str("\n\n");
+            }
+            thinking.push_str(think_content);
+            remainder = &remainder[start + end + 8..];
+        } else {
+            let think_content = remainder[start + 7..].trim();
+            if !thinking.is_empty() && !think_content.is_empty() {
+                thinking.push_str("\n\n");
+            }
+            thinking.push_str(think_content);
+            remainder = "";
+            break;
         }
     }
-    serde_json::from_value(value).ok()
+    clean.push_str(remainder);
+
+    // Also support <thought>...</thought> if present
+    let mut clean_final = String::new();
+    let mut rem_thought = clean.as_str();
+    while let Some(start) = rem_thought.find("<thought>") {
+        clean_final.push_str(&rem_thought[..start]);
+        if let Some(end) = rem_thought[start..].find("</thought>") {
+            let thought_content = rem_thought[start + 9..start + end].trim();
+            if !thinking.is_empty() && !thought_content.is_empty() {
+                thinking.push_str("\n\n");
+            }
+            thinking.push_str(thought_content);
+            rem_thought = &rem_thought[start + end + 10..];
+        } else {
+            let thought_content = rem_thought[start + 9..].trim();
+            if !thinking.is_empty() && !thought_content.is_empty() {
+                thinking.push_str("\n\n");
+            }
+            thinking.push_str(thought_content);
+            rem_thought = "";
+            break;
+        }
+    }
+    clean_final.push_str(rem_thought);
+
+    let sanitized_clean = clean_final
+        .replace("</think>", "")
+        .replace("<think>", "")
+        .replace("</thought>", "")
+        .replace("<thought>", "");
+
+    let thinking_res = if thinking.trim().is_empty() {
+        None
+    } else {
+        Some(thinking.trim().to_string())
+    };
+    (sanitized_clean.trim().to_string(), thinking_res)
 }
 
-fn json_candidate(output: &str) -> Option<&str> {
-    let trimmed = output.trim();
+fn extract_json_candidate(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
     if trimmed.starts_with('{') && trimmed.ends_with('}') {
         return Some(trimmed);
     }
-    let fenced = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))?
-        .trim();
-    fenced.strip_suffix("```").map(str::trim)
+    if let Some(start_idx) = trimmed.find("```") {
+        let after_fence = &trimmed[start_idx + 3..];
+        let content_start = if let Some(stripped) = after_fence.strip_prefix("json") {
+            stripped
+        } else {
+            after_fence
+        };
+        if let Some(end_idx) = content_start.find("```") {
+            let fenced = content_start[..end_idx].trim();
+            if fenced.starts_with('{') && fenced.ends_with('}') {
+                return Some(fenced);
+            }
+        }
+    }
+    if let (Some(first_brace), Some(last_brace)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        if first_brace < last_brace {
+            return Some(&trimmed[first_brace..=last_brace]);
+        }
+    }
+    None
+}
+
+fn parse_agent_action(output: &str) -> Option<AgentAction> {
+    let (clean_output, thinking) = strip_think_tags(output);
+    let candidate_str = if clean_output.is_empty() {
+        output
+    } else {
+        &clean_output
+    };
+
+    if let Some(candidate) = extract_json_candidate(candidate_str) {
+        if let Ok(mut value) = serde_json::from_str::<Value>(candidate) {
+            if let Some(obj) = value.as_object_mut() {
+                if !obj.contains_key("type") {
+                    if let Some(action_type) = obj.get("action").cloned() {
+                        obj.insert("type".to_string(), action_type);
+                    } else if obj.contains_key("content")
+                        || obj.contains_key("text")
+                        || obj.contains_key("response")
+                    {
+                        obj.insert("type".to_string(), json!("final"));
+                    }
+                }
+
+                let content_is_empty = obj
+                    .get("content")
+                    .map(|c| c.as_str().unwrap_or_default().trim().is_empty())
+                    .unwrap_or(true);
+
+                if content_is_empty {
+                    for alt_key in &["text", "response", "message", "answer", "output", "result"] {
+                        if let Some(alt_val) = obj.get(*alt_key) {
+                            if let Some(alt_str) = alt_val.as_str() {
+                                if !alt_str.trim().is_empty() {
+                                    obj.insert("content".to_string(), json!(alt_str));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if obj.get("type").and_then(|t| t.as_str()) == Some("final") {
+                    let still_empty = obj
+                        .get("content")
+                        .map(|c| c.as_str().unwrap_or_default().trim().is_empty())
+                        .unwrap_or(true);
+                    if still_empty {
+                        if let Some(reason) = obj.get("reason").and_then(|r| r.as_str()).filter(|r| !r.trim().is_empty()) {
+                            obj.insert("content".to_string(), json!(reason));
+                        } else if let Some(thought) = thinking.as_deref().filter(|t| !t.trim().is_empty()) {
+                            let fallback = fallback_content_from_thought(thought);
+                            obj.insert("content".to_string(), json!(fallback));
+                        } else {
+                            obj.insert("content".to_string(), json!("Je n'ai pas pu obtenir de réponse valide du modèle. Veuillez relancer la demande."));
+                        }
+                    }
+                }
+            }
+            if let Ok(mut action) = serde_json::from_value::<AgentAction>(value) {
+                if action.thinking.is_none() {
+                    action.thinking = thinking.clone();
+                }
+                return Some(action);
+            }
+        }
+    }
+
+    if !clean_output.trim().is_empty() {
+        let mut action = AgentAction::final_response(clean_output.trim().to_string());
+        action.thinking = thinking;
+        return Some(action);
+    }
+
+    if let Some(thought) = thinking {
+        if !thought.trim().is_empty() {
+            let fallback = fallback_content_from_thought(&thought);
+            let mut action = AgentAction::final_response(fallback);
+            action.thinking = Some(thought.trim().to_string());
+            return Some(action);
+        }
+    }
+
+    None
+}
+
+fn fallback_content_from_thought(thought: &str) -> String {
+    let lower = thought.to_ascii_lowercase();
+    let is_french = lower.contains("français")
+        || lower.contains("francais")
+        || lower.contains("french")
+        || lower.contains("bonjour")
+        || lower.contains("salut")
+        || lower.contains("comment")
+        || lower.contains("aide");
+    if is_french {
+        "J'ai bien analysé votre demande. Comment puis-je vous aider plus précisément ?".to_string()
+    } else {
+        "I have analyzed your request. How can I assist you further?".to_string()
+    }
 }
 
 fn normalize_path(path: &Path) -> std::io::Result<PathBuf> {
@@ -2911,6 +3561,67 @@ mod tests {
     }
 
     #[test]
+    fn parses_action_with_think_tags_and_embedded_json() {
+        let runtime = AgentRuntime::new();
+        let raw = "<think>\nLet me think about how to answer in French.\n</think>\nHere is the answer: {\"type\":\"final\",\"content\":\"Oui, je parle français !\"}";
+        let action = runtime.parse_model_action(raw);
+
+        assert_eq!(action.action_type, AgentActionType::Final);
+        assert_eq!(action.content.as_deref(), Some("Oui, je parle français !"));
+    }
+
+    #[test]
+    fn only_thinking_does_not_duplicate_thought_as_content() {
+        let runtime = AgentRuntime::new();
+        let raw = "<think>\nOkay, the user said \"salut comment cava?\" which is French for \"hello how are you?\" So I should reply greeting them back. But since it's just a simple hello, maybe just respond politely without needing any tools. No tools needed here.\n</think>";
+        let action = runtime.parse_model_action(raw);
+
+        assert_eq!(action.action_type, AgentActionType::Final);
+        assert!(action.thinking.is_some());
+        let thinking = action.thinking.as_deref().unwrap();
+        assert!(thinking.contains("No tools needed here"));
+
+        let content = action.content.as_deref().unwrap();
+        // The content MUST NOT be the raw internal thought!
+        assert_ne!(content, thinking);
+        assert!(!content.contains("No tools needed here"));
+        assert!(content.contains("analysé") || content.contains("aider"));
+    }
+
+    #[test]
+    fn parses_action_with_alternative_keys() {
+        let runtime = AgentRuntime::new();
+        let raw = r#"{"type":"final","response":"C'est une excellente question !"}"#;
+        let action = runtime.parse_model_action(raw);
+
+        assert_eq!(action.action_type, AgentActionType::Final);
+        assert_eq!(action.content.as_deref(), Some("C'est une excellente question !"));
+    }
+
+    #[test]
+    fn parses_action_with_multiple_thinking_blocks() {
+        let runtime = AgentRuntime::new();
+        let raw = "<think>Initial reasoning.</think><think>Second reasoning after tool error.</think>\nJe peux vous proposer une alternative.";
+        let action = runtime.parse_model_action(raw);
+
+        assert_eq!(action.action_type, AgentActionType::Final);
+        assert_eq!(action.content.as_deref(), Some("Je peux vous proposer une alternative."));
+        assert!(action.thinking.is_some());
+        let thinking = action.thinking.as_deref().unwrap();
+        assert!(thinking.contains("Initial reasoning."));
+        assert!(thinking.contains("Second reasoning after tool error."));
+    }
+
+    #[test]
+    fn handles_empty_model_output_gracefully() {
+        let runtime = AgentRuntime::new();
+        let action = runtime.parse_model_action("   ");
+
+        assert_eq!(action.action_type, AgentActionType::Final);
+        assert!(!action.content.as_deref().unwrap_or_default().is_empty());
+    }
+
+    #[test]
     fn validates_tool_action_against_context_pack() {
         let runtime = AgentRuntime::new();
         let request = AgentRunStartRequest {
@@ -3029,11 +3740,19 @@ mod tests {
     #[test]
     fn built_in_registry_exposes_only_valid_executable_descriptors() {
         let registry = ToolRegistry::default();
-        assert_eq!(registry.descriptors().len(), 30);
+        assert_eq!(registry.descriptors().len(), 36);
         assert!(registry
             .descriptors()
             .iter()
             .all(|descriptor| descriptor.validate().is_ok()));
+        assert!(registry
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == TOOL_CORE_BROWSER_NAVIGATE));
+        assert!(registry
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == TOOL_CORE_COMPUTER_USE));
         assert!(registry
             .descriptors()
             .iter()
@@ -3042,6 +3761,19 @@ mod tests {
             .descriptors()
             .iter()
             .any(|descriptor| descriptor.id == TOOL_CORE_CODE_EXECUTE));
+        assert!(registry
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == TOOL_CORE_NOTIFICATION_SEND));
+        assert!(registry
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == TOOL_CORE_EMAIL_SEND));
+        assert!(registry
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == TOOL_CORE_NOTIFICATION_SCHEDULE));
+
         assert!(registry
             .descriptors()
             .iter()

@@ -112,19 +112,19 @@ void main() {
       expect(tester.takeException(), isNull, reason: section.id);
     }
   });
-  testWidgets('Composer selects a real model and has no mode selector', (
+  testWidgets('Composer selects a per-message override, never org settings', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(360, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    Json? saved;
+    var settingsPuts = 0;
     final w = await workspace(
       signedIn: true,
       handler: (req) async {
         if (req.method == 'PUT' && req.url.path.endsWith('/settings')) {
-          saved = object(jsonDecode(req.body));
+          settingsPuts++;
           return http.Response(req.body, 200);
         }
         return http.Response('[]', 200);
@@ -153,13 +153,24 @@ void main() {
     expect(find.byTooltip('Mode de conversation'), findsNothing);
     await tester.tap(find.text('Modèle IA'));
     await tester.pumpAndSettle();
+    // Default entry + override entry are both offered.
+    expect(
+      find.text('Modèle par défaut (organisation)'),
+      findsOneWidget,
+    );
     await tester.tap(find.text('Gemma test'));
     await tester.pumpAndSettle();
-    expect(
-      object(object(saved?['model'])['activeModelRef'])['modelId'],
-      'gemma:test',
-    );
-    expect(find.text('Gemma test'), findsOneWidget);
+    // Per-message override: org settings untouched, composer shows it.
+    expect(settingsPuts, 0);
+    expect(w.modelOverride?['modelId'], 'gemma:test');
+    expect(find.text('Gemma test · choix'), findsOneWidget);
+    // Back to default clears the override.
+    await tester.tap(find.text('Gemma test · choix'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Modèle par défaut (organisation)'));
+    await tester.pumpAndSettle();
+    expect(w.modelOverride, isNull);
+    expect(settingsPuts, 0);
     expect(tester.takeException(), isNull);
   });
   testWidgets('Sidebar hides project actions until a long press', (

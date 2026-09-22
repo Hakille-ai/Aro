@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { createSseParser } from "../sse";
 import type {
   AppSettings,
   AgentContextItem,
@@ -246,6 +247,121 @@ export async function webFetch<T>(method: string, path: string, body?: unknown, 
 /** Returns true when the app is running in browser but NOT as Tauri (i.e. web mode). */
 export const isWeb = () => !isTauri();
 
+export interface AssistantStatusProvider {
+  providerId: string;
+  executable: boolean;
+  reason: string;
+}
+
+export interface AssistantStatus {
+  canGenerate: boolean;
+  source: "local" | "server-cloud" | "demo" | "none";
+  activeLabel: string;
+  mockActive: boolean;
+  ollamaReachable: boolean;
+  ollamaModels: string[];
+  llamacppReachable: boolean;
+  serverCloudReady: boolean;
+  guidance: "ok" | "start-local-engine" | "contact-admin" | "demo-mode";
+  providers: AssistantStatusProvider[];
+  runnableModelIds: string[];
+}
+
+export interface AiCloudConsentState {
+  enabled: boolean;
+  providerIds: string[];
+  dataResidency: string | null;
+  acceptedBy: string | null;
+  acceptedAt: string | null;
+  updatedAt: string;
+}
+
+export interface AiCloudKeyState {
+  providerId: string;
+  configured: boolean;
+  updatedAt: string | null;
+}
+
+export interface AiCloudStatusState {
+  consent: AiCloudConsentState;
+  keys: AiCloudKeyState[];
+}
+
+/**
+ * Pre-check UX (navigateur + mobile via son propre client) : le client sait
+ * AVANT d'envoyer si le serveur peut generer. `null` en Tauri (generation
+ * locale) ou sans session web.
+ */
+export async function fetchAssistantStatus(): Promise<AssistantStatus | null> {
+  if (isTauri()) return null;
+  if (isWeb() && webToken()) {
+    try {
+      return await webFetch<AssistantStatus>("GET", "/assistant/status");
+    } catch (error) {
+      console.warn("Assistant status unavailable:", error);
+      return null;
+    }
+  }
+  return null;
+}
+
+async function requireAiCloudAdmin(): Promise<"tauri" | "web"> {
+  if (isTauri()) return "tauri";
+  if (isWeb() && webToken()) return "web";
+  throw new Error("Cloud connection required to manage server AI.");
+}
+
+export async function fetchAiCloudStatus(): Promise<AiCloudStatusState> {
+  const mode = await requireAiCloudAdmin();
+  if (mode === "tauri") {
+    return invoke<AiCloudStatusState>("ai_cloud_status");
+  }
+  return webFetch<AiCloudStatusState>("GET", "/settings/ai-cloud/status");
+}
+
+export async function setAiCloudConsent(request: {
+  enabled: boolean;
+  providerIds: string[];
+  dataResidency?: string | null;
+}): Promise<AiCloudStatusState> {
+  const mode = await requireAiCloudAdmin();
+  if (mode === "tauri") {
+    return invoke<AiCloudStatusState>("ai_cloud_set_consent", { request });
+  }
+  return webFetch<AiCloudStatusState>("PUT", "/settings/ai-cloud/consent", request);
+}
+
+export async function putAiCloudProviderKey(
+  providerId: string,
+  apiKey: string,
+): Promise<AiCloudStatusState> {
+  const mode = await requireAiCloudAdmin();
+  if (mode === "tauri") {
+    return invoke<AiCloudStatusState>("ai_cloud_put_key", {
+      providerId,
+      apiKey,
+    });
+  }
+  return webFetch<AiCloudStatusState>(
+    "PUT",
+    `/settings/ai-cloud/keys/${encodeURIComponent(providerId)}`,
+    { apiKey },
+  );
+}
+
+export async function deleteAiCloudProviderKey(
+  providerId: string,
+): Promise<AiCloudStatusState> {
+  const mode = await requireAiCloudAdmin();
+  if (mode === "tauri") {
+    return invoke<AiCloudStatusState>("ai_cloud_delete_key", { providerId });
+  }
+  return webFetch<AiCloudStatusState>(
+    "DELETE",
+    `/settings/ai-cloud/keys/${encodeURIComponent(providerId)}`,
+  );
+}
+
 export function modelOptionKey(model: Pick<ModelRef, "providerId" | "modelId">): string {
   return `${model.providerId}::${model.modelId}`;
 }
@@ -405,6 +521,25 @@ function normalizeSettings(settings: AppSettings): AppSettings {
       apiKey: null,
       authConfigured: settings.search?.authConfigured ?? false,
     },
+    notification: settings.notification ?? {
+      desktopNotificationsEnabled: true,
+      soundEnabled: true,
+      agentCompletionNotifications: true,
+      routineNotifications: true,
+      emailNotificationsEnabled: false,
+      emailOnAgentCompletion: false,
+      emailOnRoutineSummary: false,
+      emailRecipient: null,
+      emailProvider: "smtp",
+      smtpHost: null,
+      smtpPort: 587,
+      smtpUser: null,
+      smtpPassword: null,
+      smtpFrom: "noreply@aro-ai.com",
+      smtpTlsMode: "starttls",
+      apiKey: null,
+      authConfigured: false,
+    },
     memory: normalizeMemorySettings(settings.memory),
   };
 }
@@ -493,6 +628,25 @@ let demoSettings: AppSettings = {
     apiKey: null,
     authConfigured: false,
     endpoint: null,
+  },
+  notification: {
+    desktopNotificationsEnabled: true,
+    soundEnabled: true,
+    agentCompletionNotifications: true,
+    routineNotifications: true,
+    emailNotificationsEnabled: false,
+    emailOnAgentCompletion: false,
+    emailOnRoutineSummary: false,
+    emailRecipient: null,
+    emailProvider: "smtp",
+    smtpHost: null,
+    smtpPort: 587,
+    smtpUser: null,
+    smtpPassword: null,
+    smtpFrom: "noreply@aro-ai.com",
+    smtpTlsMode: "starttls",
+    apiKey: null,
+    authConfigured: false,
   },
   retainHistory: true,
   speakResponses: false,
@@ -1336,22 +1490,27 @@ export async function createConversation(
   mode: AssistantMode,
   projectId?: string | null,
   folderId?: string | null,
+  organizationId?: string | null,
 ): Promise<Conversation> {
   const placement = {
     projectId: projectId ?? null,
     folderId: folderId ?? null,
   };
-  if (isTauri())
-    return invoke("conversation_create", {
+  if (isTauri()) {
+    const conv = await invoke<Conversation>("conversation_create", {
       request: { title, mode, projectId: placement.projectId, folderId: placement.folderId },
     });
+    if (organizationId) conv.organizationId = organizationId;
+    return conv;
+  }
   if (isWeb() && webToken()) {
     const conv = await webFetch<Conversation>("POST", "/conversations", { title, mode, ...placement });
+    if (organizationId) conv.organizationId = organizationId;
     demoConversations = [conv, ...demoConversations];
     demoMessages[conv.id] = [];
     return conv;
   }
-  const conversation = makeConversation(title, mode, placement.projectId, placement.folderId);
+  const conversation = makeConversation(title, mode, placement.projectId, placement.folderId, organizationId);
   demoConversations = [conversation, ...demoConversations];
   demoMessages[conversation.id] = [];
   return conversation;
@@ -1499,10 +1658,11 @@ export async function createProject(
   rootPath?: string | null,
   color?: string | null,
   icon?: string | null,
+  organizationId?: string | null,
 ): Promise<Project> {
-  if (isTauri()) return invoke("project_create", { name, description, instructions, rootPath, color, icon });
+  if (isTauri()) return invoke("project_create", { name, description, instructions, rootPath, color, icon, organizationId });
   if (isWeb() && webToken()) {
-    const project = await webFetch<Project>("POST", "/projects", { name, description, instructions, rootPath, color, icon });
+    const project = await webFetch<Project>("POST", "/projects", { name, description, instructions, rootPath, color, icon, organizationId });
     demoProjects = [project, ...demoProjects];
     return project;
   }
@@ -1517,6 +1677,7 @@ export async function createProject(
     icon: icon || "folder-tree",
     createdAt: now,
     updatedAt: now,
+    organizationId: organizationId ?? null,
   };
   demoProjects = [project, ...demoProjects];
   return project;
@@ -1570,10 +1731,11 @@ export async function createFolder(
   rootPath?: string | null,
   color?: string | null,
   icon?: string | null,
+  organizationId?: string | null,
 ): Promise<Folder> {
-  if (isTauri()) return invoke("folder_create", { name, projectId, rootPath, color, icon });
+  if (isTauri()) return invoke("folder_create", { name, projectId, rootPath, color, icon, organizationId });
   if (isWeb() && webToken()) {
-    const folder = await webFetch<Folder>("POST", "/folders", { name, projectId, rootPath, color, icon });
+    const folder = await webFetch<Folder>("POST", "/folders", { name, projectId, rootPath, color, icon, organizationId });
     demoFolders = [folder, ...demoFolders];
     return folder;
   }
@@ -1587,6 +1749,7 @@ export async function createFolder(
     icon: icon ?? "folder",
     createdAt: now,
     updatedAt: now,
+    organizationId: organizationId ?? null,
   };
   demoFolders = [folder, ...demoFolders];
   return folder;
@@ -2106,6 +2269,10 @@ export async function sendMessageStream(
         attachments: request.attachments || [],
         webAccess: request.webAccess || "off",
         searchSettings: request.searchSettings || null,
+        // Client epais : prompt systeme deja compile par le harnais
+        // desktop (personnalite + souvenirs + skills + permissions).
+        // Le serveur l'utilise tel quel, sans enrichissement.
+        promptScope: "full",
       }),
     });
 
@@ -2128,47 +2295,52 @@ export async function sendMessageStream(
     const reader = response.body?.getReader();
     if (!reader) throw new Error("No response body");
     const decoder = new TextDecoder();
-    let buffer = "";
+    // The parser owns buffering + event-type state across reads: an
+    // `event:` line and its `data:` line may land in different TCP chunks.
+    const parser = createSseParser((e, raw) =>
+      console.error("Failed to parse SSE data:", e, raw)
+    );
     let doneResult: SendMessageResponse | null = null;
+
+    const handleSseEvent = (kind: string, data: any) => {
+      if (kind === "chunk") {
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("aro-chat-stream-chunk", {
+              detail: {
+                conversationId: request.conversationId || data.conversationId || "",
+                messageId: tempAssistantMessageId,
+                content: data.content || "",
+                done: false,
+              },
+            })
+          );
+        }
+      } else if (kind === "step") {
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("aro-agent-step-update", {
+              detail: {
+                conversationId: request.conversationId || data.conversationId || "",
+                step: data.step,
+              },
+            })
+          );
+        }
+      } else if (kind === "done") {
+        doneResult = data as SendMessageResponse;
+      }
+    };
 
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-
-      let currentEvent = "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        if (trimmed.startsWith("event:")) {
-          currentEvent = trimmed.slice(6).trim();
-        } else if (trimmed.startsWith("data:")) {
-          const dataStr = trimmed.slice(5).trim();
-          try {
-            const data = JSON.parse(dataStr);
-            if (currentEvent === "chunk") {
-              if (typeof window !== "undefined") {
-                window.dispatchEvent(
-                  new CustomEvent("aro-chat-stream-chunk", {
-                    detail: {
-                      conversationId: request.conversationId || data.conversationId || "",
-                      messageId: tempAssistantMessageId,
-                      content: data.content || "",
-                      done: false,
-                    },
-                  })
-                );
-              }
-            } else if (currentEvent === "done") {
-              doneResult = data as SendMessageResponse;
-            }
-          } catch (e) {
-            console.error("Failed to parse SSE data:", e);
-          }
-        }
+      for (const event of parser.feed(decoder.decode(value, { stream: true }))) {
+        handleSseEvent(event.kind, event.data);
       }
+    }
+    for (const event of parser.flush()) {
+      handleSseEvent(event.kind, event.data);
     }
     if (doneResult) return doneResult;
     throw new Error("Stream closed without done event");
@@ -2847,6 +3019,7 @@ function makeConversation(
   mode: AssistantMode,
   projectId?: string | null,
   folderId?: string | null,
+  organizationId?: string | null,
 ): Conversation {
   const now = new Date().toISOString();
   return {
@@ -2857,6 +3030,7 @@ function makeConversation(
     mode,
     projectId: projectId ?? null,
     folderId: folderId ?? null,
+    organizationId: organizationId ?? null,
   };
 }
 

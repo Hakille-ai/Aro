@@ -252,11 +252,13 @@ function createRenderer(language: MarkdownLanguage): Renderer {
     }
 
     // Smart JSON Auto-Detection for any code block (json, text, code, etc.)
-    if (codeLanguage === "json" || codeLanguage === "code" || codeLanguage === "" || codeLanguage === "javascript") {
+    if (codeLanguage === "json" || codeLanguage === "code" || codeLanguage === "" || codeLanguage === "javascript" || codeLanguage === "connectors") {
       try {
         const parsed = JSON.parse(text.trim());
         if (parsed && typeof parsed === "object") {
-          if (parsed.type === "form" || parsed.fields || parsed.questions) {
+          if (parsed.connectors || parsed.plugins || (Array.isArray(parsed) && parsed[0]?.connectorId)) {
+            effectiveLang = "connectors";
+          } else if (parsed.type === "form" || parsed.fields || parsed.questions) {
             effectiveLang = "form";
           } else if (parsed.tools || (Array.isArray(parsed) && parsed[0]?.category && parsed[0]?.name)) {
             effectiveLang = "tools";
@@ -295,6 +297,14 @@ function createRenderer(language: MarkdownLanguage): Renderer {
       return `
         <div class="tools-block-container" data-code="${encodeURIComponent(text)}" data-tools="${encodeURIComponent(text)}">
           <div class="tools-grid-rendered"></div>
+        </div>
+      `;
+    }
+
+    if (effectiveLang === "connectors") {
+      return `
+        <div class="connectors-block-container" data-code="${encodeURIComponent(text)}" data-connectors="${encodeURIComponent(text)}">
+          <div class="connectors-grid-rendered"></div>
         </div>
       `;
     }

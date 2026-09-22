@@ -4,6 +4,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../core/api.dart';
 import '../core/workspace.dart';
 import '../ui/design.dart';
+import 'mfa.dart';
 
 class ProfileEditor extends StatefulWidget {
   final Workspace workspace;
@@ -277,6 +278,8 @@ class _ProfileEditorState extends State<ProfileEditor> {
           ),
         ),
       ),
+      const SizedBox(height: 28),
+      MfaCard(workspace: w),
       const SizedBox(height: 24),
       OutlinedButton.icon(
         onPressed: () => perform(context, () async {

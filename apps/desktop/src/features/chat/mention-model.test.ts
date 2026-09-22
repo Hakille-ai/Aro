@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   applyMentionSelection,
+  buildUnifiedMentionItems,
   dedupeMentionedPaths,
   detectMentionQuery,
   extractMentionedPaths,
+  filterUnifiedMentionItems,
   filterWorkspaceEntries,
   flattenWorkspaceTreeToMentions,
   resolveMentionedEntries,
@@ -110,5 +112,49 @@ describe("mention-model F4.3 — tree flattening & context", () => {
   it("resolves unique basename mentions when typed without directory prefix", () => {
     const resolved = resolveMentionedEntries("see @App.svelte and @main.rs", entries);
     expect(resolved.map((e) => e.relativePath)).toEqual(["src/App.svelte", "src-tauri/main.rs"]);
+  });
+});
+
+describe("mention-model — Multi-Entity Unified Mentions (Files, Skills, Plugins, MCP, Agents, Models)", () => {
+  it("builds unified mention items across all 6 categories", () => {
+    const unified = buildUnifiedMentionItems({
+      files: entries,
+      skills: [{ id: "s1", name: "WebSearch", description: "Search web", category: "Recherche" }],
+      plugins: [{ id: "p1", name: "GitHub Integration", description: "Git sync", version: "1.2.0" }],
+      mcpServers: [{ id: "m1", name: "Local Postgres", url: "http://localhost:5432", status: "connected" }],
+      agents: [{ id: "a1", name: "Senior Architect", role: "Architecture", description: "Design systems" }],
+      models: [{ id: "deepseek-r1", label: "DeepSeek R1", provider: "Ollama", details: "Reasoning model" }],
+    });
+
+    expect(unified.length).toBe(entries.length + 5);
+    expect(unified.find((i) => i.category === "skill")?.insertToken).toBe("skill:websearch");
+    expect(unified.find((i) => i.category === "plugin")?.insertToken).toBe("plugin:github-integration");
+    expect(unified.find((i) => i.category === "mcp")?.insertToken).toBe("mcp:local-postgres");
+    expect(unified.find((i) => i.category === "agent")?.insertToken).toBe("agent:senior-architect");
+    expect(unified.find((i) => i.category === "model")?.insertToken).toBe("model:deepseek-r1");
+  });
+
+  it("filters unified items by query and category filter", () => {
+    const unified = buildUnifiedMentionItems({
+      files: entries,
+      skills: [{ id: "s1", name: "WebSearch", description: "Search web" }],
+      agents: [{ id: "a1", name: "Code Reviewer", role: "Reviewer" }],
+    });
+
+    const skillOnly = filterUnifiedMentionItems(unified, "", "skill");
+    expect(skillOnly).toHaveLength(1);
+    expect(skillOnly[0].title).toBe("WebSearch");
+
+    const searchHits = filterUnifiedMentionItems(unified, "Reviewer", "all");
+    expect(searchHits).toHaveLength(1);
+    expect(searchHits[0].title).toBe("Code Reviewer");
+  });
+
+  it("detects mention triggers with colons (e.g. @skill:web or @agent:coder)", () => {
+    const t1 = detectMentionQuery("ask @skill:web", 14);
+    expect(t1?.query).toBe("skill:web");
+
+    const t2 = detectMentionQuery("ping @agent:architect", 22);
+    expect(t2?.query).toBe("agent:architect");
   });
 });

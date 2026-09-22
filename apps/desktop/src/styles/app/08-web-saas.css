@@ -1,0 +1,762 @@
+/* ==========================================================================
+   08-web-saas.css — Couche Web SaaS professionnelle (responsive + system)
+   --------------------------------------------------------------------------
+   Objectifs :
+   - Supprimer le verrou desktop (min-width:860px) pour un vrai responsive.
+   - Sidebar / RightPanel / Settings / Modales / Auth / Composer adaptatifs.
+   - Tokens unifiés light/dark/oled alignés sur packages/ui-tokens.
+   - Accessibilité (focus, touch 44px, contrastes, reduced-motion).
+   - Ne casse pas Tauri : media queries uniquement + classes web dédiées.
+   Ordre : chargé en dernier dans main.ts, donc prioritaire à poids égal.
+   ========================================================================== */
+
+:root {
+  --aro-bg: #f7f8fa;
+  --aro-bg-elev: #ffffff;
+  --aro-bg-muted: #f1f5f9;
+  --aro-text: #151515;
+  --aro-text-2: #475569;
+  --aro-text-3: #86868b;
+  --aro-border: rgba(0, 0, 0, 0.08);
+  --aro-accent: #0071e3;
+  --aro-accent-2: #0a84ff;
+  --aro-accent-soft: rgba(0, 113, 227, 0.08);
+  --aro-danger: #e5484d;
+  --aro-success: #2f9e44;
+  --aro-warning: #f59e0b;
+  --aro-radius-sm: 8px;
+  --aro-radius-md: 12px;
+  --aro-radius-lg: 16px;
+  --aro-radius-xl: 24px;
+  --aro-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --aro-shadow-md: 0 10px 30px rgba(0, 0, 0, 0.08);
+  --aro-shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.16);
+  --aro-topbar-h: 56px;
+  --aro-sidebar-w: 280px;
+  --aro-right-w: 420px;
+  --aro-content-max: 880px;
+  --aro-break-sm: 640px;
+  --aro-break-md: 1024px;
+  --aro-break-lg: 1280px;
+}
+
+body.dark-theme {
+  --aro-bg: #111115;
+  --aro-bg-elev: #16161c;
+  --aro-bg-muted: #1c1d24;
+  --aro-text: #f5f5f7;
+  --aro-text-2: #a1a1aa;
+  --aro-text-3: #86868b;
+  --aro-border: rgba(255, 255, 255, 0.09);
+  --aro-accent: #0a84ff;
+  --aro-accent-2: #2f96ff;
+  --aro-accent-soft: rgba(10, 132, 255, 0.12);
+}
+
+body.oled-theme,
+body[data-theme="oled"] {
+  --aro-bg: #000000;
+  --aro-bg-elev: #0b0c0e;
+  --aro-bg-muted: #111115;
+  --aro-text: #f5f5f7;
+  --aro-text-2: #a1a1aa;
+  --aro-text-3: #6b7280;
+  --aro-border: rgba(255, 255, 255, 0.1);
+}
+
+/* --- Base fluide : supprime le verrou desktop --- */
+html,
+body,
+#app {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: clip;
+}
+
+/* NOTE: ne jamais imposer grid-template-columns ici : App.svelte pilote
+   la grille en inline (sidebar + resizer + workspace = 3 colonnes).
+   Un override 2-colonnes casserait le layout (zone centrale vide).
+   Seules les media queries ci-dessous adaptent la grille. */
+.shell {
+  min-width: 0 !important;
+  width: 100% !important;
+  max-width: 100vw !important;
+}
+
+.shell.settings-active {
+  grid-template-columns: 1fr !important;
+}
+
+.workspace,
+.workspace-content {
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+/* --- Web topbar (mobile/tablette) --- */
+.web-topbar {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--aro-topbar-h);
+  padding: 8px 12px;
+  padding-top: calc(8px + env(safe-area-inset-top, 0px));
+  border-bottom: 1px solid var(--aro-border);
+  background: color-mix(in srgb, var(--aro-bg-elev) 86%, transparent);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}
+
+/* Boutons topbar : même langage que le desktop (ghost, sobre, 32px).
+   Desktop ref : .dock-icon-btn / .bell-trigger-btn / .sidebar-collapse-toggle
+   (fond transparent, hover gris doux, icônes 13-16px). */
+.web-topbar-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--aro-text-2);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.web-topbar-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--aro-text);
+  border-color: var(--aro-border);
+  transform: scale(1.04);
+}
+
+.web-topbar-btn:active {
+  transform: scale(0.96);
+}
+
+.web-topbar-btn[aria-expanded="true"] {
+  background: var(--aro-accent-soft);
+  color: var(--aro-accent);
+  border-color: color-mix(in srgb, var(--aro-accent) 25%, transparent);
+}
+
+body.dark-theme .web-topbar-btn {
+  color: #98989d;
+}
+
+body.dark-theme .web-topbar-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f5f5f7;
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+body.dark-theme .web-topbar-btn[aria-expanded="true"] {
+  background: rgba(10, 132, 255, 0.18);
+  color: #2997ff;
+  border-color: rgba(10, 132, 255, 0.35);
+}
+
+.web-topbar-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.web-topbar-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.web-topbar-title strong {
+  font-size: 15px;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.web-topbar-title small {
+  font-size: 12px;
+  color: var(--aro-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- Backdrops drawers --- */
+.web-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(8, 10, 15, 0.44);
+  backdrop-filter: blur(2px);
+  animation: webFadeIn 180ms ease both;
+}
+
+.web-backdrop.visible {
+  display: block;
+}
+
+@keyframes webFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* --- États génériques SaaS --- */
+.web-empty,
+.web-error,
+.web-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 10px;
+  padding: 32px 20px;
+  color: var(--aro-text-2);
+}
+
+.web-empty-icon,
+.web-error-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+  background: var(--aro-accent-soft);
+  color: var(--aro-accent);
+}
+
+.web-error-icon {
+  background: rgba(229, 72, 77, 0.1);
+  color: var(--aro-danger);
+}
+
+.web-skeleton {
+  border-radius: var(--aro-radius-md);
+  background: linear-gradient(90deg, var(--aro-bg-muted) 25%, var(--aro-bg-elev) 50%, var(--aro-bg-muted) 75%);
+  background-size: 200% 100%;
+  animation: webShimmer 1.4s infinite linear;
+  min-height: 14px;
+}
+
+@keyframes webShimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+/* ==========================================================================
+   BREAKPOINTS
+   ========================================================================== */
+
+/* --- Tablette paysage / petit laptop : right panel en overlay ---
+   NOTE: pas de grid-template-columns ici (grille pilotée en inline). */
+@media (max-width: 1280px) {
+  .right-panel {
+    position: fixed !important;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(var(--aro-right-w), 92vw) !important;
+    max-width: 92vw;
+    z-index: 70 !important;
+    box-shadow: var(--aro-shadow-lg) !important;
+    border-left: 1px solid var(--aro-border) !important;
+    background: var(--aro-bg-elev) !important;
+  }
+
+  .right-panel-resizer {
+    display: none !important;
+  }
+}
+
+/* --- Tablette portrait : sidebar en drawer --- */
+@media (max-width: 1024px) {
+  .web-topbar {
+    display: flex;
+  }
+
+  .shell,
+  .shell.sidebar-collapsed {
+    grid-template-columns: 1fr !important;
+  }
+
+  .sidebar {
+    /* display:flex neutralise le display:none du media global ≤960px :
+       le drawer existe toujours, il coulisse via transform. */
+    display: flex !important;
+    position: fixed !important;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(340px, 86vw) !important;
+    max-width: 86vw;
+    z-index: 70 !important;
+    transform: translateX(-105%);
+    transition: transform 260ms cubic-bezier(0.16, 1, 0.3, 1) !important;
+    box-shadow: var(--aro-shadow-lg);
+    background: var(--aro-bg-elev) !important;
+  }
+
+  .shell:not(.sidebar-collapsed) .sidebar {
+    transform: translateX(0);
+  }
+
+  .sidebar-resizer {
+    display: none !important;
+  }
+
+  /* Contenu centré type SaaS */
+  .workspace-content {
+    max-width: 100%;
+  }
+
+  .topbar {
+    padding: 12px 16px 10px !important;
+  }
+
+  /* Composer : pleine largeur utile */
+  .composer-wrapper,
+  .composer {
+    max-width: 100% !important;
+  }
+
+  /* Grilles dashboard → 2 colonnes puis 1 */
+  .dashboard-grid,
+  .models-grid,
+  .plugins-grid,
+  .settings-grid,
+  .monitoring-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  /* Tables complexes → scroll horizontal propre */
+  .table-responsive,
+  .settings-table-wrap,
+  .members-table-wrap,
+  table {
+    max-width: 100%;
+  }
+
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border-radius: var(--aro-radius-md);
+  }
+
+  /* Settings : même empilées (media global ≤960px), les lignes à toggle
+     seul gardent le toggle à droite, style iOS — jamais orphelin/centré. */
+  .settings-row:has(> .settings-control-col > .ios-toggle:only-child) > .settings-control-col {
+    width: auto !important;
+    margin-left: auto !important;
+    justify-content: flex-end !important;
+    align-items: flex-end !important;
+  }
+}
+
+/* --- Mobile : vraie adaptation, pas juste réduction --- */
+@media (max-width: 767px) {
+  :root {
+    --aro-topbar-h: 60px;
+  }
+
+  html,
+  body,
+  #app {
+    overflow-x: clip;
+  }
+
+  .shell {
+    height: 100dvh !important;
+  }
+
+  .workspace-content {
+    height: 100dvh !important;
+  }
+
+  /* Sidebar plein écran quasi */
+  .sidebar {
+    width: min(360px, 92vw) !important;
+  }
+
+  /* RightPanel → bottom sheet */
+  .right-panel {
+    top: auto !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 88dvh !important;
+    max-height: 88dvh !important;
+    border-left: none !important;
+    border-top: 1px solid var(--aro-border) !important;
+    border-radius: 20px 20px 0 0 !important;
+    animation: webSheetIn 280ms cubic-bezier(0.16, 1, 0.3, 1) both !important;
+  }
+
+  @keyframes webSheetIn {
+    from { transform: translateY(40px); opacity: 0.6; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+
+  .right-panel-body {
+    padding: 16px !important;
+  }
+
+  /* Conversation : largeur + typographie mobile */
+  .conversation-view,
+  .messages,
+  .message-list {
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+  }
+
+  .message-bubble,
+  .chat-bubble,
+  .assistant-message,
+  .user-message {
+    max-width: 100% !important;
+  }
+
+  /* Composer sticky bas avec safe-area */
+  .composer-wrapper {
+    padding: 10px 12px calc(12px + env(safe-area-inset-bottom, 0px)) !important;
+    position: sticky;
+    bottom: 0;
+    background: linear-gradient(to top, var(--aro-bg) 72%, transparent);
+  }
+
+  .composer-field textarea {
+    font-size: 16px !important; /* anti-zoom iOS */
+  }
+
+  /* Modales → plein écran adaptatif */
+  .modal-backdrop,
+  .dialog-backdrop {
+    padding: 0 !important;
+    align-items: flex-end !important;
+  }
+
+  .modal,
+  .dialog,
+  .modal-card,
+  .command-palette,
+  .quick-open-modal {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: 92dvh !important;
+    border-radius: 20px 20px 0 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Settings : déjà master/detail, on fiabilise */
+  .settings-page {
+    height: 100dvh !important;
+  }
+
+  .settings-content {
+    padding: 16px !important;
+  }
+
+  /* Auth : carte plein écran */
+  .cloud-auth-card,
+  .auth-card {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 12px !important;
+    border-radius: var(--aro-radius-lg) !important;
+  }
+
+  /* Grilles → 1 colonne */
+  .dashboard-grid,
+  .models-grid,
+  .plugins-grid,
+  .settings-grid,
+  .monitoring-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Topbar existante compacte */
+  .topbar {
+    padding: 10px 12px 8px !important;
+    gap: 10px !important;
+  }
+
+  /* Cache les resizeurs */
+  .sidebar-resizer,
+  .right-panel-resizer,
+  .settings-sidebar-resizer {
+    display: none !important;
+  }
+}
+
+/* --- Très petits écrans --- */
+@media (max-width: 420px) {
+  .web-topbar-title strong {
+    font-size: 14px;
+  }
+
+  .web-topbar-btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  .right-panel-header {
+    padding: 0 14px !important;
+  }
+}
+
+/* --- Grands écrans : utilise l'espace (SaaS) --- */
+@media (min-width: 1440px) {
+  :root {
+    --aro-content-max: 960px;
+    --aro-right-w: 460px;
+  }
+
+  .conversation-view,
+  .messages,
+  .message-list,
+  .composer-wrapper {
+    max-width: var(--aro-content-max);
+    margin-left: auto;
+    margin-right: auto;
+    width: 100%;
+  }
+}
+
+/* ==========================================================================
+   ACCESSIBILITÉ + FINITION
+   ========================================================================== */
+
+.web-topbar-btn:focus-visible,
+.sidebar button:focus-visible,
+.right-panel button:focus-visible,
+.composer button:focus-visible,
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--aro-accent);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Scrollbars discrètes */
+.workspace-content ::-webkit-scrollbar,
+.right-panel-body::-webkit-scrollbar,
+.sidebar ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.workspace-content ::-webkit-scrollbar-thumb,
+.right-panel-body::-webkit-scrollbar-thumb,
+.sidebar ::-webkit-scrollbar-thumb {
+  background: rgba(125, 125, 135, 0.35);
+  border-radius: 8px;
+}
+
+/* Images / médias fluides */
+.message-bubble img,
+.chat-bubble img,
+.assistant-message img,
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--aro-radius-md);
+}
+
+/* Code blocks scroll propre */
+pre,
+.code-block,
+.markdown-body pre {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ==========================================================================
+   PHASE 2 — Tables, formulaires, modales, auth, performance web
+   ========================================================================== */
+
+/* Tables : scroll + cartes sur mobile */
+.members-table-wrapper,
+.table-responsive,
+.settings-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--aro-border);
+  border-radius: var(--aro-radius-md);
+  background: var(--aro-bg-elev);
+}
+
+.members-table,
+.perf-table,
+table.data-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.members-table th,
+.members-table td,
+.perf-table th,
+.perf-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--aro-border);
+  white-space: nowrap;
+}
+
+.members-table th,
+.perf-table th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--aro-text-3);
+  background: var(--aro-bg-muted);
+  position: sticky;
+  top: 0;
+}
+
+/* Formulaires : grilles adaptatives */
+.form-grid-2,
+.settings-form-grid,
+.provider-grid,
+.models-grid,
+.plugins-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 767px) {
+  .form-grid-2,
+  .settings-form-grid,
+  .provider-grid,
+  .models-grid,
+  .plugins-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .members-table,
+  .perf-table,
+  table.data-table {
+    min-width: 0;
+    font-size: 13px;
+  }
+
+  .members-table th,
+  .members-table td,
+  .perf-table th,
+  .perf-table td {
+    white-space: normal;
+    padding: 8px 10px;
+  }
+}
+
+/* Inputs : anti-zoom + touch */
+input,
+select,
+textarea {
+  font-size: max(14px, 1em);
+}
+
+button,
+.sidebar-nav-item,
+.sidebar-action-btn,
+.web-topbar-btn {
+  min-height: 40px;
+}
+
+@media (max-width: 767px) {
+  button,
+  .sidebar-nav-item {
+    min-height: 44px;
+  }
+}
+
+/* Modales génériques : centrées desktop, sheet mobile (déjà géré) */
+.modal-backdrop,
+.dialog-backdrop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+/* Auth : safe-area + scroll si petit viewport */
+.cloud-auth-page {
+  min-height: 100dvh;
+  height: auto;
+  overflow-y: auto;
+  padding: 24px 16px calc(24px + env(safe-area-inset-bottom, 0px));
+}
+
+@media (max-width: 480px) {
+  .glassmorphic-panel {
+    padding: 24px 20px !important;
+    gap: 20px !important;
+    border-radius: 20px !important;
+  }
+}
+
+/* Performance mobile : allège les flous/animations lourdes */
+@media (max-width: 767px) {
+  .aurora-bg,
+  .auth-bg-aurora {
+    filter: blur(60px) !important;
+    opacity: 0.06 !important;
+  }
+
+  .aurora-blob {
+    animation: none !important;
+  }
+
+  .sidebar,
+  .right-panel {
+    backdrop-filter: blur(16px) saturate(130%) !important;
+    -webkit-backdrop-filter: blur(16px) saturate(130%) !important;
+  }
+}
+
+/* Bandeau offline : utilise le slot d'erreur existant, le rend sticky */
+.cloud-offline-banner,
+.sync-status-banner {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+}
+
+/* Grands écrans : settings centrés */
+@media (min-width: 1440px) {
+  .settings-content-scroll {
+    max-width: 1100px;
+    margin: 0 auto;
+    width: 100%;
+  }
+}

@@ -3,13 +3,16 @@ import { writable } from "svelte/store";
 export interface ConfirmOptions {
   title: string;
   body?: string;
+  message?: string;
   confirmLabel?: string;
+  confirmText?: string;
   cancelLabel?: string;
+  cancelText?: string;
   /** Style destructif (rouge) pour le bouton de confirmation. */
   danger?: boolean;
 }
 
-interface PendingConfirm extends Required<Omit<ConfirmOptions, "body">> {
+interface PendingConfirm extends Required<Omit<ConfirmOptions, "body" | "message" | "confirmText" | "cancelText">> {
   body: string;
   resolve: (value: boolean) => void;
 }
@@ -30,9 +33,9 @@ export function requestConfirm(options: ConfirmOptions): Promise<boolean> {
       previous?.resolve(false);
       return {
         title: options.title,
-        body: options.body ?? "",
-        confirmLabel: options.confirmLabel ?? "Confirmer",
-        cancelLabel: options.cancelLabel ?? "Annuler",
+        body: options.body ?? options.message ?? "",
+        confirmLabel: options.confirmLabel ?? options.confirmText ?? "Confirmer",
+        cancelLabel: options.cancelLabel ?? options.cancelText ?? "Annuler",
         danger: options.danger ?? true,
         resolve,
       };

@@ -1,6 +1,11 @@
 mod agent_runner;
+mod agent_tools;
 mod auth;
+mod billing;
+mod compute;
 mod handlers;
+mod handlers_notify;
+mod handlers_plugins;
 mod invitation_delivery;
 mod redis;
 
@@ -538,6 +543,29 @@ async fn worker() -> anyhow::Result<()> {
             "ARO_INVITATION_DELIVERY_LEASE_SECONDS must exceed ARO_SMTP_TIMEOUT_SECONDS"
         ));
     }
+    // Tool executors for the durable agent loop: same constructors as the
+    // serve path, so the worker runs the exact tools the API would run.
+    let worker_tools = {
+        let tools = ToolExecutor::try_new(ToolExecutorConfig::default())?;
+        let plugins_dir = env::var("ARO_PLUGINS_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                directories::ProjectDirs::from("local", "aro", "ARO")
+                    .map(|dirs| dirs.data_local_dir().join("plugins"))
+                    .unwrap_or_else(|| std::env::temp_dir().join("aro_plugins"))
+            });
+        let skill_registry = Arc::new(aro_skills::SkillRegistry::new());
+        let plugins = Arc::new(aro_plugins::PluginManager::new(plugins_dir, skill_registry));
+        if let Err(err) = plugins.load_all().await {
+            tracing::warn!(?err, "worker failed to load installed plugins");
+        }
+        crate::agent_tools::WorkerToolDeps {
+            store: store.clone(),
+            tools,
+            plugins,
+            vector: MemoryVectorService::from_env(),
+        }
+    };
     let mut interval = tokio::time::interval(Duration::from_secs(sleep_seconds));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -614,7 +642,9 @@ async fn worker() -> anyhow::Result<()> {
                     }
                 }
                 if let Some(ref keyring) = agent_keyring {
-                    if let Err(err) = agent_runner::process_agent_jobs(&store, keyring).await {
+                    if let Err(err) =
+                        agent_runner::process_agent_jobs(&store, keyring, &worker_tools).await
+                    {
                         tracing::error!(?err, "error processing background agent jobs");
                     }
                 }
@@ -1047,8 +1077,23 @@ pub fn router(state: ApiState) -> Router {
 fn router_with_http_config(state: ApiState, http_config: HttpConfig) -> Router {
     let max_body_bytes = http_config.max_body_bytes;
     let upload_body_bytes = state.file_settings.max_bytes.min(512 * 1024 * 1024) as usize;
+    // Headroom for JSON routes whose legitimate payloads exceed the default
+    // 1 MiB (local generations, creations embedding a logo upload).
+    // Well under MAX_BODY_BYTES_CEILING (16 MiB).
+    const LARGE_BODY_BYTES: usize = 8 * 1024 * 1024;
     let rate_limit_state = state.clone();
     let application_routes = Router::new()
+        .route("/billing/catalog", get(billing::catalog))
+        .route("/billing/account", get(billing::account))
+        .route("/billing/limits", put(billing::limits))
+        .route("/billing/checkout", post(billing::checkout))
+        .route("/billing/checkout/resume", post(billing::resume_checkout))
+        .route("/billing/portal", post(billing::portal))
+        .route("/billing/webhook", post(billing::webhook))
+        .route("/billing/compute-keys", get(compute::list_keys).post(compute::create_key))
+        .route("/billing/compute-keys/{id}", axum::routing::delete(compute::revoke_key))
+        .route("/models", get(compute::models))
+        .route("/chat/completions", post(compute::completion))
         .route("/.well-known/jwks.json", get(handlers::well_known_jwks))
         .route("/auth/register", post(handlers::auth_register))
         .route("/auth/login", post(handlers::auth_login))
@@ -1171,9 +1216,56 @@ fn router_with_http_config(state: ApiState, http_config: HttpConfig) -> Router {
         )
         .route(
             "/assistant/local-result",
-            post(handlers::assistant_local_result),
+            // Cloud sync of local generations carries the FULL message,
+            // including agent execution traces: no body limit on this
+            // route (authenticated; the global default still guards
+            // every other route). Route layers override the router-level
+            // `DefaultBodyLimit`, same mechanism as the upload route below.
+            post(handlers::assistant_local_result).layer(DefaultBodyLimit::disable()),
         )
         .route("/assistant/stream", post(handlers::assistant_stream))
+        .route("/assistant/status", get(handlers::assistant_status))
+        .route("/settings/ai-cloud/status", get(handlers::ai_cloud_status))
+        .route(
+            "/settings/ai-cloud/consent",
+            put(handlers::ai_cloud_set_consent),
+        )
+        .route(
+            "/settings/ai-cloud/keys/{provider_id}",
+            put(handlers::ai_cloud_put_key).delete(handlers::ai_cloud_delete_key),
+        )
+        .route(
+            "/notifications",
+            get(handlers::notifications_list).post(handlers::notification_create),
+        )
+        .route(
+            "/notifications/unread-count",
+            get(handlers::notifications_unread_count),
+        )
+        .route(
+            "/notifications/read-all",
+            post(handlers::notifications_mark_all_read),
+        )
+        .route(
+            "/notifications/clear",
+            axum::routing::delete(handlers::notifications_clear_all),
+        )
+        .route(
+            "/notifications/{id}/read",
+            post(handlers::notification_mark_read),
+        )
+        .route(
+            "/notifications/{id}",
+            axum::routing::delete(handlers::notification_delete),
+        )
+        .route(
+            "/email/send",
+            post(handlers::email_send),
+        )
+        .route(
+            "/email/test",
+            post(handlers::email_test),
+        )
         .route("/files", get(handlers::files_list))
         .route("/files/quota", get(handlers::files_storage_quota))
         .route("/files/quarantined", get(handlers::files_quarantined_list))
@@ -1315,11 +1407,17 @@ fn router_with_http_config(state: ApiState, http_config: HttpConfig) -> Router {
             get(handlers::plugins_list_marketplace),
         )
         .route("/plugins/install", post(handlers::plugins_install))
-        .route("/plugins/custom", post(handlers::plugins_install_custom))
+        .route(
+            "/plugins/custom",
+            // Custom creations may embed a logo upload (data URL, ≤2 MiB):
+            // grant headroom above the default 1 MiB.
+            post(handlers::plugins_install_custom).layer(DefaultBodyLimit::max(LARGE_BODY_BYTES)),
+        )
         .route(
             "/plugins/{plugin_id}",
             get(handlers::plugins_get).delete(handlers::plugins_uninstall),
         )
+        .route("/plugins/{plugin_id}/logo", get(handlers::plugins_read_logo))
         .route(
             "/plugins/{plugin_id}/toggle",
             post(handlers::plugins_toggle),
@@ -2111,6 +2209,9 @@ async fn request_timeout_middleware(
     request: Request,
     next: Next,
 ) -> Response {
+    let timeout = if matches!(request.uri().path(), "/chat/completions" | "/v1/chat/completions") {
+        timeout.max(Duration::from_secs(135))
+    } else { timeout };
     match tokio::time::timeout(timeout, next.run(request)).await {
         Ok(response) => response,
         Err(_) => ApiError::gateway_timeout("request deadline exceeded").into_response(),
@@ -2189,7 +2290,36 @@ async fn rate_limit_middleware(
         return Ok(next.run(request).await);
     };
     let subject = rate_limit_subject(&state, &request);
-    let decision = state.redis.check_rate_limit(class, &subject).await?;
+    // Fail-open : le rate limiting ne doit jamais transformer une panne Redis
+    // transitoire en 500 sur les routes métier (ex: PUT /v1/client-state/*).
+    // On borne aussi l'attente pour ne pas ajouter ~500ms de latence par requête
+    // quand Redis est injoignable.
+    let decision = match tokio::time::timeout(
+        Duration::from_millis(800),
+        state.redis.check_rate_limit(class, &subject),
+    )
+    .await
+    {
+        Ok(Ok(decision)) => decision,
+        Ok(Err(aro_core::AroError::RuntimeUnavailable(message))) => {
+            tracing::warn!(
+                error = %message,
+                method = %method,
+                path = %path,
+                "Redis unavailable for rate limiting; allowing request (fail-open)"
+            );
+            return Ok(next.run(request).await);
+        }
+        Ok(Err(error)) => return Err(ApiError::from(error)),
+        Err(_) => {
+            tracing::warn!(
+                method = %method,
+                path = %path,
+                "Redis rate-limit check timed out; allowing request (fail-open)"
+            );
+            return Ok(next.run(request).await);
+        }
+    };
     if !decision.allowed {
         return Err(ApiError::too_many_requests(format!(
             "rate limit exceeded: {}/{} requests per minute",

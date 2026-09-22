@@ -39,6 +39,8 @@
   import Terminal from "@lucide/svelte/icons/terminal";
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import User from "@lucide/svelte/icons/user";
+  import VoiceOrb from "../voice/VoiceOrb.svelte";
+  import NotificationCenter from "../notifications/NotificationCenter.svelte";
   import type { Conversation, Project } from "../../lib/types";
 
   export let activeConversation: Conversation | null;
@@ -65,6 +67,11 @@
   export let onMoveConversation: ((conversation: Conversation) => void) | undefined = undefined;
   export let onExportConversation: ((conversation: Conversation, format: 'markdown' | 'json') => void) | undefined = undefined;
   export let onOpenMemorySettings: (() => void) | undefined = undefined;
+  export let onOpenVoiceLive: (() => void) | undefined = undefined;
+  export let activeOrganizationId: string | null = null;
+  export let soundEnabled: boolean = true;
+  export let onOpenConversation: ((id: string) => void) | undefined = undefined;
+  export let onOpenSettingsTab: ((tab: string) => void) | undefined = undefined;
 
   let showProjectVaultPopover = false;
   $: void attachedFileCount;
@@ -248,6 +255,16 @@
         </button>
       {/if}
 
+      <button
+        type="button"
+        class="topbar-orb-item"
+        style="display: flex; align-items: center; margin-left: 8px; background: transparent; border: none; padding: 0; cursor: pointer;"
+        title={language === "fr" ? "Lancer le mode Vocal Live Immersif (ORB)" : "Launch Immersive Live Voice Mode (ORB)"}
+        on:click={() => onOpenVoiceLive?.()}
+      >
+        <VoiceOrb size={26} interactive={true} {language} />
+      </button>
+
       <div class="conversation-menu-container">
         <button
           class="conversation-menu-btn"
@@ -331,6 +348,13 @@
   </div>
 
   <div class="topbar-actions">
+    <NotificationCenter
+      {activeOrganizationId}
+      {language}
+      {soundEnabled}
+      onOpenConversation={(id) => onOpenConversation?.(id)}
+      onOpenSettingsTab={(tab) => onOpenSettingsTab?.(tab)}
+    />
     <button
       class="topbar-action-btn"
       class:active={showRightPanel}

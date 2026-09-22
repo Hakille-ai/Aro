@@ -296,6 +296,27 @@ class AroApi {
     }
   }
 
+  /// Pre-check UX : le client sait AVANT d'envoyer si le serveur peut
+  /// generer, par quel chemin, et quoi faire sinon. Aucun secret expose.
+  Future<Json> assistantStatus() async =>
+      object(await request('GET', '/assistant/status'));
+
+  Future<Uint8List> downloadBytes(String fileId) async {
+    final req = http.Request('GET', uri('/files/$fileId/content'));
+    req.headers.addAll(headers);
+    final response = await http.Response.fromStream(
+      await client.send(req).timeout(const Duration(minutes: 2)),
+    ).timeout(const Duration(minutes: 2));
+    if (response.statusCode == 401 && authenticated) {
+      await _refresh();
+      return downloadBytes(fileId);
+    }
+    if (response.statusCode >= 400) {
+      throw _error(response.statusCode, response.body);
+    }
+    return response.bodyBytes;
+  }
+
   Future<Json> upload(String name, Uint8List bytes, String digest) async {
     final result = object(
       await request(

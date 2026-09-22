@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -290,6 +291,7 @@ impl PluginManager {
             now
         };
 
+        let branding = crate::branding::branding_from_extensions(&manifest.extensions);
         let installed = InstalledPlugin {
             id: plugin_id.clone(),
             name: manifest.name.clone(),
@@ -317,6 +319,13 @@ impl PluginManager {
                 .into_iter()
                 .find(|m| m.id == plugin_id)
                 .and_then(|m| m.auth),
+            extensions: manifest.extensions.clone(),
+            logo: branding.logo,
+            logo_kind: branding.logo_kind.map(|k| match k {
+                crate::branding::LogoKind::Emoji => "emoji".to_string(),
+                crate::branding::LogoKind::File => "file".to_string(),
+            }),
+            brand_color: branding.brand_color,
         };
 
         let mut map = self.plugins.write().await;
@@ -347,26 +356,95 @@ impl PluginManager {
     }
 
     pub async fn install_from_git(&self, git_url: &str) -> Result<InstalledPlugin> {
-        let temp_dir =
-            std::env::temp_dir().join(format!("aro-plugin-clone-{}", uuid::Uuid::new_v4()));
+        let url = validate_git_url(git_url)?;
+        let temp_dir = fresh_clone_dir()?;
+        // Le dossier temporaire est TOUJOURS nettoyé, succès comme échec.
+        let result = self.install_from_git_inner(&url, &temp_dir).await;
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        result
+    }
 
-        let output = tokio::process::Command::new("git")
-            .arg("clone")
-            .arg("--depth")
-            .arg("1")
-            .arg(git_url)
-            .arg(&temp_dir)
-            .output()
+    async fn install_from_git_inner(
+        &self,
+        git_url: &str,
+        temp_dir: &Path,
+    ) -> Result<InstalledPlugin> {
+        let dir_str = temp_dir.to_string_lossy().to_string();
+
+        // 1. Sonde : clone sparse + shallow, seuls les fichiers racine sont
+        //    matérialisés. Rapide, et insensible aux chemins profonds du dépôt
+        //    (~5000 fichiers non téléchargés pour valider un seul manifeste).
+        let mut probe_args: Vec<String> = vec![
+            "-c".into(),
+            "core.longpaths=true".into(),
+            "clone".into(),
+            "--depth".into(),
+            "1".into(),
+            "--filter=blob:none".into(),
+            "--sparse".into(),
+            git_url.into(),
+            dir_str.clone(),
+        ];
+        let mut output = run_git(&probe_args, GIT_PROBE_TIMEOUT)
             .await
-            .with_context(|| format!("failed to execute git clone for '{git_url}'"))?;
-
+            .map_err(|err| classify_spawn_failure(&err.to_string()))?;
+        if !output.status.success() && mentions_filter_unsupported(&output.stderr) {
+            // Git ou serveur trop ancien pour --filter : on réessaie sans,
+            // toujours en sparse + shallow.
+            probe_args.remove(6);
+            output = run_git(&probe_args, GIT_PROBE_TIMEOUT)
+                .await
+                .map_err(|err| classify_spawn_failure(&err.to_string()))?;
+        }
         if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            let _ = std::fs::remove_dir_all(&temp_dir);
-            return Err(anyhow!("Git clone failed: {err}"));
+            return Err(classify_git_failure("clone", &output.stderr));
         }
 
-        let mut result = self.install_from_directory(&temp_dir).await?;
+        // 2. Le dépôt doit être UN plugin (plugin.json à la racine), pas une
+        //    collection. Échec immédiat et propre, sans rien télécharger d'autre.
+        let manifest_path = temp_dir.join("plugin.json");
+        if !manifest_path.is_file() {
+            return Err(anyhow!(
+                "Ce dépôt ne contient pas de fichier plugin.json à la racine. \
+                 ARO installe un seul plugin autonome par dépôt ; les collections \
+                 (un dossier par plugin) ne sont pas prises en charge par cet écran. \
+                 Vérifiez l'URL ou utilisez l'onglet « Dossier local » après avoir \
+                 cloné le dépôt vous-même."
+            ));
+        }
+        let manifest_content = std::fs::read_to_string(&manifest_path).with_context(|| {
+            "Impossible de lire le fichier plugin.json de ce dépôt.".to_string()
+        })?;
+        if let Err(err) = PluginManifest::from_json_str(&manifest_content) {
+            return Err(anyhow!(
+                "Le fichier plugin.json de ce dépôt est invalide : {err}"
+            ));
+        }
+
+        // 3. Matérialisation complète du plugin (toujours shallow + long paths).
+        let output = run_git(
+            &[
+                "-c".into(),
+                "core.longpaths=true".into(),
+                "-C".into(),
+                dir_str.clone(),
+                "sparse-checkout".into(),
+                "disable".into(),
+            ],
+            GIT_CHECKOUT_TIMEOUT,
+        )
+        .await
+        .map_err(|err| classify_spawn_failure(&err.to_string()))?;
+        if !output.status.success() {
+            return Err(classify_git_failure("checkout", &output.stderr));
+        }
+
+        // 4. Installation locale. On masque le chemin temporaire interne qui
+        //    n'apporte rien à l'utilisateur en cas d'échec résiduel.
+        let mut result = self
+            .install_from_directory(temp_dir)
+            .await
+            .map_err(|err| anyhow!("{}", format!("{err:#}").replace(&dir_str, "le dépôt cloné")))?;
         let target_dir = PathBuf::from(&result.root_path);
         let _ = std::fs::write(target_dir.join(".source"), "git\n");
         result.source = PluginSourceType::Git;
@@ -374,7 +452,6 @@ impl PluginManager {
             let mut map = self.plugins.write().await;
             map.insert(result.id.clone(), result.clone());
         }
-        let _ = std::fs::remove_dir_all(&temp_dir);
         Ok(result)
     }
 
@@ -399,11 +476,53 @@ impl PluginManager {
         &self,
         req: crate::model::CreateCustomPluginRequest,
     ) -> Result<InstalledPlugin> {
+        // Validate the name BEFORE touching disk: it becomes a directory
+        // name, so `..` / absolute values must never reach `join`.
+        if !crate::manifest::is_valid_plugin_name(&req.name) {
+            return Err(anyhow!(
+                "Invalid plugin name '{}': 1-64 chars, [a-z0-9.-], no leading/trailing separator, no '--' or '..'",
+                req.name
+            ));
+        }
+        // Branding is fully validated BEFORE touching disk (fail fast, no
+        // half-written directories): emoji/color inline in the portable
+        // extension namespace; an uploaded image becomes a fixed
+        // `logo.<ext>` file next to the manifest, referenced from it.
+        let decoded_logo: Option<crate::branding::DecodedLogo> =
+            match req.logo_data_url.as_deref() {
+                Some(data_url) if !data_url.trim().is_empty() => {
+                    Some(crate::branding::parse_logo_data_url(data_url.trim())?)
+                }
+                _ => None,
+            };
+        let logo_file: Option<String> = decoded_logo.as_ref().map(|d| {
+            format!("{}.{}", crate::branding::LOGO_FILE_STEM, d.extension)
+        });
+        if let Some(file) = logo_file.as_deref() {
+            if !crate::branding::is_allowed_logo_file_name(file) {
+                return Err(anyhow!("Invalid logo file name"));
+            }
+        }
+        let branding_ext = crate::branding::build_branding_extension(
+            req.logo_emoji.as_deref(),
+            logo_file.as_deref(),
+            req.brand_color.as_deref(),
+        )?;
+        let mut extensions = HashMap::new();
+        if let Some(ext) = branding_ext {
+            extensions.insert(crate::branding::ARO_BRANDING_EXTENSION.to_string(), ext);
+        }
+
         let target_dir = self.installed_dir.join(&req.name);
         if target_dir.exists() {
             let _ = std::fs::remove_dir_all(&target_dir);
         }
         std::fs::create_dir_all(&target_dir)?;
+        if let Some(decoded) = decoded_logo {
+            let file_name = logo_file.expect("logo file name for decoded upload");
+            let dest = crate::branding::confine_logo_path(&target_dir, &file_name)?;
+            std::fs::write(&dest, &decoded.bytes)?;
+        }
 
         let author_str = req.author.unwrap_or_else(|| "User".to_string());
         let version_str = req.version.unwrap_or_else(|| "1.0.0".to_string());
@@ -419,7 +538,7 @@ impl PluginManager {
             repository: None,
             license: Some(license_str),
             keywords: req.keywords,
-            extensions: HashMap::new(),
+            extensions,
         };
         manifest.validate()?;
 
@@ -540,6 +659,85 @@ impl PluginManager {
     pub async fn get_plugin(&self, plugin_id: &str) -> Option<InstalledPlugin> {
         let map = self.plugins.read().await;
         map.get(plugin_id).cloned()
+    }
+
+    /// Read an uploaded plugin logo (`logo.<ext>` confined to the plugin
+    /// root). Returns `(mime, bytes)` or `None` when the plugin has no file
+    /// logo. The path is allow-listed + confined: a hostile `plugin.json`
+    /// can never make this read outside the plugin directory.
+    pub async fn read_plugin_logo(
+        &self,
+        plugin_id: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        let plugin = self
+            .get_plugin(plugin_id)
+            .await
+            .ok_or_else(|| anyhow!("Plugin '{plugin_id}' not found"))?;
+        let Some(logo) = plugin.logo.as_deref() else {
+            return Ok(None);
+        };
+        if plugin.logo_kind.as_deref() != Some("file") {
+            return Ok(None);
+        }
+        let file_name = logo.strip_prefix("file:").unwrap_or(logo);
+        let root = PathBuf::from(&plugin.root_path);
+        let path = crate::branding::confine_logo_path(&root, file_name)?;
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(&path)?;
+        if bytes.len() > crate::branding::MAX_LOGO_BYTES {
+            return Err(anyhow!("Stored logo exceeds the size limit"));
+        }
+        let mime = match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .as_str()
+        {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            "svg" => "image/svg+xml",
+            _ => return Ok(None),
+        };
+        // Re-sniff on read: the file may have been placed by hand
+        // (install-from-directory) rather than through the upload gate.
+        let sniffed_ok = match mime {
+            "image/png" => {
+                bytes.len() > 8 && bytes[..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+            }
+            "image/jpeg" => {
+                bytes.len() > 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF
+            }
+            "image/webp" => {
+                bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
+            }
+            "image/svg+xml" => {
+                let text = String::from_utf8_lossy(&bytes).to_lowercase();
+                text.contains("<svg")
+                    && !text.contains("<script")
+                    && !text.contains("javascript:")
+            }
+            _ => false,
+        };
+        if !sniffed_ok {
+            return Ok(None);
+        }
+        Ok(Some((mime.to_string(), bytes)))
+    }
+
+    /// Encode the stored logo as a `data:` URL (single transport shared by
+    /// Tauri IPC and the JSON REST API).
+    pub async fn read_plugin_logo_data_url(&self, plugin_id: &str) -> Result<Option<String>> {
+        let Some((mime, bytes)) = self.read_plugin_logo(plugin_id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(format!(
+            "data:{mime};base64,{}",
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
+        )))
     }
 
     pub async fn list_marketplace(&self) -> Vec<MarketplacePlugin> {
@@ -1906,4 +2104,273 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Installation depuis un dépôt Git : chemins courts, long paths Windows,
+// clone sparse (fail-fast), timeouts et erreurs formulées pour l'UI.
+// ---------------------------------------------------------------------------
+
+/// Sonde racine : le clone sparse ne matérialise que quelques fichiers.
+const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Matérialisation complète du plugin après validation du manifeste.
+const GIT_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(180);
+/// Préfixe court du dossier temporaire : chaque caractère compte face à la
+/// limite Windows MAX_PATH (260). `aro-plg-<8 hex>` au lieu d'un UUID complet.
+const GIT_CLONE_DIR_PREFIX: &str = "aro-plg-";
+
+/// URL acceptée telle quelle (espaces rognés). Les arguments sont passés à
+/// `git` sans interpréteur de commandes, donc sans risque d'injection ;
+/// on valide ici pour produire une erreur claire et précoce.
+fn validate_git_url(raw: &str) -> Result<String> {
+    let url = raw.trim();
+    if url.is_empty() {
+        return Err(anyhow!("Veuillez renseigner l'URL du dépôt Git."));
+    }
+    let lower = url.to_ascii_lowercase();
+    let supported = lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("git://")
+        || lower.starts_with("ssh://")
+        || lower.starts_with("file://")
+        || lower.starts_with("git@");
+    if !supported {
+        return Err(anyhow!(
+            "URL de dépôt non prise en charge. Utilisez une adresse https:// \
+             (ou git@ / ssh:// / file://) pointant vers le dépôt du plugin."
+        ));
+    }
+    Ok(url.to_string())
+}
+
+/// Dossier temporaire frais au nom court (anti MAX_PATH Windows).
+fn fresh_clone_dir() -> Result<PathBuf> {
+    for _ in 0..8 {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let dir = std::env::temp_dir()
+            .join(format!("{}{}", GIT_CLONE_DIR_PREFIX, &suffix[..8]));
+        if !dir.exists() {
+            return Ok(dir);
+        }
+    }
+    Err(anyhow!(
+        "Impossible de préparer un dossier temporaire pour le clone. \
+         Vérifiez l'espace disque et les droits d'écriture sur le dossier temporaire."
+    ))
+}
+
+/// Exécute `git <args>` avec un délai maximal. Le timeout produit une erreur
+/// formulée pour l'UI ; les autres échecs sont retournés bruts pour
+/// classification par l'appelant.
+async fn run_git(args: &[String], timeout: Duration) -> Result<std::process::Output> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(args);
+    match tokio::time::timeout(timeout, cmd.output()).await {
+        Err(_) => Err(anyhow!(
+            "Le dépôt met trop de temps à répondre (délai de {} s dépassé). \
+             Vérifiez votre connexion puis réessayez ; pour un gros dépôt, \
+             préférez l'onglet « Dossier local » après un clone manuel.",
+            timeout.as_secs()
+        )),
+        Ok(Err(err)) => Err(anyhow!(err).context(
+            "Impossible d'exécuter git. Vérifiez que Git est installé et accessible (commande `git`).",
+        )),
+        Ok(Ok(output)) => Ok(output),
+    }
+}
+
+/// Échec de lancement de git (binaire absent, etc.) déjà formulé par `run_git`.
+fn classify_spawn_failure(message: &str) -> anyhow::Error {
+    anyhow!("{}", message)
+}
+
+/// Le serveur ou le git local refuse `--filter=blob:none` : on retente sans.
+fn mentions_filter_unsupported(stderr: &[u8]) -> bool {
+    let err = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    (err.contains("filter") || err.contains("unknown option") || err.contains("unrecognized"))
+        && (err.contains("not supported")
+            || err.contains("unknown option")
+            || err.contains("unrecognized")
+            || err.contains("not recognized")
+            || err.contains("usage:"))
+}
+
+/// Échec d'une étape git (`clone` ou `checkout`) → erreur FR actionnable.
+/// Ne remonte JAMAIS la progression brute (`Updating files: 42%…`) : seules
+/// les dernières lignes utiles sont conservées pour le diagnostic.
+fn classify_git_failure(stage: &str, stderr: &[u8]) -> anyhow::Error {
+    let raw = String::from_utf8_lossy(stderr);
+    let lower = raw.to_ascii_lowercase();
+
+    if lower.contains("filename too long") || lower.contains("file name too long") {
+        return anyhow!(
+            "Certains chemins de ce dépôt dépassent la limite Windows (260 caractères) \
+             et ne peuvent pas être créés, même avec les chemins longs activés. \
+             Clonez le dépôt vous-même dans un dossier à chemin court (ex. C:\\aro\\plugin), \
+             puis utilisez l'onglet « Dossier local »."
+        );
+    }
+    if lower.contains("repository not found")
+        || lower.contains("not found")
+            && (lower.contains("could not read from remote") || lower.contains("the remote"))
+        || lower.contains("no such repository")
+        || lower.contains("404")
+    {
+        return anyhow!(
+            "Dépôt introuvable. Vérifiez l'URL (faute de frappe, dépôt renommé ou supprimé) ; \
+             s'il est privé, utilisez une URL authentifiée ou l'onglet « Dossier local »."
+        );
+    }
+    if lower.contains("authentication failed")
+        || lower.contains("permission denied (publickey)")
+        || lower.contains("could not read username")
+        || lower.contains("askpass")
+        || lower.contains("401")
+        || lower.contains("403")
+    {
+        return anyhow!(
+            "Accès refusé par le serveur Git. Ce dépôt est probablement privé : \
+             utilisez une URL incluant vos droits d'accès, ou clonez-le vous-même \
+             puis utilisez l'onglet « Dossier local »."
+        );
+    }
+    if lower.contains("could not resolve host")
+        || lower.contains("unable to connect")
+        || lower.contains("connection refused")
+        || lower.contains("connection reset")
+        || lower.contains("network is unreachable")
+        || lower.contains("temporary failure in name resolution")
+    {
+        return anyhow!(
+            "Impossible de joindre le serveur Git. Vérifiez votre connexion réseau \
+             et l'adresse du serveur, puis réessayez."
+        );
+    }
+    if lower.contains("unable to create file") || lower.contains("permission denied") {
+        return anyhow!(
+            "Git n'a pas pu écrire les fichiers du dépôt (étape {stage}). \
+             Vérifiez l'espace disque et les droits d'écriture, puis réessayez. \
+             Détail : {}",
+            short_git_detail(&raw)
+        );
+    }
+    anyhow!(
+        "Le clonage a échoué (étape {stage}). Détail : {}",
+        short_git_detail(&raw)
+    )
+}
+
+/// Dernières lignes utiles de git, sans la progression (`Updating files…`,
+/// `Receiving objects…`, `Resolving deltas…`, `remote: Compressing…`).
+fn short_git_detail(raw: &str) -> String {
+    let noise = [
+        "updating files:",
+        "receiving objects:",
+        "resolving deltas:",
+        "remote: enumerating",
+        "remote: counting",
+        "remote: compressing",
+    ];
+    let mut kept: Vec<&str> = Vec::new();
+    let normalized = raw.replace('\r', "\n");
+    for chunk in normalized.split('\n') {
+        let line = chunk.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let low = line.to_ascii_lowercase();
+        if noise.iter().any(|marker| low.contains(marker)) {
+            continue;
+        }
+        kept.push(line);
+    }
+    let detail = kept
+        .iter()
+        .rev()
+        .take(3)
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" — ");
+    let detail = detail.trim();
+    if detail.is_empty() {
+        return "aucun détail fourni par git.".to_string();
+    }
+    const MAX_CHARS: usize = 300;
+    if detail.chars().count() > MAX_CHARS {
+        format!("{}…", detail.chars().take(MAX_CHARS).collect::<String>())
+    } else {
+        detail.to_string()
+    }
+}
+
+#[cfg(test)]
+mod git_install_tests {
+    use super::*;
+
+    #[test]
+    fn git_urls_are_validated_with_clear_errors() {
+        assert!(validate_git_url("").is_err());
+        assert!(validate_git_url("   ").is_err());
+        assert!(validate_git_url("ftp://example.com/x.git").is_err());
+        assert!(validate_git_url("not a url").is_err());
+        assert_eq!(
+            validate_git_url("  https://github.com/o/p.git  ").unwrap(),
+            "https://github.com/o/p.git"
+        );
+        assert!(validate_git_url("git@github.com:o/p.git").is_ok());
+        assert!(validate_git_url("ssh://git@example.com/o/p.git").is_ok());
+        assert!(validate_git_url("file:///C:/plugins/mon-plugin").is_ok());
+    }
+
+    #[test]
+    fn clone_dirs_use_the_short_prefix() {
+        let dir = fresh_clone_dir().unwrap();
+        let name = dir.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with(GIT_CLONE_DIR_PREFIX));
+        assert!(name.len() < "aro-plugin-clone-00000000-0000-0000-0000-000000000000".len());
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn long_paths_become_an_actionable_french_error() {
+        let err = classify_git_failure(
+            "checkout",
+            b"error: unable to create file some/deep/path.md: Filename too long",
+        );
+        let msg = format!("{err:#}");
+        assert!(msg.contains("260"), "unexpected: {msg}");
+        assert!(msg.contains("Dossier local"), "unexpected: {msg}");
+        assert!(!msg.contains("Updating files"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn missing_repos_and_auth_failures_are_distinct_and_french() {
+        let msg = |bytes: &[u8]| format!("{:#}", classify_git_failure("clone", bytes));
+        assert!(msg(b"ERROR: Repository not found.").contains("introuvable"));
+        assert!(msg(b"fatal: Authentication failed").contains("privé"));
+        assert!(msg(b"fatal: Could not resolve host github.example").contains("réseau"));
+    }
+
+    #[test]
+    fn progress_noise_never_leaks_into_user_errors() {
+        let stderr = b"Cloning into 'x'...\nremote: Enumerating objects: 100\nUpdating files: 47% (2554/5386)\nReceiving objects: 100%\nfatal: unable to checkout working tree";
+        let msg = format!("{:#}", classify_git_failure("checkout", stderr));
+        assert!(!msg.contains("Updating files"), "unexpected: {msg}");
+        assert!(!msg.contains("Receiving objects"), "unexpected: {msg}");
+        assert!(
+            msg.contains("unable to checkout working tree"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn filter_rejection_is_detected_for_retry() {
+        assert!(mentions_filter_unsupported(
+            b"fatal: unknown option `filter'\nusage: git clone ..."
+        ));
+        assert!(!mentions_filter_unsupported(
+            b"ERROR: Repository not found."
+        ));
+    }
 }

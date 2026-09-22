@@ -140,7 +140,7 @@ export class AroApiClient {
         throw err;
       }
 
-      if (this.enableMockFallback) {
+      if (this.enableMockFallback && !/^\/?(?:v1\/)?billing(?:\/|$)/.test(endpoint)) {
         return this.generateMockFallback<T>(endpoint, options);
       }
 

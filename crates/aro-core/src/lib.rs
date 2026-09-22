@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod billing;
 pub mod conversation;
 pub mod email;
 pub mod error;
@@ -8,6 +9,7 @@ pub mod instructions;
 pub mod integration;
 pub mod memory;
 pub mod plan;
+pub mod notification;
 pub mod platform;
 pub mod runtime;
 pub mod settings;
@@ -15,6 +17,7 @@ pub mod tool;
 pub mod voice;
 
 pub use agent::*;
+pub use billing::*;
 pub use conversation::*;
 pub use email::*;
 pub use error::*;
@@ -23,9 +26,11 @@ pub use identity::*;
 pub use instructions::*;
 pub use integration::*;
 pub use memory::*;
+pub use notification::*;
 pub use plan::*;
 pub use platform::*;
 pub use runtime::*;
 pub use settings::*;
 pub use tool::*;
 pub use voice::*;
+

@@ -6,8 +6,8 @@ export interface ParsedThinking {
 }
 
 /**
- * Parses content containing <think>...</think> tags.
- * Works with full content or real-time stream chunks.
+ * Parses content containing one or multiple <think>...</think> tags.
+ * Works seamlessly with full content, multi-turn reasoning loops, and real-time stream chunks.
  */
 export function parseMessageThinking(content: string | undefined | null): ParsedThinking {
   if (!content) {
@@ -19,38 +19,79 @@ export function parseMessageThinking(content: string | undefined | null): Parsed
     };
   }
 
-  const thinkStartTag = "<think>";
-  const thinkEndTag = "</think>";
+  const thinkPairs = [
+    { start: "<think>", end: "</think>" },
+    { start: "<thought>", end: "</thought>" },
+  ];
 
-  const startIdx = content.indexOf(thinkStartTag);
-  if (startIdx !== -1) {
-    const endIdx = content.indexOf(thinkEndTag);
-    if (endIdx !== -1) {
-      const reasoning = content.slice(startIdx + thinkStartTag.length, endIdx).trim();
-      const actualContent = content.slice(endIdx + thinkEndTag.length).trim();
-      return {
-        reasoning,
-        isReasoningComplete: true,
-        actualContent,
-        hasReasoning: reasoning.length > 0,
-      };
-    } else {
-      const reasoning = content.slice(startIdx + thinkStartTag.length).trim();
-      return {
-        reasoning,
-        isReasoningComplete: false,
-        actualContent: "",
-        hasReasoning: reasoning.length > 0,
-      };
+  const thoughts: string[] = [];
+  let cleanContent = "";
+  let isCurrentlyThinking = false;
+  let cursor = 0;
+
+  while (cursor < content.length) {
+    // Find the earliest starting tag among supported pairs
+    let earliestStart = -1;
+    let activePair = thinkPairs[0];
+
+    for (const pair of thinkPairs) {
+      const idx = content.indexOf(pair.start, cursor);
+      if (idx !== -1 && (earliestStart === -1 || idx < earliestStart)) {
+        earliestStart = idx;
+        activePair = pair;
+      }
     }
+
+    if (earliestStart === -1) {
+      // No more think tags in remaining content
+      cleanContent += content.slice(cursor);
+      break;
+    }
+
+    // Append any text before this thinking block to cleanContent
+    cleanContent += content.slice(cursor, earliestStart);
+
+    // Look for matching closing tag
+    const endIdx = content.indexOf(activePair.end, earliestStart + activePair.start.length);
+    if (endIdx === -1) {
+      // Unclosed thinking tag: model is still actively streaming reasoning
+      const unclosedThought = content.slice(earliestStart + activePair.start.length).trim();
+      if (unclosedThought) {
+        thoughts.push(unclosedThought);
+      }
+      isCurrentlyThinking = true;
+      cursor = content.length;
+      break;
+    }
+
+    // Completed thinking block
+    const thought = content.slice(earliestStart + activePair.start.length, endIdx).trim();
+    if (thought) {
+      thoughts.push(thought);
+    }
+    cursor = endIdx + activePair.end.length;
   }
 
-  // Fallback: If no explicit tags but the message starts with a reasoning block
-  // (e.g. if the model started thinking without emitting the tag or it was stripped)
+  // Sanitize actualContent: remove any stray/unmatched closing or opening tags
+  let actualContent = cleanContent
+    .replace(/<\/think>/gi, "")
+    .replace(/<think>/gi, "")
+    .replace(/<\/thought>/gi, "")
+    .replace(/<thought>/gi, "")
+    .trim();
+
+  const reasoning = thoughts.join("\n\n").trim();
+
+  // Guard against models that accidentally output their thought as content
+  if (actualContent && reasoning && (actualContent === reasoning || thoughts.includes(actualContent))) {
+    actualContent = "";
+  }
+
+  const hasReasoning = reasoning.length > 0;
   return {
-    reasoning: "",
-    isReasoningComplete: false,
-    actualContent: content,
-    hasReasoning: false,
+    reasoning,
+    isReasoningComplete: hasReasoning ? !isCurrentlyThinking : false,
+    actualContent,
+    hasReasoning,
   };
 }

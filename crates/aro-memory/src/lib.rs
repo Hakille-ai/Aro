@@ -5,9 +5,11 @@ use aro_core::{
     AgentArtifact, AgentContextItem, AgentLane, AgentLaneStatus, AgentLaneView, AgentRun,
     AgentRunPriority, AgentRunStatus, AgentStep, AgentStepKind, AgentStepStatus, AroError,
     AroResult, AssistantMode, ChatMessage, ContextSource, Conversation, Episode, Folder,
-    LongTermMemory, MemoryEntry, MessageRole, PermissionProfile, Plan, Project,
-    MEMORY_STATUS_APPROVED,
+    LongTermMemory, MemoryEntry, MessageRole, NotificationFilter, NotificationItem,
+    NotificationKind, NotificationPriority, NotificationSource, NotificationStatus,
+    PermissionProfile, Plan, Project, MEMORY_STATUS_APPROVED,
 };
+
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use uuid::Uuid;
@@ -57,7 +59,8 @@ impl SqliteMemoryStore {
               color TEXT NOT NULL DEFAULT '#3b82f6',
               icon TEXT NOT NULL DEFAULT 'folder-tree',
               created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
+              updated_at TEXT NOT NULL,
+              organization_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS folders (
@@ -68,7 +71,8 @@ impl SqliteMemoryStore {
               color TEXT,
               icon TEXT NOT NULL DEFAULT 'folder',
               created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
+              updated_at TEXT NOT NULL,
+              organization_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS conversations (
@@ -209,9 +213,35 @@ impl SqliteMemoryStore {
               deleted_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS notifications (
+              id TEXT PRIMARY KEY,
+              organization_id TEXT,
+              user_id TEXT,
+              title TEXT NOT NULL,
+              body TEXT NOT NULL,
+              kind TEXT NOT NULL DEFAULT 'info',
+              priority TEXT NOT NULL DEFAULT 'normal',
+              status TEXT NOT NULL DEFAULT 'unread',
+              source TEXT NOT NULL DEFAULT 'system',
+              action_url TEXT,
+              metadata TEXT,
+              created_at TEXT NOT NULL,
+              read_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_notifications_status
+              ON notifications(status);
+
+            CREATE INDEX IF NOT EXISTS idx_notifications_created
+              ON notifications(created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_notifications_org
+              ON notifications(organization_id, created_at DESC);
+
             CREATE TABLE IF NOT EXISTS episodes (
               id TEXT PRIMARY KEY,
               conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+
               turn_start INTEGER NOT NULL,
               turn_end INTEGER NOT NULL,
               summary TEXT NOT NULL,
@@ -309,6 +339,15 @@ impl SqliteMemoryStore {
         let _ = conn.execute("ALTER TABLE projects ADD COLUMN root_path TEXT;", []);
         let _ = conn.execute("ALTER TABLE folders ADD COLUMN root_path TEXT;", []);
         let _ = conn.execute("ALTER TABLE conversations ADD COLUMN root_path TEXT;", []);
+        let _ = conn.execute("ALTER TABLE projects ADD COLUMN organization_id TEXT;", []);
+        let _ = conn.execute("ALTER TABLE folders ADD COLUMN organization_id TEXT;", []);
+
+        let _ = conn.execute_batch(
+            r#"
+            DELETE FROM agent_runs WHERE conversation_id IS NOT NULL AND autonomy_profile_id IS NULL;
+            DELETE FROM agent_lanes WHERE conversation_id IS NOT NULL AND id NOT IN (SELECT DISTINCT lane_id FROM agent_runs WHERE lane_id IS NOT NULL);
+            "#,
+        );
 
         conn.execute_batch(
             r#"
@@ -474,7 +513,7 @@ impl SqliteMemoryStore {
     pub fn list_projects(&self) -> AroResult<Vec<Project>> {
         let conn = self.connect()?;
         let mut stmt = conn
-            .prepare("SELECT id, name, description, instructions, root_path, color, icon, created_at, updated_at FROM projects ORDER BY updated_at DESC")
+            .prepare("SELECT id, name, description, instructions, root_path, color, icon, created_at, updated_at, organization_id FROM projects ORDER BY updated_at DESC")
             .map_err(|err| AroError::Memory(err.to_string()))?;
         let rows = stmt
             .query_map([], map_project)
@@ -487,8 +526,8 @@ impl SqliteMemoryStore {
         let conn = self.connect()?;
         conn.execute(
             r#"
-            INSERT INTO projects (id, name, description, instructions, root_path, color, icon, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            INSERT INTO projects (id, name, description, instructions, root_path, color, icon, created_at, updated_at, organization_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(id) DO UPDATE SET
               name = excluded.name,
               description = excluded.description,
@@ -496,7 +535,8 @@ impl SqliteMemoryStore {
               root_path = excluded.root_path,
               color = excluded.color,
               icon = excluded.icon,
-              updated_at = excluded.updated_at
+              updated_at = excluded.updated_at,
+              organization_id = excluded.organization_id
             "#,
             params![
                 project.id.to_string(),
@@ -508,6 +548,7 @@ impl SqliteMemoryStore {
                 project.icon,
                 project.created_at.to_rfc3339(),
                 project.updated_at.to_rfc3339(),
+                project.organization_id,
             ],
         )
         .map_err(|err| AroError::Memory(err.to_string()))?;
@@ -548,7 +589,7 @@ impl SqliteMemoryStore {
     pub fn list_folders(&self) -> AroResult<Vec<Folder>> {
         let conn = self.connect()?;
         let mut stmt = conn
-            .prepare("SELECT id, project_id, name, root_path, color, icon, created_at, updated_at FROM folders ORDER BY updated_at DESC")
+            .prepare("SELECT id, project_id, name, root_path, color, icon, created_at, updated_at, organization_id FROM folders ORDER BY updated_at DESC")
             .map_err(|err| AroError::Memory(err.to_string()))?;
         let rows = stmt
             .query_map([], map_folder)
@@ -561,15 +602,16 @@ impl SqliteMemoryStore {
         let conn = self.connect()?;
         conn.execute(
             r#"
-            INSERT INTO folders (id, project_id, name, root_path, color, icon, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            INSERT INTO folders (id, project_id, name, root_path, color, icon, created_at, updated_at, organization_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(id) DO UPDATE SET
               project_id = excluded.project_id,
               name = excluded.name,
               root_path = excluded.root_path,
               color = excluded.color,
               icon = excluded.icon,
-              updated_at = excluded.updated_at
+              updated_at = excluded.updated_at,
+              organization_id = excluded.organization_id
             "#,
             params![
                 folder.id.to_string(),
@@ -580,6 +622,7 @@ impl SqliteMemoryStore {
                 folder.icon,
                 folder.created_at.to_rfc3339(),
                 folder.updated_at.to_rfc3339(),
+                folder.organization_id,
             ],
         )
         .map_err(|err| AroError::Memory(err.to_string()))?;
@@ -680,11 +723,12 @@ impl SqliteMemoryStore {
             std::collections::HashMap::new();
         for p in projects {
             let key = format!(
-                "{}\n{}\n{}\n{}",
+                "{}\n{}\n{}\n{}\n{:?}",
                 p.name.trim().to_lowercase(),
                 p.root_path.clone().unwrap_or_default(),
                 p.description.clone().unwrap_or_default(),
-                p.instructions.clone().unwrap_or_default()
+                p.instructions.clone().unwrap_or_default(),
+                p.organization_id
             );
             groups.entry(key).or_default().push(p);
         }
@@ -740,10 +784,11 @@ impl SqliteMemoryStore {
             std::collections::HashMap::new();
         for f in folders {
             let key = format!(
-                "{}\n{}\n{}",
+                "{}\n{}\n{}\n{:?}",
                 f.project_id.map(|id| id.to_string()).unwrap_or_default(),
                 f.name.trim().to_lowercase(),
-                f.root_path.clone().unwrap_or_default()
+                f.root_path.clone().unwrap_or_default(),
+                f.organization_id
             );
             groups.entry(key).or_default().push(f);
         }
@@ -1709,6 +1754,7 @@ impl SqliteMemoryStore {
                        autonomy_profile_id, checkpoint_summary, last_error, created_at, updated_at,
                        heartbeat_at, completed_at
                 FROM agent_runs
+                WHERE conversation_id IS NULL OR autonomy_profile_id IS NOT NULL
                 ORDER BY updated_at DESC
                 "#,
             )
@@ -1733,7 +1779,7 @@ impl SqliteMemoryStore {
                        autonomy_profile_id, checkpoint_summary, last_error, created_at, updated_at,
                        heartbeat_at, completed_at
                 FROM agent_runs
-                WHERE lane_id = ?1
+                WHERE lane_id = ?1 AND (conversation_id IS NULL OR autonomy_profile_id IS NOT NULL)
                 ORDER BY updated_at DESC
                 LIMIT ?2
                 "#,
@@ -1752,7 +1798,7 @@ impl SqliteMemoryStore {
             serde_json::to_string(&status).map_err(|err| AroError::Memory(err.to_string()))?;
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM agent_runs WHERE status = ?1",
+                "SELECT COUNT(*) FROM agent_runs WHERE status = ?1 AND (conversation_id IS NULL OR autonomy_profile_id IS NOT NULL)",
                 params![status_json],
                 |row| row.get(0),
             )
@@ -1766,7 +1812,7 @@ impl SqliteMemoryStore {
             serde_json::to_string(&status).map_err(|err| AroError::Memory(err.to_string()))?;
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM agent_runs WHERE lane_id = ?1 AND status = ?2",
+                "SELECT COUNT(*) FROM agent_runs WHERE lane_id = ?1 AND status = ?2 AND (conversation_id IS NULL OR autonomy_profile_id IS NOT NULL)",
                 params![lane_id.to_string(), status_json],
                 |row| row.get(0),
             )
@@ -1813,6 +1859,32 @@ impl SqliteMemoryStore {
         }
         self.upsert_agent_run(&run)?;
         Ok(Some(run))
+    }
+
+    pub fn delete_agent_run(&self, run_id: Uuid) -> AroResult<()> {
+        let conn = self.connect()?;
+        conn.execute("PRAGMA foreign_keys = ON;", [])
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        conn.execute(
+            "DELETE FROM agent_steps WHERE run_id = ?1",
+            params![run_id.to_string()],
+        )
+        .map_err(|err| AroError::Memory(err.to_string()))?;
+        conn.execute(
+            "DELETE FROM agent_artifacts WHERE run_id = ?1",
+            params![run_id.to_string()],
+        )
+        .map_err(|err| AroError::Memory(err.to_string()))?;
+        let _ = conn.execute(
+            "DELETE FROM agent_context_items WHERE run_id = ?1",
+            params![run_id.to_string()],
+        );
+        conn.execute(
+            "DELETE FROM agent_runs WHERE id = ?1",
+            params![run_id.to_string()],
+        )
+        .map_err(|err| AroError::Memory(err.to_string()))?;
+        Ok(())
     }
 
     pub fn add_agent_step(&self, step: &AgentStep) -> AroResult<()> {
@@ -2107,7 +2179,182 @@ impl SqliteMemoryStore {
             Ok(None)
         }
     }
+
+    pub fn create_notification(&self, item: &NotificationItem) -> AroResult<NotificationItem> {
+        let conn = self.connect()?;
+        let metadata_str = item.metadata.as_ref().map(|v| v.to_string());
+        conn.execute(
+            r#"
+            INSERT INTO notifications (
+                id, organization_id, user_id, title, body, kind, priority, status,
+                source, action_url, metadata, created_at, read_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "#,
+            params![
+                item.id,
+                item.organization_id.map(|id| id.to_string()),
+                item.user_id.map(|id| id.to_string()),
+                item.title,
+                item.body,
+                item.kind.as_str(),
+                item.priority.as_str(),
+                item.status.as_str(),
+                item.source.as_str(),
+                item.action_url,
+                metadata_str,
+                item.created_at.to_rfc3339(),
+                item.read_at.map(|d| d.to_rfc3339()),
+            ],
+        )
+        .map_err(|err| AroError::Memory(err.to_string()))?;
+        Ok(item.clone())
+    }
+
+    pub fn list_notifications(
+        &self,
+        filter: &NotificationFilter,
+    ) -> AroResult<Vec<NotificationItem>> {
+        let conn = self.connect()?;
+        let mut query = String::from(
+            r#"
+            SELECT id, organization_id, user_id, title, body, kind, priority, status,
+                   source, action_url, metadata, created_at, read_at
+            FROM notifications
+            WHERE 1=1
+            "#,
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(status) = filter.status {
+            query.push_str(" AND status = ?");
+            params_vec.push(Box::new(status.as_str().to_string()));
+        }
+        if let Some(kind) = filter.kind {
+            query.push_str(" AND kind = ?");
+            params_vec.push(Box::new(kind.as_str().to_string()));
+        }
+        if let Some(source) = filter.source {
+            query.push_str(" AND source = ?");
+            params_vec.push(Box::new(source.as_str().to_string()));
+        }
+        if let Some(org_id) = filter.organization_id {
+            query.push_str(" AND organization_id = ?");
+            params_vec.push(Box::new(org_id.to_string()));
+        } else if filter.personal_only == Some(true) {
+            query.push_str(" AND organization_id IS NULL");
+        }
+        if let Some(search) = &filter.search {
+            let pattern = format!("%{}%", search.trim());
+            query.push_str(" AND (title LIKE ? OR body LIKE ?)");
+            params_vec.push(Box::new(pattern.clone()));
+            params_vec.push(Box::new(pattern));
+        }
+
+        query.push_str(" ORDER BY created_at DESC");
+
+        if let Some(limit) = filter.limit {
+            query.push_str(&format!(" LIMIT {limit}"));
+            if let Some(offset) = filter.offset {
+                query.push_str(&format!(" OFFSET {offset}"));
+            }
+        }
+
+        let mut stmt = conn
+            .prepare(&query)
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        let params_slice: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let rows = stmt
+            .query_map(params_slice.as_slice(), map_notification)
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| AroError::Memory(err.to_string()))
+    }
+
+    pub fn get_unread_notification_count(
+        &self,
+        organization_id: Option<Uuid>,
+    ) -> AroResult<u64> {
+        let conn = self.connect()?;
+        let count: i64 = if let Some(org_id) = organization_id {
+            conn.query_row(
+                "SELECT COUNT(*) FROM notifications WHERE status = 'unread' AND organization_id = ?1",
+                params![org_id.to_string()],
+                |row| row.get(0),
+            )
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*) FROM notifications WHERE status = 'unread' AND organization_id IS NULL",
+                [],
+                |row| row.get(0),
+            )
+        }
+        .map_err(|err| AroError::Memory(err.to_string()))?;
+        Ok(count.max(0) as u64)
+    }
+
+    pub fn mark_notification_as_read(&self, id: &str) -> AroResult<bool> {
+        let conn = self.connect()?;
+        let now = Utc::now().to_rfc3339();
+        let affected = conn
+            .execute(
+                "UPDATE notifications SET status = 'read', read_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        Ok(affected > 0)
+    }
+
+    pub fn mark_all_notifications_as_read(
+        &self,
+        organization_id: Option<Uuid>,
+    ) -> AroResult<u64> {
+        let conn = self.connect()?;
+        let now = Utc::now().to_rfc3339();
+        let affected = if let Some(org_id) = organization_id {
+            conn.execute(
+                "UPDATE notifications SET status = 'read', read_at = ?1 WHERE status = 'unread' AND organization_id = ?2",
+                params![now, org_id.to_string()],
+            )
+        } else {
+            conn.execute(
+                "UPDATE notifications SET status = 'read', read_at = ?1 WHERE status = 'unread' AND organization_id IS NULL",
+                params![now],
+            )
+        }
+        .map_err(|err| AroError::Memory(err.to_string()))?;
+        Ok(affected as u64)
+    }
+
+    pub fn delete_notification(&self, id: &str) -> AroResult<bool> {
+        let conn = self.connect()?;
+        let affected = conn
+            .execute("DELETE FROM notifications WHERE id = ?1", params![id])
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        Ok(affected > 0)
+    }
+
+    pub fn clear_all_notifications(
+        &self,
+        organization_id: Option<Uuid>,
+    ) -> AroResult<u64> {
+        let conn = self.connect()?;
+        let affected = if let Some(org_id) = organization_id {
+            conn.execute(
+                "DELETE FROM notifications WHERE organization_id = ?1",
+                params![org_id.to_string()],
+            )
+        } else {
+            conn.execute("DELETE FROM notifications WHERE organization_id IS NULL", [])
+        }
+        .map_err(|err| AroError::Memory(err.to_string()))?;
+        Ok(affected as u64)
+    }
 }
+
 
 fn map_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<Plan> {
     let id_str: String = row.get(0)?;
@@ -2139,6 +2386,76 @@ fn map_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<Plan> {
         updated_at,
     })
 }
+
+fn map_notification(row: &rusqlite::Row<'_>) -> rusqlite::Result<NotificationItem> {
+    let id: String = row.get(0)?;
+    let org_id_str: Option<String> = row.get(1)?;
+    let user_id_str: Option<String> = row.get(2)?;
+    let title: String = row.get(3)?;
+    let body: String = row.get(4)?;
+    let kind_str: String = row.get(5)?;
+    let priority_str: String = row.get(6)?;
+    let status_str: String = row.get(7)?;
+    let source_str: String = row.get(8)?;
+    let action_url: Option<String> = row.get(9)?;
+    let metadata_str: Option<String> = row.get(10)?;
+    let created_at = parse_datetime(row.get(11)?)?;
+    let read_at_str: Option<String> = row.get(12)?;
+    let read_at = read_at_str.and_then(|s| {
+        DateTime::parse_from_rfc3339(&s)
+            .ok()
+            .map(|d| d.with_timezone(&Utc))
+    });
+
+    let kind = match kind_str.as_str() {
+        "success" => NotificationKind::Success,
+        "warning" => NotificationKind::Warning,
+        "error" => NotificationKind::Error,
+        "agent-completion" | "agent_completion" => NotificationKind::AgentCompletion,
+        "routine" => NotificationKind::Routine,
+        "security" => NotificationKind::Security,
+        _ => NotificationKind::Info,
+    };
+
+    let priority = match priority_str.as_str() {
+        "low" => NotificationPriority::Low,
+        "high" => NotificationPriority::High,
+        "urgent" => NotificationPriority::Urgent,
+        _ => NotificationPriority::Normal,
+    };
+
+    let status = match status_str.as_str() {
+        "read" => NotificationStatus::Read,
+        "archived" => NotificationStatus::Archived,
+        _ => NotificationStatus::Unread,
+    };
+
+    let source = match source_str.as_str() {
+        "agent" => NotificationSource::Agent,
+        "routine" => NotificationSource::Routine,
+        "cloud" => NotificationSource::Cloud,
+        _ => NotificationSource::System,
+    };
+
+    let metadata = metadata_str.and_then(|s| serde_json::from_str(&s).ok());
+
+    Ok(NotificationItem {
+        id,
+        organization_id: org_id_str.and_then(|s| Uuid::parse_str(&s).ok()),
+        user_id: user_id_str.and_then(|s| Uuid::parse_str(&s).ok()),
+        title,
+        body,
+        kind,
+        priority,
+        status,
+        source,
+        action_url,
+        metadata,
+        created_at,
+        read_at,
+    })
+}
+
 
 fn parse_datetime(value: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&value)
@@ -2182,6 +2499,7 @@ fn map_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         icon: row.get(6)?,
         created_at: parse_datetime(row.get(7)?)?,
         updated_at: parse_datetime(row.get(8)?)?,
+        organization_id: row.get(9).ok(),
     })
 }
 
@@ -2198,6 +2516,7 @@ fn map_folder(row: &rusqlite::Row<'_>) -> rusqlite::Result<Folder> {
         icon: row.get(5)?,
         created_at: parse_datetime(row.get(6)?)?,
         updated_at: parse_datetime(row.get(7)?)?,
+        organization_id: row.get(8).ok(),
     })
 }
 
@@ -2797,6 +3116,11 @@ mod tests {
             1
         );
 
+        store.delete_agent_run(run.id).expect("delete run");
+        assert_eq!(store.list_agent_runs().expect("runs").len(), 0);
+        assert_eq!(store.list_agent_steps(run.id).expect("steps").len(), 0);
+        assert_eq!(store.list_agent_artifacts(run.id).expect("artifacts").len(), 0);
+
         let _ = std::fs::remove_file(path);
     }
 
@@ -2874,11 +3198,13 @@ mod tests {
             icon: "folder-tree".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            organization_id: Some("org-alpha".to_string()),
         };
         store.save_project(&project).expect("save project");
         let projects = store.list_projects().expect("list projects");
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "Test Project");
+        assert_eq!(projects[0].organization_id.as_deref(), Some("org-alpha"));
 
         let folder = Folder {
             id: Uuid::new_v4(),
@@ -2889,11 +3215,13 @@ mod tests {
             icon: "folder".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            organization_id: Some("org-alpha".to_string()),
         };
         store.save_folder(&folder).expect("save folder");
         let folders = store.list_folders().expect("list folders");
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].name, "Subfolder");
+        assert_eq!(folders[0].organization_id.as_deref(), Some("org-alpha"));
 
         let conv = store
             .create_conversation("Project Chat", AssistantMode::Chat, None, None)
@@ -2918,6 +3246,7 @@ mod tests {
             icon: "folder-tree".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            organization_id: None,
         }
     }
 
@@ -2998,6 +3327,7 @@ mod tests {
             icon: "folder".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            organization_id: None,
         };
         store.save_project(&project).expect("save project");
         let folder = Folder {
@@ -3009,6 +3339,7 @@ mod tests {
             icon: "folder".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            organization_id: None,
         };
         store.save_folder(&folder).expect("save folder");
         let conv = store
@@ -3390,4 +3721,151 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn test_notification_sqlite_lifecycle() {
+        let db_path = std::env::temp_dir().join(format!("aro-notif-test-{}.sqlite", Uuid::new_v4()));
+        let store = SqliteMemoryStore::new(&db_path).expect("create store");
+
+
+        let org_id = Uuid::new_v4();
+
+        // 1. Initially empty
+        let initial_count = store
+            .get_unread_notification_count(Some(org_id))
+            .expect("count");
+        assert_eq!(initial_count, 0);
+
+        // 2. Create 2 notifications
+        let mut notif1 = NotificationItem::new(
+            "Agent Finished",
+            "Data analysis completed",
+            NotificationKind::AgentCompletion,
+            NotificationSource::Agent,
+        );
+        notif1.organization_id = Some(org_id);
+        store.create_notification(&notif1).expect("create 1");
+
+        let mut notif2 = NotificationItem::new(
+            "Routine Triggered",
+            "Morning health check passed",
+            NotificationKind::Routine,
+            NotificationSource::Routine,
+        );
+        notif2.organization_id = Some(org_id);
+        store.create_notification(&notif2).expect("create 2");
+
+        // 3. Count unread
+        let unread = store
+            .get_unread_notification_count(Some(org_id))
+            .expect("unread count");
+        assert_eq!(unread, 2);
+
+        // 4. List with filter
+        let list_all = store
+            .list_notifications(&NotificationFilter {
+                organization_id: Some(org_id),
+                ..Default::default()
+            })
+            .expect("list");
+        assert_eq!(list_all.len(), 2);
+
+        let list_agent = store
+            .list_notifications(&NotificationFilter {
+                kind: Some(NotificationKind::AgentCompletion),
+                organization_id: Some(org_id),
+                ..Default::default()
+            })
+            .expect("list agent");
+        assert_eq!(list_agent.len(), 1);
+        assert_eq!(list_agent[0].title, "Agent Finished");
+
+        // 5. Mark 1 as read
+        assert!(store.mark_notification_as_read(&notif1.id).expect("mark read"));
+        let unread_after = store
+            .get_unread_notification_count(Some(org_id))
+            .expect("count after 1 read");
+        assert_eq!(unread_after, 1);
+
+        // 6. Mark all as read
+        let marked = store
+            .mark_all_notifications_as_read(Some(org_id))
+            .expect("mark all read");
+        assert_eq!(marked, 1);
+        assert_eq!(
+            store
+                .get_unread_notification_count(Some(org_id))
+                .expect("count"),
+            0
+        );
+
+        // 7. Clear all
+        let cleared = store
+            .clear_all_notifications(Some(org_id))
+            .expect("clear all");
+        assert_eq!(cleared, 2);
+
+        let list_empty = store
+            .list_notifications(&NotificationFilter {
+                organization_id: Some(org_id),
+                ..Default::default()
+            })
+            .expect("list empty");
+        assert_eq!(list_empty.len(), 0);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn test_notification_personal_vs_org_scoping() {
+        let db_path = std::env::temp_dir().join(format!("test_notif_scoping_{}.sqlite", Uuid::new_v4()));
+        let store = SqliteMemoryStore::new(&db_path).expect("store init");
+        let org_id = Uuid::new_v4();
+
+        // 1. Personal notification (organization_id is None)
+        let mut personal_notif = NotificationItem::new(
+            "Personal Task Done",
+            "Local indexing complete",
+            NotificationKind::Success,
+            NotificationSource::System,
+        );
+        personal_notif.organization_id = None;
+        store.create_notification(&personal_notif).expect("create personal");
+
+        // 2. Org notification (organization_id is Some)
+        let mut org_notif = NotificationItem::new(
+            "Team Sprint Review",
+            "Sprint plan updated",
+            NotificationKind::Info,
+            NotificationSource::Agent,
+        );
+        org_notif.organization_id = Some(org_id);
+        store.create_notification(&org_notif).expect("create org");
+
+        // 3. Counts must be strictly isolated
+        let personal_count = store.get_unread_notification_count(None).expect("personal unread");
+        let org_count = store.get_unread_notification_count(Some(org_id)).expect("org unread");
+        assert_eq!(personal_count, 1);
+        assert_eq!(org_count, 1);
+
+        // 4. Listing with personal_only must only return personal notification
+        let personal_list = store
+            .list_notifications(&NotificationFilter {
+                personal_only: Some(true),
+                ..Default::default()
+            })
+            .expect("list personal");
+        assert_eq!(personal_list.len(), 1);
+        assert_eq!(personal_list[0].id, personal_notif.id);
+
+        // 5. Clearing personal must not delete organization notification
+        let cleared_personal = store.clear_all_notifications(None).expect("clear personal");
+        assert_eq!(cleared_personal, 1);
+        assert_eq!(store.get_unread_notification_count(None).expect("personal empty"), 0);
+        assert_eq!(store.get_unread_notification_count(Some(org_id)).expect("org still intact"), 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
 }
+
+
+

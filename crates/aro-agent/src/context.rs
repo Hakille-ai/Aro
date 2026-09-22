@@ -68,7 +68,7 @@ pub fn render_composite_system_prompt(
             "Response contract:\n- Answer the user directly in natural text.\n- Do not wrap the answer in JSON.\n- Use Markdown only when it improves readability.\n- Cite source IDs only when context sources materially affect the answer."
         }
         ModelResponseFormat::AgentActionJson => {
-            "Response contract:\nReturn exactly one JSON object and no markdown. Use {\"type\":\"final\",\"content\":\"...\"} when answering the user, {\"type\":\"tool\",\"toolId\":\"core.search.web\",\"input\":{\"query\":\"...\"},\"reason\":\"...\"} or another listed tool when external, current, file, or page context is required, or {\"type\":\"pause\",\"reason\":\"...\"} when user input is required. For URLs the user provides, prefer core.web.page.read. Cite source IDs in final content when context sources matter."
+            "Response contract:\nReturn exactly one JSON object and no markdown. Use {\"type\":\"final\",\"content\":\"...\"} when answering the user, {\"type\":\"tool\",\"toolId\":\"core.search.web\",\"input\":{\"query\":\"...\"},\"reason\":\"...\"} or another listed tool when external, current, file, or page context is required, or {\"type\":\"pause\",\"reason\":\"...\"} when user input is required. For URLs the user provides, prefer core.web.page.read. Cite source IDs in final content when context sources matter. If you reason inside <think>...</think> tags, you must always output your final answer or JSON action after </think>."
         }
     };
 

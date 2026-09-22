@@ -45,6 +45,7 @@ pub enum RateLimitClass {
     AuthSession,
     Assistant,
     Write,
+    ClientState,
 }
 
 impl RateLimitClass {
@@ -54,6 +55,7 @@ impl RateLimitClass {
             Self::AuthSession => "auth-session",
             Self::Assistant => "assistant",
             Self::Write => "write",
+            Self::ClientState => "client-state",
         }
     }
 }
@@ -76,6 +78,7 @@ pub struct RateLimitConfig {
     pub auth_per_minute: u32,
     pub write_per_minute: u32,
     pub assistant_per_minute: u32,
+    pub client_state_per_minute: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -117,8 +120,9 @@ impl RedisServices {
         let rate_limits = RateLimitConfig {
             enabled: env_bool("ARO_RATE_LIMIT_ENABLED").unwrap_or(configured.is_some()),
             auth_per_minute: env_u32("ARO_RATE_LIMIT_AUTH_PER_MINUTE", 10),
-            write_per_minute: env_u32("ARO_RATE_LIMIT_WRITE_PER_MINUTE", 120),
+            write_per_minute: env_u32("ARO_RATE_LIMIT_WRITE_PER_MINUTE", 300),
             assistant_per_minute: env_u32("ARO_RATE_LIMIT_ASSISTANT_PER_MINUTE", 30),
+            client_state_per_minute: env_u32("ARO_RATE_LIMIT_CLIENT_STATE_PER_MINUTE", 1200),
         };
         let outbox = OutboxStreamConfig {
             enabled: env_bool("ARO_OUTBOX_STREAM_ENABLED").unwrap_or(true),
@@ -133,19 +137,38 @@ impl RedisServices {
 
         let client = match configured.as_deref() {
             Some(url) => {
-                let client = ::redis::Client::open(url).map_err(map_redis_config)?;
-                let manager = client
-                    .get_connection_manager()
-                    .await
-                    .map_err(map_redis_runtime)?;
-                let services = Self {
-                    client: Some(manager),
-                    config: RedisConfig { key_prefix },
-                    rate_limits,
-                    outbox,
-                };
-                services.ping().await?;
-                return Ok(services);
+                let connected = async {
+                    let client = ::redis::Client::open(url).map_err(map_redis_config)?;
+                    let manager = client
+                        .get_connection_manager()
+                        .await
+                        .map_err(map_redis_runtime)?;
+                    let services = Self {
+                        client: Some(manager),
+                        config: RedisConfig {
+                            key_prefix: key_prefix.clone(),
+                        },
+                        rate_limits: rate_limits.clone(),
+                        outbox: outbox.clone(),
+                    };
+                    services.ping().await?;
+                    Ok::<Self, AroError>(services)
+                }
+                .await;
+                match connected {
+                    Ok(services) => return Ok(services),
+                    Err(error) if deployment.environment == "production" => return Err(error),
+                    Err(error) => {
+                        // Hors production, on ne bloque pas le démarrage si Redis est
+                        // temporairement injoignable (ex: `docker compose` non démarré).
+                        // Le rate limiting est coupé et le middleware devient fail-open.
+                        tracing::warn!(
+                            %error,
+                            "Redis is unreachable at startup; continuing without Redis (rate limiting off, locks are no-ops)"
+                        );
+                        None
+                    }
+                }
             }
             None => None,
         };
@@ -180,8 +203,9 @@ impl RedisServices {
             rate_limits: RateLimitConfig {
                 enabled: false,
                 auth_per_minute: 10,
-                write_per_minute: 120,
+                write_per_minute: 300,
                 assistant_per_minute: 30,
+                client_state_per_minute: 1200,
             },
             outbox: OutboxStreamConfig {
                 enabled: true,
@@ -352,6 +376,7 @@ impl RedisServices {
             RateLimitClass::AuthSession => AUTH_SESSION_LIMIT_PER_MINUTE,
             RateLimitClass::Assistant => self.rate_limits.assistant_per_minute,
             RateLimitClass::Write => self.rate_limits.write_per_minute,
+            RateLimitClass::ClientState => self.rate_limits.client_state_per_minute,
         }
         .max(1)
     }
@@ -439,6 +464,9 @@ pub fn classify_rate_limit(method: &Method, path: &str) -> Option<RateLimitClass
     }
     if path.starts_with("/assistant/") {
         return Some(RateLimitClass::Assistant);
+    }
+    if path.starts_with("/client-state/") {
+        return Some(RateLimitClass::ClientState);
     }
     if matches!(
         *method,
@@ -542,6 +570,14 @@ mod tests {
         assert_eq!(
             classify_rate_limit(&Method::POST, "/v11/auth/login"),
             Some(RateLimitClass::Write)
+        );
+        assert_eq!(
+            classify_rate_limit(&Method::PUT, "/client-state/aro-theme"),
+            Some(RateLimitClass::ClientState)
+        );
+        assert_eq!(
+            classify_rate_limit(&Method::DELETE, "/v1/client-state/aro-tabs"),
+            Some(RateLimitClass::ClientState)
         );
         assert_eq!(
             classify_rate_limit(&Method::PATCH, "/settings"),

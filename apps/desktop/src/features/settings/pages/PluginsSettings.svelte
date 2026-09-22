@@ -18,6 +18,15 @@
   import Wrench from "@lucide/svelte/icons/wrench";
   import X from "@lucide/svelte/icons/x";
   import Globe from "@lucide/svelte/icons/globe";
+  import BrandLogo from "../../../lib/BrandLogo.svelte";
+  import {
+    LOGO_COLOR_PRESETS,
+    LOGO_EMOJI_PRESETS,
+    evictFileLogo,
+    isValidPluginSlug,
+    readFileAsDataUrl,
+    validateLogoUpload,
+  } from "../../../lib/brandLogos";
   import Key from "@lucide/svelte/icons/key";
   import Shield from "@lucide/svelte/icons/shield";
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
@@ -90,6 +99,55 @@
   let addMethod: "marketplace" | "git" | "local" | "custom" = "marketplace";
   let customSourceTarget = "";
   let customSkillInstructions = "Step 1: Analyze user request.\nStep 2: Execute task.\nStep 3: Report results cleanly.";
+  // Custom-plugin branding (persisted into extensions["com.aro.client"]).
+  let customLogoEmoji = "🚀";
+  let customBrandColor = "#0A84FF";
+  let customLogoDataUrl: string | null = null;
+  let customLogoFileName: string | null = null;
+  let customLogoError: string | null = null;
+  let customLogoReading = false;
+  let customLogoFileInput: HTMLInputElement | null = null;
+
+  function resetCustomBranding() {
+    customLogoEmoji = "🚀";
+    customBrandColor = "#0A84FF";
+    customLogoDataUrl = null;
+    customLogoFileName = null;
+    customLogoError = null;
+    if (customLogoFileInput) customLogoFileInput.value = "";
+  }
+
+  async function handleCustomLogoFile(event: Event) {
+    customLogoError = null;
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    const check = validateLogoUpload(file);
+    if (!check.ok) {
+      customLogoError = check.error || "Fichier refusé.";
+      input.value = "";
+      return;
+    }
+    customLogoReading = true;
+    try {
+      customLogoDataUrl = await readFileAsDataUrl(file);
+      customLogoFileName = file.name;
+    } catch {
+      customLogoError = "Lecture du fichier impossible.";
+      customLogoDataUrl = null;
+      customLogoFileName = null;
+    } finally {
+      customLogoReading = false;
+    }
+  }
+
+  function removeCustomLogoFile() {
+    customLogoDataUrl = null;
+    customLogoFileName = null;
+    customLogoError = null;
+    if (customLogoFileInput) customLogoFileInput.value = "";
+  }
+
   let customPluginForm: CreateCustomPluginRequest = {
     name: "",
     version: "1.0.0",
@@ -159,17 +217,19 @@
   let guidedAuthLoading = false;
   let guidedAuthError: string | null = null;
 
-  function initiateInstall(item: MarketplacePlugin) {
-    if (item.auth && item.auth.auth_type !== "none") {
+  async function initiateInstall(item: MarketplacePlugin): Promise<void> {
+    const authType = item.auth?.authType ?? item.auth?.auth_type;
+    if (item.auth && authType && authType !== "none") {
       guidedAuthPlugin = item;
-      guidedAuthMethod = item.auth.supported_methods[0] || "oauth2";
+      const methods = item.auth.supportedMethods ?? item.auth.supported_methods ?? [];
+      guidedAuthMethod = methods[0] || "oauth2";
       guidedAccountLabel = "";
       guidedAccountApiKey = "";
       guidedAccountIdentifier = "";
       guidedAuthError = null;
       showGuidedAuthModal = true;
     } else {
-      handleInstallMarketplace(item);
+      await handleInstallMarketplace(item);
     }
   }
 
@@ -273,6 +333,7 @@
     actionLoading[plugin.id] = true;
     try {
       await uninstallPlugin(plugin.id);
+      evictFileLogo(plugin.id);
       showNotification(`Plugin '${plugin.name}' désinstallé.`);
       await loadData();
     } catch (err: any) {
@@ -281,6 +342,27 @@
       delete actionLoading[plugin.id];
       actionLoading = actionLoading;
     }
+  }
+
+  /**
+   * Filet de sécurité d'affichage : même si le backend renvoie un jour un
+   * message brut (ex. log de progression git), l'utilisateur ne voit qu'un
+   * texte court et lisible, jamais des milliers de lignes techniques.
+   */
+  function toFriendlyError(err: any): string {
+    const raw = String(err?.message ?? err ?? "Une erreur inconnue est survenue.");
+    const noise = [
+      /updating files:.*$/gim,
+      /receiving objects:.*$/gim,
+      /resolving deltas:.*$/gim,
+      /remote:\s*(enumerating|counting|compressing).*/gim,
+      /^cloning into.*$/gim,
+    ];
+    let cleaned = raw;
+    for (const pattern of noise) cleaned = cleaned.replace(pattern, "");
+    cleaned = cleaned.replace(/\r/g, "\n").split("\n").map((l) => l.trim()).filter(Boolean).join(" — ");
+    const max = 600;
+    return cleaned.length > max ? cleaned.slice(0, max) + "…" : cleaned || "Une erreur inconnue est survenue.";
   }
 
   async function handleAddPluginSubmit() {
@@ -304,9 +386,19 @@
           target: customSourceTarget.trim(),
         });
       } else if (addMethod === "custom") {
-        if (!customPluginForm.name.trim()) {
+        const slug = customPluginForm.name.trim().toLowerCase();
+        if (!slug) {
           throw new Error("Le nom du plugin est obligatoire (ex: my-custom-plugin).");
         }
+        if (!isValidPluginSlug(slug)) {
+          throw new Error(
+            "Nom invalide : kebab-case strict, 1-64 caractères [a-z0-9.-], sans '--' ni '..'."
+          );
+        }
+        customPluginForm.name = slug;
+        customPluginForm.logoEmoji = customLogoEmoji;
+        customPluginForm.brandColor = customBrandColor;
+        customPluginForm.logoDataUrl = customLogoDataUrl || undefined;
         customPluginForm.skills = [
           {
             name: "Assistant Skill",
@@ -316,7 +408,9 @@
             tags: ["custom", "automation"],
           },
         ];
-        await createCustomPlugin(customPluginForm);
+        const created = await createCustomPlugin(customPluginForm);
+        evictFileLogo(created.id);
+        resetCustomBranding();
       }
       showAddModal = false;
       customSourceTarget = "";
@@ -324,7 +418,7 @@
       activeTab = "installed";
       await loadData();
     } catch (err: any) {
-      errorMessage = err?.message || String(err);
+      errorMessage = toFriendlyError(err);
     } finally {
       delete actionLoading["modal"];
       actionLoading = actionLoading;
@@ -568,9 +662,7 @@
           >
             <div class="card-body">
               <div class="card-header-row">
-                <div class="icon-avatar">
-                  <span>{item.icon || "📦"}</span>
-                </div>
+                <BrandLogo pluginId={item.id} icon={item.icon} size={42} radius={12} />
                 <div class="card-meta">
                   <div class="title-row">
                     <h4 class="plugin-title">{item.name}</h4>
@@ -684,9 +776,15 @@
           >
             <div class="card-body">
               <div class="card-header-row">
-                <div class="icon-avatar">
-                  <span>{marketplacePlugins.find((m) => m.id === plugin.id)?.icon || plugin.skills[0]?.icon || "🧩"}</span>
-                </div>
+                <BrandLogo
+                  pluginId={plugin.id}
+                  icon={marketplacePlugins.find((m) => m.id === plugin.id)?.icon || plugin.skills[0]?.icon}
+                  logo={plugin.logo}
+                  logoKind={plugin.logoKind}
+                  brandColor={plugin.brandColor}
+                  size={42}
+                  radius={12}
+                />
                 <div class="card-meta">
                   <div class="title-row">
                     <h4 class="plugin-title">{plugin.name}</h4>
@@ -897,7 +995,7 @@
                   placeholder="https://github.com/agentplugins/my-plugin.git"
                   class="form-input"
                 />
-                <span class="input-hint">Le dépôt doit contenir un fichier <code>plugin.json</code> valide à la racine.</span>
+                <span class="input-hint">Le dépôt doit contenir un fichier <code>plugin.json</code> valide à la racine, pour un seul plugin. Les collections (un dossier par plugin) ne sont pas prises en charge ici : clonez-les vous-même puis utilisez « Dossier local ».</span>
               </div>
             </div>
           {:else if addMethod === "local"}
@@ -923,6 +1021,75 @@
               <p class="modal-body-hint">
                 Générez un nouveau package plugin standard avec son manifeste, son serveur MCP et ses instructions Skill.
               </p>
+              <div class="form-item full-span logo-picker">
+                <span class="logo-picker-label">Logo du plugin</span>
+                <div class="logo-picker-row">
+                  <BrandLogo
+                    pluginId={customPluginForm.name.trim().toLowerCase() || "custom-preview"}
+                    icon={customLogoEmoji}
+                    logo={undefined}
+                    brandColor={customBrandColor}
+                    previewDataUrl={customLogoDataUrl || undefined}
+                    size={56}
+                    radius={14}
+                  />
+                  <div class="logo-picker-actions">
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                      class="logo-file-input"
+                      bind:this={customLogoFileInput}
+                      on:change={handleCustomLogoFile}
+                      aria-label="Choisir un fichier logo"
+                    />
+                    {#if customLogoReading}
+                      <span class="logo-status">Lecture…</span>
+                    {:else if customLogoFileName}
+                      <span class="logo-status success" title={customLogoFileName}>
+                        {customLogoFileName.length > 22
+                          ? customLogoFileName.slice(0, 20) + "…"
+                          : customLogoFileName}
+                      </span>
+                      <button type="button" class="link-action" on:click={removeCustomLogoFile}>
+                        Retirer
+                      </button>
+                    {:else}
+                      <span class="logo-status">PNG, JPEG, WebP ou SVG — 2 Mo max</span>
+                    {/if}
+                    {#if customLogoError}
+                      <span class="logo-error">{customLogoError}</span>
+                    {/if}
+                  </div>
+                </div>
+                <div class="logo-emoji-row" role="group" aria-label="Emoji du logo">
+                  {#each LOGO_EMOJI_PRESETS as emoji}
+                    <button
+                      type="button"
+                      class="emoji-pick {customLogoEmoji === emoji && !customLogoDataUrl ? 'selected' : ''}"
+                      on:click={() => {
+                        customLogoEmoji = emoji;
+                        removeCustomLogoFile();
+                      }}
+                      title={emoji}
+                    >
+                      {emoji}
+                    </button>
+                  {/each}
+                </div>
+                <div class="logo-color-row" role="group" aria-label="Couleur du logo">
+                  {#each LOGO_COLOR_PRESETS as color}
+                    <button
+                      type="button"
+                      class="color-pick {customBrandColor === color ? 'selected' : ''}"
+                      style="background:{color};"
+                      on:click={() => (customBrandColor = color)}
+                      title={color}
+                      aria-label={color}
+                    ></button>
+                  {/each}
+                </div>
+                <span class="input-hint">Le logo est enregistré avec le plugin et affiché dans le chat, les connecteurs et cette page.</span>
+              </div>
               <div class="custom-grid">
                 <div class="form-item">
                   <label for="custom-name">Nom du plugin (kebab-case strict)</label>
@@ -1016,9 +1183,7 @@
       >
         <div class="modal-header">
           <div class="guided-header-info">
-            <div class="guided-plugin-icon">
-              <span>{guidedAuthPlugin.icon || "🧩"}</span>
-            </div>
+            <BrandLogo pluginId={guidedAuthPlugin.id} icon={guidedAuthPlugin.icon} size={40} radius={12} />
             <div>
               <h3 class="modal-title">Authentification requise</h3>
               <p class="modal-subtitle">{guidedAuthPlugin.name} v{guidedAuthPlugin.version}</p>
@@ -1041,7 +1206,7 @@
           </div>
 
           <!-- Method Selector if multiple -->
-          {#if guidedAuthPlugin.auth && guidedAuthPlugin.auth.supported_methods.length > 1}
+          {#if guidedAuthPlugin.auth?.supported_methods && guidedAuthPlugin.auth.supported_methods.length > 1}
             <div class="guided-method-tabs">
               {#each guidedAuthPlugin.auth.supported_methods as method}
                 <button
@@ -1719,25 +1884,8 @@
     margin-bottom: 12px;
   }
 
-  .icon-avatar {
-    width: 42px;
-    height: 42px;
-    border-radius: 10px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 20px;
-    flex-shrink: 0;
-  }
-
-  .plugins-page-root.light .icon-avatar {
-    background: #f5f5f7;
-    border: 1px solid rgba(0, 0, 0, 0.06);
-  }
-
-  .plugins-page-root.dark .icon-avatar {
-    background: #2c2c2e;
-    border: 1px solid rgba(255, 255, 255, 0.06);
+  .card-header-row :global(.brand-tile) {
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
   }
 
   .card-meta {
@@ -2512,6 +2660,113 @@
     gap: 14px;
   }
 
+  /* Logo picker (custom creator) — Apple minimal */
+  .logo-picker-label {
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .logo-picker {
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 12px;
+    padding: 12px 14px;
+    background: rgba(0, 0, 0, 0.015);
+    margin-bottom: 14px;
+  }
+  .modal-card.dark .logo-picker {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .logo-picker-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 6px 0 10px;
+  }
+  .logo-picker-row :global(.brand-tile) {
+    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.14);
+  }
+  .logo-picker-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .logo-file-input {
+    font-size: 12px;
+    max-width: 260px;
+  }
+  .logo-file-input::file-selector-button {
+    padding: 5px 12px;
+    border-radius: 7px;
+    border: 1px solid rgba(0, 113, 227, 0.4);
+    background: rgba(0, 113, 227, 0.08);
+    color: #0071e3;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-right: 8px;
+  }
+  .logo-file-input::file-selector-button:hover {
+    background: rgba(0, 113, 227, 0.16);
+  }
+  .logo-status {
+    font-size: 11px;
+    color: #86868b;
+  }
+  .logo-status.success {
+    color: #30d158;
+    font-weight: 600;
+  }
+  .logo-error {
+    font-size: 11px;
+    color: #ff453a;
+    font-weight: 600;
+  }
+  .logo-emoji-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .emoji-pick {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    background: transparent;
+    font-size: 17px;
+    cursor: pointer;
+    transition: transform 0.12s ease, border-color 0.12s ease;
+    line-height: 1;
+  }
+  .emoji-pick:hover {
+    transform: scale(1.08);
+  }
+  .emoji-pick.selected {
+    border-color: #0071e3;
+    box-shadow: 0 0 0 2px rgba(0, 113, 227, 0.25);
+  }
+  .logo-color-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .color-pick {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    cursor: pointer;
+    transition: transform 0.12s ease;
+  }
+  .color-pick:hover {
+    transform: scale(1.12);
+  }
+  .color-pick.selected {
+    box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px #0071e3;
+  }
+
   .full-span {
     grid-column: 1 / -1;
   }
@@ -2585,19 +2840,8 @@
     gap: 12px;
   }
 
-  .guided-plugin-icon {
-    width: 38px;
-    height: 38px;
-    border-radius: 10px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 20px;
-    background: rgba(0, 113, 227, 0.12);
-  }
-
-  .modal-card.dark .guided-plugin-icon {
-    background: rgba(41, 151, 255, 0.18);
+  .guided-header-info :global(.brand-tile) {
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
   }
 
   .guided-modal-body {

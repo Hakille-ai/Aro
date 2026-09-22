@@ -78,28 +78,31 @@
     gap: 12px;
     padding: 14px 16px;
     border-radius: 14px;
-    background: rgba(15, 23, 42, 0.88);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.2);
-    color: #f8fafc;
-    transition: all 0.2s ease;
+    background: rgba(255, 255, 255, 0.88);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.04);
+    color: #1d1d1f;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "SF Pro", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   }
 
-  :global(body.light-theme) .toast-card {
-    background: rgba(255, 255, 255, 0.95);
-    border-color: rgba(0, 0, 0, 0.1);
-    color: #0f172a;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.06);
+  :global(body.dark-theme) .toast-card {
+    background: rgba(28, 28, 32, 0.88);
+    backdrop-filter: blur(24px) saturate(190%);
+    -webkit-backdrop-filter: blur(24px) saturate(190%);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
+    color: #f5f5f7;
   }
 
   .toast-card.agent-completed {
-    border-color: rgba(16, 185, 129, 0.4);
+    border-color: rgba(52, 199, 89, 0.4);
   }
 
   .toast-card.error {
-    border-color: rgba(239, 68, 68, 0.4);
+    border-color: rgba(255, 59, 48, 0.4);
   }
 
   .toast-icon-col {
@@ -108,9 +111,13 @@
     padding-top: 2px;
   }
 
-  .icon-wrap.success { color: #10b981; }
-  .icon-wrap.error { color: #ef4444; }
-  .icon-wrap.info { color: #3b82f6; }
+  .icon-wrap.success { color: #34c759; }
+  .icon-wrap.error { color: #ff3b30; }
+  .icon-wrap.info { color: #0071e3; }
+
+  :global(body.dark-theme) .icon-wrap.success { color: #30d158; }
+  :global(body.dark-theme) .icon-wrap.error { color: #ff453a; }
+  :global(body.dark-theme) .icon-wrap.info { color: #2997ff; }
 
   .toast-content {
     flex: 1;
@@ -123,11 +130,16 @@
     font-size: 0.85rem;
     font-weight: 600;
     line-height: 1.3;
+    color: #1d1d1f;
+  }
+
+  :global(body.dark-theme) .toast-title {
+    color: #f5f5f7;
   }
 
   .toast-body {
     font-size: 0.78rem;
-    color: #94a3b8;
+    color: #86868b;
     line-height: 1.4;
     display: -webkit-box;
     line-clamp: 2;
@@ -136,8 +148,8 @@
     overflow: hidden;
   }
 
-  :global(body.light-theme) .toast-body {
-    color: #475569;
+  :global(body.dark-theme) .toast-body {
+    color: #a1a1a6;
   }
 
   .toast-action-btn {
@@ -147,33 +159,54 @@
     margin-top: 6px;
     padding: 4px 10px;
     border-radius: 6px;
-    background: rgba(59, 130, 246, 0.15);
-    border: 1px solid rgba(59, 130, 246, 0.3);
-    color: #3b82f6;
+    background: rgba(0, 113, 227, 0.1);
+    border: 1px solid rgba(0, 113, 227, 0.2);
+    color: #0071e3;
     font-size: 0.72rem;
     font-weight: 600;
     cursor: pointer;
     align-self: flex-start;
-    transition: all 0.15s ease;
+    transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .toast-action-btn:hover {
-    background: #3b82f6;
+    background: #0071e3;
+    color: #ffffff;
+    transform: translateY(-0.5px);
+  }
+
+  :global(body.dark-theme) .toast-action-btn {
+    background: rgba(10, 132, 255, 0.16);
+    border-color: rgba(10, 132, 255, 0.3);
+    color: #2997ff;
+  }
+
+  :global(body.dark-theme) .toast-action-btn:hover {
+    background: #0a84ff;
     color: #ffffff;
   }
 
   .toast-close-btn {
     background: transparent;
     border: none;
-    color: #64748b;
+    color: #86868b;
     cursor: pointer;
-    padding: 2px;
-    border-radius: 4px;
+    padding: 3px;
+    border-radius: 6px;
     transition: all 0.15s ease;
   }
 
   .toast-close-btn:hover {
+    color: #1d1d1f;
+    background: rgba(0, 0, 0, 0.06);
+  }
+
+  :global(body.dark-theme) .toast-close-btn {
+    color: #8e8e93;
+  }
+
+  :global(body.dark-theme) .toast-close-btn:hover {
     color: #ffffff;
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.12);
   }
 </style>

@@ -50,8 +50,8 @@ class DesktopTool extends StatelessWidget {
   });
   @override
   Widget build(BuildContext context) => SizedBox(
-    width: 40,
-    height: 40,
+    width: 44,
+    height: 44,
     child: IconButton(
       tooltip: label,
       onPressed: onPressed,
@@ -61,7 +61,7 @@ class DesktopTool extends StatelessWidget {
         backgroundColor: color.withValues(alpha: filled ? 1 : .055),
         disabledBackgroundColor: color.withValues(alpha: .25),
         side: BorderSide(color: color.withValues(alpha: .18)),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(11)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
       icon: Icon(icon, size: 19),
     ),

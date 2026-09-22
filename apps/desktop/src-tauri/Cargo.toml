@@ -23,6 +23,7 @@ base64.workspace = true
 chrono.workspace = true
 directories.workspace = true
 keyring.workspace = true
+lettre.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 sha2.workspace = true

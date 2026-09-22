@@ -50,11 +50,18 @@ impl AppState {
         let keyring_id = format!("search-{}", settings.search.provider);
         settings.search.api_key = load_provider_api_key(&keyring_id).ok().flatten();
         settings.search.auth_configured = settings.search.api_key.is_some();
+        let smtp_pw = load_provider_api_key("notification-smtp-password").ok().flatten();
+        let notif_api = load_provider_api_key("notification-api-key").ok().flatten();
+        settings.notification.auth_configured = smtp_pw.is_some() || notif_api.is_some();
+        settings.notification.smtp_password = smtp_pw;
+        settings.notification.api_key = notif_api;
         settings
     }
 
     pub async fn replace_settings(&self, mut settings: AppSettings) -> AroResult<()> {
         settings.search.api_key = None;
+        settings.notification.smtp_password = None;
+        settings.notification.api_key = None;
         save_settings(&self.paths.settings_file, &settings)?;
         *self.settings.lock().await = settings;
         Ok(())
@@ -65,7 +72,37 @@ impl AppState {
         // The server may already have consumed a predecessor token. Install the live successor
         // in memory before touching the fallible OS keyring so a persistence failure can never
         // leave the revoked predecessor as the application's active credential.
-        install_cloud_session_locked(&mut guard, session).await
+        let installed = install_cloud_session_locked(&mut guard, session).await?;
+        // The device SQLite cache is single-tenant storage shared by every
+        // cloud account on this machine. A different user must never see the
+        // previous user's conversations/memories: wipe the AI cache. The
+        // wipe never fails the login itself (fail-open for availability, the
+        // sidecar keeps the old id so the next login retries).
+        self.enforce_cloud_identity_cache(&installed);
+        Ok(installed)
+    }
+
+    fn enforce_cloud_identity_cache(&self, session: &AuthSession) {
+        let user_id = session.user.id.to_string();
+        let previous = load_last_cloud_user_id(&self.paths.data_dir).unwrap_or(None);
+        if !cloud_identity_changed(previous.as_deref(), &user_id) {
+            if previous.as_deref() != Some(user_id.as_str()) {
+                if let Err(err) = save_last_cloud_user_id(&self.paths.data_dir, &user_id) {
+                    eprintln!("ARO: could not persist cloud identity marker: {err}");
+                }
+            }
+            return;
+        }
+        match self.engine.memory_store().reset() {
+            Ok(()) => {
+                if let Err(err) = save_last_cloud_user_id(&self.paths.data_dir, &user_id) {
+                    eprintln!("ARO: wiped AI cache for a new cloud user but could not persist the marker: {err}");
+                }
+            }
+            Err(err) => {
+                eprintln!("ARO: could not wipe AI cache after cloud user change (kept for retry): {err}");
+            }
+        }
     }
 
     pub async fn clear_cloud_session(&self) -> AroResult<()> {
@@ -320,6 +357,48 @@ fn should_clear_refresh_token(error: &AroError) -> bool {
     matches!(error, AroError::Security(_))
 }
 
+/// Device marker remembering which cloud user owns the local SQLite AI
+/// cache. Deliberately a sidecar file (not a field of `settings.json`) so
+/// identity hygiene never depends on settings migrations.
+fn cloud_identity_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("cloud_identity.json")
+}
+
+fn load_last_cloud_user_id(data_dir: &Path) -> AroResult<Option<String>> {
+    let path = cloud_identity_path(data_dir);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(AroError::Configuration(err.to_string())),
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(raw.trim_start_matches('\u{feff}'))
+            .map_err(|err| AroError::Configuration(err.to_string()))?;
+    Ok(value
+        .get("userId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string))
+}
+
+fn save_last_cloud_user_id(data_dir: &Path, user_id: &str) -> AroResult<()> {
+    if let Some(parent) = cloud_identity_path(data_dir).parent() {
+        fs::create_dir_all(parent).map_err(|err| AroError::Configuration(err.to_string()))?;
+    }
+    let raw = serde_json::to_string_pretty(&serde_json::json!({ "userId": user_id }))
+        .map_err(|err| AroError::Configuration(err.to_string()))?;
+    fs::write(cloud_identity_path(data_dir), raw)
+        .map_err(|err| AroError::Configuration(err.to_string()))
+}
+
+/// Pure identity-change decision, unit-tested below.
+fn cloud_identity_changed(previous: Option<&str>, current: &str) -> bool {
+    match previous {
+        None => false,
+        Some(previous) => previous != current,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +414,34 @@ mod tests {
         assert!(settings.retain_history);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn cloud_identity_sidecar_roundtrips_user_id() {
+        let dir = std::env::temp_dir().join(format!("aro-identity-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir");
+
+        assert_eq!(load_last_cloud_user_id(&dir).expect("load"), None);
+        save_last_cloud_user_id(&dir, "user-aaa").expect("save");
+        assert_eq!(
+            load_last_cloud_user_id(&dir).expect("load"),
+            Some("user-aaa".to_string())
+        );
+        save_last_cloud_user_id(&dir, "user-bbb").expect("overwrite");
+        assert_eq!(
+            load_last_cloud_user_id(&dir).expect("load"),
+            Some("user-bbb".to_string())
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cloud_identity_change_detects_only_real_switches() {
+        assert!(!cloud_identity_changed(None, "user-aaa"));
+        assert!(!cloud_identity_changed(Some("user-aaa"), "user-aaa"));
+        assert!(cloud_identity_changed(Some("user-aaa"), "user-bbb"));
+        assert!(cloud_identity_changed(Some(""), "user-bbb"));
     }
 
     #[test]

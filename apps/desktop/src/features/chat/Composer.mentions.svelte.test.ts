@@ -101,4 +101,39 @@ describe("Composer @ mentions (F4.2, shipped code)", () => {
     await fireEvent.keyUp(textarea, { key: "h" });
     expect(screen.getByText("No matching files.")).toBeInTheDocument();
   });
+
+  it("supports mentioning skills, agents, plugins, MCP, and models alongside files", async () => {
+    render(
+      Composer,
+      composerProps({
+        skills: [{ id: "s1", name: "WebSearch", description: "Search web" }],
+        agents: [{ id: "a1", name: "Coder Agent", role: "Developer" }],
+        plugins: [{ id: "p1", name: "Docker Tool", description: "Containers" }],
+        mcpServers: [{ id: "m1", name: "Sqlite Server", status: "connected" }],
+        modelOptions: [{ id: "claude-3-5-sonnet", label: "Claude 3.5 Sonnet", provider: "Anthropic" }],
+      }),
+    );
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await fireEvent.input(textarea, { target: { value: "@" } });
+    textarea.setSelectionRange(1, 1);
+    await fireEvent.keyUp(textarea, { key: "@" });
+
+    // Should display items from multiple categories
+    expect(screen.getByText("App.svelte")).toBeInTheDocument();
+    expect(screen.getByText("WebSearch")).toBeInTheDocument();
+    expect(screen.getByText("Coder Agent")).toBeInTheDocument();
+    expect(screen.getByText("Docker Tool")).toBeInTheDocument();
+    expect(screen.getByText("Sqlite Server")).toBeInTheDocument();
+    expect(screen.getByText("Claude 3.5 Sonnet")).toBeInTheDocument();
+
+    // Category pills should be rendered with counts
+    const skillTab = screen.getByRole("tab", { name: /Skills/i });
+    expect(skillTab).toBeInTheDocument();
+    await fireEvent.click(skillTab);
+
+    // After clicking Skills tab, only Skills should be visible
+    expect(screen.getByText("WebSearch")).toBeInTheDocument();
+    expect(screen.queryByText("App.svelte")).not.toBeInTheDocument();
+  });
 });

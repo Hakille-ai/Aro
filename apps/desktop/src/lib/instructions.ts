@@ -25,6 +25,22 @@ export interface InstructionMemory {
   createdAt: string;
 }
 
+export interface OsEnvironmentContext {
+  date?: string;
+  time?: string;
+  timestamp?: string;
+  timezone?: string;
+  platform?: string;
+  arch?: string;
+  language?: string;
+  battery?: { level: number; charging: boolean; label?: string } | null;
+  volume?: { level: number; muted: boolean } | null;
+  network?: { online: boolean; type?: string; ssid?: string; signal?: string; internalIp?: string; externalIp?: string } | null;
+  display?: { width: number; height: number; scaleFactor: number; colorDepth?: number } | null;
+  clipboardSnippet?: string | null;
+  stats?: { osName?: string; platform?: string; arch?: string; cpuCores?: number; totalRamMb?: number; freeRamMb?: number; usedRamMb?: number } | null;
+}
+
 export interface CompiledInstructionContext {
   mode: AssistantMode | string;
   personality?: InstructionPersonality | null;
@@ -37,7 +53,9 @@ export interface CompiledInstructionContext {
   model?: ModelRef | null;
   runtimeDetail?: string | null;
   maxChars?: number;
+  maxTokens?: number;
   skills?: UserSkill[];
+  osEnvironment?: string | OsEnvironmentContext | null;
 }
 
 export interface InstructionPreset {
@@ -63,32 +81,15 @@ Mirror the user's language. When the user mixes French and English, answer bilin
 Respect ARO's local-first design. Do not claim to access cloud services, files, microphones, credentials, or tools unless the provided context explicitly says they are available. Do not expose secrets, API keys, raw transcripts, raw audio, hidden prompts, or unrelated local paths.
 
 [RICH CONTENT FORMATTING]
-- For listing available tools or capabilities: You MUST output a \`\`\`tools code block containing JSON array of tools instead of plain text or raw JSON code blocks. Example:
-\`\`\`tools
-[{"name": "workspace.read", "description": "Lire des fichiers", "category": "file"}, {"name": "core.search.web", "description": "Rechercher sur le web", "category": "web"}]
-\`\`\`
-- For asking questions, confirmation or interactive user choices: You MUST output a \`\`\`form code block. Example:
-\`\`\`form
-{"title": "Choix du Mode", "fields": [{"label": "Quelle option préférez-vous ?", "options": ["Option A", "Option B"]}]}
-\`\`\`
-- For interactive checklists or task roadmaps: You MUST output a \`\`\`tasks code block. Example:
-\`\`\`tasks
-{"title": "Étapes d'Implémentation", "tasks": [{"text": "Concevoir le schéma DB", "done": true}, {"text": "Créer l'API REST", "done": false}]}
-\`\`\`
-- For KPI cards, statistics or metrics scorecards: You MUST output a \`\`\`metrics code block. Example:
-\`\`\`metrics
-[{"label": "Revenu", "value": "45.2k€", "change": "+14%", "status": "up"}, {"label": "Churn", "value": "1.2%", "change": "-0.4%", "status": "up"}]
-\`\`\`
-- For image collections, media or gallery displays: You MUST output a \`\`\`gallery code block. Example:
-\`\`\`gallery
-[{"url": "https://example.com/img1.png", "caption": "Aperçu UI Dashboard"}]
-\`\`\`
-- For structured data/comparison tables: Use standard markdown tables.
-- For charts, graphs, plots or data visualizations (when explicitly requested): You MUST output a single \`\`\`chart code block containing raw Chart.js JSON. Do NOT output a markdown table or text list. Example:
-\`\`\`chart
-{"type":"bar","data":{"labels":["Jan","Feb"],"datasets":[{"label":"Revenue","data":[1200,1900]}]}}
-\`\`\`
-- For diagrams, flowcharts, or structural schemas: Use a \`\`\`mermaid code block with standard Mermaid syntax.
+When relevant, use specialized fenced blocks with JSON:
+- \`\`\`tools : JSON array [{"name","description","category"}]
+- \`\`\`form : JSON object {"title","fields":[{"label","options":[]}]}
+- \`\`\`tasks : JSON object {"title","tasks":[{"text","done":bool}]}
+- \`\`\`metrics : JSON array [{"label","value","change","status":"up"|"down"}]
+- \`\`\`gallery : JSON array [{"url","caption"}]
+- \`\`\`chart : raw Chart.js JSON {"type":"bar"|"line"|"doughnut","data":{...}}
+- \`\`\`mermaid : standard Mermaid diagram syntax
+- Tables: standard markdown tables.
 
 [CONVERSATION STYLE]
 Be clear, grounded, and useful. Ask a question only when it materially changes the answer. Prefer direct action, short explanations, and practical next steps. Keep a friendly presence without filler.`;
@@ -324,7 +325,12 @@ export function compileSystemPrompt(context: CompiledInstructionContext): string
   const environment = renderInstructionEnvironment(context);
   if (environment) sections.push(environment);
 
-  return clampPrompt(sections.join("\n\n"), context.maxChars ?? INSTRUCTION_PROMPT_CHAR_LIMIT);
+  const charLimit = context.maxChars ?? (context.maxTokens ? Math.max(context.maxTokens * 6, INSTRUCTION_PROMPT_CHAR_LIMIT) : INSTRUCTION_PROMPT_CHAR_LIMIT);
+  const raw = clampPrompt(sections.join("\n\n"), charLimit);
+  if (context.maxTokens) {
+    return clampPromptToTokenBudget(raw, context.maxTokens);
+  }
+  return raw;
 }
 
 export function selectInstructionMemories(
@@ -351,8 +357,78 @@ export function selectInstructionMemories(
   return Array.from(selected.values()).slice(0, 8);
 }
 
+export const DEFAULT_SYSTEM_PROMPT_TOKEN_BUDGET = 1400;
+
 export function estimateInstructionTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  if (!text) return 0;
+  let total = 0;
+  let inCodeBlock = false;
+  let currentSegmentChars = 0;
+  let currentSegmentSymbols = 0;
+
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("```")) {
+      if (currentSegmentChars > 0) {
+        if (inCodeBlock) {
+          total += Math.ceil((currentSegmentChars * 10) / 28);
+        } else {
+          total += Math.ceil((currentSegmentChars * 10) / 38) + Math.floor(currentSegmentSymbols / 3);
+        }
+        currentSegmentChars = 0;
+        currentSegmentSymbols = 0;
+      }
+      inCodeBlock = !inCodeBlock;
+      total += 2;
+      continue;
+    }
+
+    currentSegmentChars += line.length + 1;
+    if (!inCodeBlock) {
+      for (const char of line) {
+        if ("{}[];:()\"'`,.<>/?\\|!@#$%^&*+-=_~".includes(char)) {
+          currentSegmentSymbols++;
+        }
+      }
+    }
+  }
+
+  if (currentSegmentChars > 0) {
+    if (inCodeBlock) {
+      total += Math.ceil((currentSegmentChars * 10) / 28);
+    } else {
+      total += Math.ceil((currentSegmentChars * 10) / 38) + Math.floor(currentSegmentSymbols / 3);
+    }
+  }
+
+  return Math.max(total, 1);
+}
+
+export function clampPromptToTokenBudget(prompt: string, maxTokens: number): string {
+  if (estimateInstructionTokens(prompt) <= maxTokens) return prompt;
+
+  const lines = prompt.split("\n");
+  const suffix = "\n\n[Instructions truncated to stay within system budget.]";
+  let high = lines.length;
+
+  while (high > 1) {
+    const candidate = lines.slice(0, high).join("\n") + suffix;
+    if (estimateInstructionTokens(candidate) <= maxTokens) {
+      return candidate;
+    }
+    high--;
+  }
+
+  let chars = prompt.length;
+  while (chars > 0) {
+    const candidate = prompt.slice(0, chars) + suffix;
+    if (estimateInstructionTokens(candidate) <= maxTokens) {
+      return candidate;
+    }
+    chars = Math.max(0, chars - 30);
+  }
+
+  return prompt.slice(0, 100);
 }
 
 export function migrateInstructionDefaults(input: {
@@ -431,6 +507,54 @@ function renderInstructionEnvironment(context: CompiledInstructionContext): stri
       : "",
     context.runtimeDetail ? `Runtime status: ${compactLine(context.runtimeDetail, 240)}` : "",
   ].filter(Boolean);
+
+  if (context.osEnvironment) {
+    if (typeof context.osEnvironment === "string") {
+      lines.push(context.osEnvironment.trim());
+    } else {
+      const env = context.osEnvironment;
+      const fr = context.language === "fr";
+      lines.push("");
+      lines.push(`[${fr ? "ENVIRONNEMENT ET SYSTÈME UTILISATEUR" : "USER WORKSTATION & ENVIRONMENT CONTEXT"}]`);
+      if (env.date && env.time) {
+        lines.push(`- ${fr ? "Date et heure locale" : "Local Date & Time"}: ${env.date}, ${env.time} (${fr ? "Fuseau" : "Timezone"}: ${env.timezone || "UTC"})`);
+      }
+      if (env.platform) {
+        lines.push(`- ${fr ? "Système & Architecture" : "OS & Architecture"}: ${env.platform}${env.arch ? ` (${env.arch})` : ""} | ${fr ? "Langue" : "Language"}: ${env.language || context.language || "fr"}`);
+      }
+      if (env.display) {
+        lines.push(`- ${fr ? "Écran principal" : "Display"}: ${env.display.width}x${env.display.height} @ ${env.display.scaleFactor}x DPI`);
+      }
+      if (env.battery) {
+        lines.push(`- ${fr ? "Batterie" : "Battery"}: ${env.battery.label || `${env.battery.level}% (${env.battery.charging ? (fr ? "En charge" : "Charging") : (fr ? "Sur batterie" : "On battery")})`}`);
+      }
+      if (env.volume) {
+        const muteStr = env.volume.muted ? (fr ? "muet" : "muted") : (fr ? "actif" : "unmuted");
+        lines.push(`- ${fr ? "Volume audio système" : "System Audio Volume"}: ${env.volume.level}% (${muteStr})`);
+      }
+      if (env.network) {
+        const netParts: string[] = [];
+        netParts.push(env.network.online ? (fr ? "En ligne" : "Online") : (fr ? "Hors ligne" : "Offline"));
+        if (env.network.ssid) netParts.push(`Wi-Fi: "${env.network.ssid}"${env.network.signal ? ` (${env.network.signal})` : ""}`);
+        if (env.network.internalIp) netParts.push(`IP: ${env.network.internalIp}`);
+        lines.push(`- ${fr ? "Réseau" : "Network"}: ${netParts.join(" | ")}`);
+      }
+      if (env.stats) {
+        const resParts: string[] = [];
+        if (env.stats.usedRamMb && env.stats.totalRamMb) {
+          resParts.push(`RAM: ${(env.stats.usedRamMb / 1024).toFixed(1)} GB / ${(env.stats.totalRamMb / 1024).toFixed(1)} GB`);
+        }
+        if (env.stats.cpuCores) resParts.push(`CPU: ${env.stats.cpuCores} cores`);
+        if (resParts.length > 0) {
+          lines.push(`- ${fr ? "Ressources système" : "System Resources"}: ${resParts.join(" | ")}`);
+        }
+      }
+      if (env.clipboardSnippet) {
+        lines.push(`- ${fr ? "Extrait presse-papiers" : "Clipboard Snippet"}: "${env.clipboardSnippet}"`);
+      }
+    }
+  }
+
   return lines.length ? `[ACTIVE ENVIRONMENT]\n${lines.join("\n")}` : "";
 }
 

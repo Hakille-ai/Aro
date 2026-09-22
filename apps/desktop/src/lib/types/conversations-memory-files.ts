@@ -22,6 +22,7 @@ export interface Conversation {
   projectId?: string | null;
   folderId?: string | null;
   rootPath?: string | null;
+  organizationId?: string | null;
 }
 
 export interface ChatMessage {
@@ -140,6 +141,21 @@ export interface SendMessageRequest {
 export interface SendMessageResponse {
   conversation: Conversation;
   userMessage: ChatMessage;
-  assistantMessage: ChatMessage;
+  /**
+   * Null when the server could not generate (nothing persisted): the UI must
+   * show an ephemeral notice + retry instead of a persisted error message.
+   */
+  assistantMessage: ChatMessage | null;
+  unavailable?: boolean;
+  modelId?: string | null;
   agentRunId?: string | null;
+}
+
+export interface PreviewFile {
+  name: string;
+  mimeType: string;
+  url: string;
+  content?: string;
+  data?: ArrayBuffer | Uint8Array;
+  sizeBytes?: number;
 }

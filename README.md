@@ -4,6 +4,15 @@ ARO is a cloud-synced desktop AI product with local inference by default. The de
 
 ## Product Pillars
 
+Commercial rollout: [offres, facturation et exploitation](docs/COMMERCIALIZATION.md).
+Community, Cloud, Business and Enterprise are defined in the shared commercial catalog; managed AI compute is billed separately. Payments are disabled by default pending operational setup.
+
+## License
+
+ARO's core is source-available under [PolyForm Noncommercial 1.0.0](LICENSE). Uses outside that license's permitted purposes require a separate commercial agreement. The SDK in `packages/api-client` and API contracts in `packages/contracts` are licensed under Apache-2.0, with a LICENSE in each directory. Other components inherit the root license unless explicitly stated otherwise. Third-party software, models and assets retain their own terms. See [the licensing scope and commercial arrangements](legal/README.md) and [NOTICE](NOTICE).
+
+The core is not described as OSI open source: PolyForm restricts commercial use. Buying hosted services or compute credits does not by itself grant commercial rights to the core. No repository publication, hosted deployment or live-payment activation is implied by this license change.
+
 - Local inference by default: Ollama or `llama.cpp` can stream model output from the desktop, then persist results through the API.
 - PostgreSQL source of truth: conversations, messages, settings, memories, organizations, memberships, skills, plugins, MCP, hooks, scheduler, and usage events live behind the API.
 - Redis-backed coordination: the API can use Redis for rate limiting, short distributed locks, readiness metrics, and fast outbox fanout while PostgreSQL remains durable.

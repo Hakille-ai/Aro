@@ -70,6 +70,42 @@ impl ContextWindowManager {
         Ok((prompt.to_string(), tokens))
     }
 
+    /// Fits or truncates system prompt into the system budget gracefully without failing.
+    pub fn fit_system_prompt_lossless_or_truncate(&self, prompt: &str) -> (String, usize) {
+        let tokens = estimate_tokens(prompt);
+        if tokens <= self.budget.system_budget {
+            return (prompt.to_string(), tokens);
+        }
+
+        let lines: Vec<&str> = prompt.lines().collect();
+        let suffix = "\n\n[System prompt truncated to fit partition budget.]";
+        let suffix_tokens = estimate_tokens(suffix);
+        let target_tokens = self.budget.system_budget.saturating_sub(suffix_tokens);
+
+        for len in (1..lines.len()).rev() {
+            let candidate = lines[..len].join("\n");
+            let c_tokens = estimate_tokens(&candidate);
+            if c_tokens <= target_tokens {
+                let fitted = format!("{}{}", candidate, suffix);
+                let fitted_tokens = estimate_tokens(&fitted);
+                return (fitted, fitted_tokens);
+            }
+        }
+
+        // Character-level fallback if lines are too large
+        let mut chars = prompt.len();
+        while chars > 0 {
+            let candidate = &prompt[..chars];
+            let c_tokens = estimate_tokens(candidate);
+            if c_tokens <= self.budget.system_budget {
+                return (candidate.to_string(), c_tokens);
+            }
+            chars = chars.saturating_sub(50);
+        }
+
+        (String::new(), 0)
+    }
+
     /// Fits semantic memories within budget (<= 1600 tokens) using priority:
     /// 1. pinned first
     /// 2. descending salience

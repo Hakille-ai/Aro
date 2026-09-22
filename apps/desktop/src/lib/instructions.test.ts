@@ -163,4 +163,47 @@ describe("instructions", () => {
     expect(selected[0].id).toBe("m1");
     expect(selected.some((memory) => memory.category === "preference")).toBe(true);
   });
+
+  it("injects rich OS and environment context when provided", () => {
+    const promptWithObject = compileSystemPrompt({
+      mode: "chat",
+      customSystemPromptsEnabled: false,
+      customSystemPrompts: {},
+      customInstructionsEnabled: false,
+      language: "fr",
+      osEnvironment: {
+        date: "Samedi 19 septembre 2026",
+        time: "05:40:00",
+        timezone: "Europe/Paris",
+        platform: "Windows 11",
+        arch: "x86_64",
+        battery: { level: 98, charging: true, label: "98% (En charge)" },
+        volume: { level: 40, muted: false },
+        network: { online: true, ssid: "ARO-5G", signal: "95%", internalIp: "192.168.1.100" },
+        display: { width: 2560, height: 1440, scaleFactor: 2 },
+        clipboardSnippet: "const foo = 'bar';",
+      },
+    });
+
+    expect(promptWithObject).toContain("[ENVIRONNEMENT ET SYSTÈME UTILISATEUR]");
+    expect(promptWithObject).toContain("Samedi 19 septembre 2026, 05:40:00 (Fuseau: Europe/Paris)");
+    expect(promptWithObject).toContain("Windows 11 (x86_64)");
+    expect(promptWithObject).toContain("Batterie: 98% (En charge)");
+    expect(promptWithObject).toContain("Volume audio système: 40% (actif)");
+    expect(promptWithObject).toContain("Wi-Fi: \"ARO-5G\" (95%)");
+    expect(promptWithObject).toContain("IP: 192.168.1.100");
+    expect(promptWithObject).toContain("2560x1440 @ 2x DPI");
+    expect(promptWithObject).toContain("Extrait presse-papiers: \"const foo = 'bar';\"");
+
+    const promptWithString = compileSystemPrompt({
+      mode: "chat",
+      customSystemPromptsEnabled: false,
+      customSystemPrompts: {},
+      customInstructionsEnabled: false,
+      osEnvironment: "[USER WORKSTATION & ENVIRONMENT CONTEXT]\n- OS: macOS Sonoma\n- Battery: 85%",
+    });
+
+    expect(promptWithString).toContain("[USER WORKSTATION & ENVIRONMENT CONTEXT]");
+    expect(promptWithString).toContain("- OS: macOS Sonoma");
+  });
 });

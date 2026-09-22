@@ -37,6 +37,10 @@ class SettingsSection {
 // IDs follow apps/desktop/src/features/settings/types.ts (general is a models alias).
 const settingsSections = [
   SettingsSection(
+    'billing', 'Offre & consommation', 'Compte & équipe', LucideIcons.creditCard,
+    'Abonnement, crédit de calcul et plafonds de dépense de cet espace.',
+  ),
+  SettingsSection(
     'profile',
     'Profil',
     'Compte & équipe',
@@ -226,11 +230,32 @@ const settingsSections = [
     'Retrouvez le style ARO, à votre façon.',
   ),
   SettingsSection(
+    'notifications',
+    'Notifications',
+    'Préférences & audio',
+    LucideIcons.bell,
+    'Alertes in-app et e-mails envoyés par votre serveur.',
+  ),
+  SettingsSection(
     'shortcuts',
     'Raccourcis',
     'Préférences & audio',
     LucideIcons.keyboard,
     'Navigation rapide avec un clavier connecté.',
+  ),
+  SettingsSection(
+    'browser',
+    'Navigateur',
+    "Configuration de l’IA",
+    LucideIcons.globe,
+    'Historique local et ouverture des liens sur ce téléphone.',
+  ),
+  SettingsSection(
+    'computer',
+    'Appareil',
+    "Configuration de l’IA",
+    LucideIcons.monitorSmartphone,
+    'Informations sur cet appareil. Le contrôle du PC reste sur desktop.',
   ),
   SettingsSection(
     'paths',

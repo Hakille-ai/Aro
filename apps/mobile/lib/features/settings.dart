@@ -1,11 +1,14 @@
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/api.dart';
 import '../core/workspace.dart';
 import '../ui/design.dart';
+import 'monitoring_chart.dart';
 import 'settings_catalog.dart';
 import 'profile_editor.dart';
+import 'billing.dart';
 
 class SettingsPage extends StatefulWidget {
   final Workspace workspace;
@@ -141,8 +144,10 @@ class SettingsDetail extends StatefulWidget {
 
 class _SettingsDetailState extends State<SettingsDetail> {
   List<Json> items = [];
+  List<Json> invitations = [];
   Json draft = {};
   String? error;
+  String? invitationsError;
   bool loading = true, saving = false;
   Workspace get w => widget.workspace;
   SettingsSection get s => widget.section;
@@ -166,11 +171,20 @@ class _SettingsDetailState extends State<SettingsDetail> {
     setState(() {
       loading = true;
       error = null;
+      invitationsError = null;
     });
     try {
       draft = w.copySettings();
       if (endpoint != null) {
         items = records(await w.api.request('GET', endpoint!));
+      }
+      if (s.id == 'organization') {
+        try {
+          invitations = records(await w.api.request('GET', '/invitations'));
+        } catch (e) {
+          invitations = [];
+          invitationsError = '$e';
+        }
       }
     } catch (e) {
       error = '$e';
@@ -180,7 +194,7 @@ class _SettingsDetailState extends State<SettingsDetail> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
+  Widget build(BuildContext context) => s.id == 'billing' ? BillingOverview(workspace: w) : Scaffold(
     backgroundColor: Theme.of(context).colorScheme.surface,
     appBar: AppBar(
       backgroundColor: Theme.of(context).colorScheme.surface,
@@ -370,32 +384,180 @@ class _SettingsDetailState extends State<SettingsDetail> {
               leading: const Icon(LucideIcons.building2),
               title: Text(w.orgName),
               subtitle: const Text('Organisation active'),
+              trailing: IconButton(
+                tooltip: 'Renommer l’organisation',
+                onPressed: renameOrganization,
+                icon: const Icon(LucideIcons.pencil, size: 16),
+              ),
             ),
           ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: switchOrganization,
+                  icon: const Icon(LucideIcons.arrowLeftRight, size: 16),
+                  label: const Text('Changer'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: createOrganization,
+                  icon: const Icon(LucideIcons.plus, size: 16),
+                  label: const Text('Créer'),
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 20),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Membres (${items.length})',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+              TextButton.icon(
+                onPressed: inviteMember,
+                icon: const Icon(LucideIcons.userPlus, size: 16),
+                label: const Text('Inviter'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (items.isEmpty && error == null)
+            const EmptyState(
+              icon: LucideIcons.users,
+              title: 'Aucun membre visible',
+              subtitle: 'Les membres de votre espace apparaîtront ici.',
+            ),
           for (final item in items)
             Card(
               child: ListTile(
-                leading: const Icon(LucideIcons.user),
+                leading: const Icon(LucideIcons.user, size: 18),
                 title: Text(
                   '${item['name'] ?? item['email'] ?? item['userId'] ?? 'Membre'}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                subtitle: Text('${item['role'] ?? ''}'),
+                subtitle: Text(
+                  '${item['email'] ?? ''}${item['email'] != null ? ' · ' : ''}${item['role'] ?? ''}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                trailing: PopupMenuButton<String>(
+                  tooltip: 'Gérer ce membre',
+                  onSelected: (action) {
+                    if (action == 'role') {
+                      changeMemberRole(item);
+                    } else if (action == 'remove') {
+                      removeMember(item);
+                    }
+                  },
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(
+                      value: 'role',
+                      child: Text('Changer le rôle'),
+                    ),
+                    PopupMenuItem(
+                      value: 'remove',
+                      child: Text('Retirer'),
+                    ),
+                  ],
+                ),
               ),
             ),
           const SizedBox(height: 20),
-          OutlinedButton.icon(
-            onPressed: switchOrganization,
-            icon: const Icon(LucideIcons.arrowLeftRight),
-            label: const Text('Changer d’organisation'),
+          Text(
+            'Invitations en attente (${invitations.length})',
+            style: Theme.of(context).textTheme.titleMedium,
           ),
+          const SizedBox(height: 8),
+          if (invitationsError != null)
+            Notice(invitationsError!, error: true, retry: load),
+          if (invitations.isEmpty && invitationsError == null)
+            const Text(
+              'Aucune invitation en attente.',
+              style: TextStyle(fontSize: 12, color: Color(0xff86868b)),
+            ),
+          for (final invitation in invitations)
+            Card(
+              child: ListTile(
+                leading: const Icon(LucideIcons.mailPlus, size: 18),
+                title: Text(
+                  '${invitation['email'] ?? invitation['name'] ?? 'Invitation'}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(
+                  '${invitation['role'] ?? ''}${invitation['expiresAt'] != null ? ' · expire ${invitation['expiresAt']}' : ''}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                trailing: IconButton(
+                  tooltip: 'Révoquer l’invitation',
+                  onPressed: () => revokeInvitation(invitation),
+                  icon: const Icon(LucideIcons.trash2, size: 16),
+                ),
+              ),
+            ),
         ];
       case 'models':
         final model = object(draft['model']);
+        final ai = w.aiStatus;
+        final execByProvider = <String, Json>{
+          for (final p in records(ai['providers']))
+            '${p['providerId']}': p,
+        };
+        final runnable = <String>{
+          for (final m in (ai['runnableModelIds'] as List? ?? [])) '$m',
+        };
+        String providerSubtitle(Json provider) {
+          final exec = execByProvider['${provider['id']}'];
+          if (exec == null) {
+            return provider['enabled'] == true
+                ? 'Activé sur le serveur'
+                : 'Désactivé';
+          }
+          switch ('${exec['reason'] ?? ''}') {
+            case 'local-ok':
+              return 'Exécuté sur ce téléphone (serveur local)';
+            case 'local-unreachable':
+              return 'Moteur local injoignable — démarrez-le sur le serveur';
+            case 'cloud-ready':
+              return 'Cloud — exécuté via le serveur (opt-in actif)';
+            case 'cloud-no-consent':
+              return 'Cloud — opt-in administrateur requis';
+            case 'cloud-no-key':
+              return 'Cloud — clé administrateur manquante';
+            case 'demo':
+              return 'Démo — réponses factices';
+            case 'disabled':
+              return 'Désactivé';
+            default:
+              return 'Non exécutable depuis ce téléphone';
+          }
+        }
+
+        bool modelRunnable(Json ref) {
+          if (ai.isEmpty) return true;
+          return runnable.contains('${ref['modelId']}');
+        }
+
         return [
           const Notice(
-            'Les modèles ci-dessous sont ceux de votre serveur ARO. Les modèles installés uniquement sur le PC ne sont pas exécutés sur ce téléphone.',
+            'Les modèles ci-dessous sont ceux de votre serveur ARO. Seuls les modèles marqués exécutables répondent sur ce téléphone.',
           ),
+          if (ai.isNotEmpty && ai['canGenerate'] != true)
+            Notice(w.aiGuidanceMessage(), error: true),
+          if (ai['mockActive'] == true)
+            const Notice(
+              'Le modèle actif est une démo : ses réponses sont factices. Choisissez un vrai moteur ci-dessous.',
+              error: true,
+            ),
           const SizedBox(height: 20),
           for (final provider in records(model['providers']))
             Card(
@@ -406,15 +568,17 @@ class _SettingsDetailState extends State<SettingsDetail> {
                     title: Text(
                       '${provider['displayName'] ?? provider['kind']}',
                     ),
-                    subtitle: Text(
-                      provider['enabled'] == true
-                          ? 'Activé sur le serveur'
-                          : 'Désactivé',
-                    ),
+                    subtitle: Text(providerSubtitle(provider)),
                   ),
                   for (final ref in records(provider['models']))
                     ListTile(
                       title: Text('${ref['label'] ?? ref['modelId']}'),
+                      subtitle: modelRunnable(ref)
+                          ? null
+                          : const Text(
+                              'Non exécuté sur ce téléphone',
+                              style: TextStyle(fontSize: 12),
+                            ),
                       trailing:
                           object(model['activeModelRef'])['modelId'] ==
                               ref['modelId']
@@ -423,7 +587,10 @@ class _SettingsDetailState extends State<SettingsDetail> {
                               color: Theme.of(context).colorScheme.primary,
                             )
                           : const Icon(LucideIcons.circle),
-                      onTap: saving || provider['enabled'] != true
+                      onTap:
+                          saving ||
+                              provider['enabled'] != true ||
+                              !modelRunnable(ref)
                           ? null
                           : () => saveModel(ref),
                     ),
@@ -599,15 +766,56 @@ class _SettingsDetailState extends State<SettingsDetail> {
             ),
         ];
       case 'monitoring':
+        final summary = usageSummary(items);
+        final topModels = summary.byModel.entries.toList()
+          ..sort((a, b) => b.value.compareTo(a.value));
+        final lastTokens = usageBarsTokens(items).isEmpty
+            ? 0
+            : usageBarsTokens(items).last;
         return [
           Card(
-            child: ListTile(
-              leading: const Icon(LucideIcons.chartLine),
-              title: Text('${items.length} événements de consommation'),
-              subtitle: const Text('Événements retournés par le serveur'),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${summary.events} événements · ${summary.totalTokens} tokens',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 12),
+                  UsageBars(values: usageBarsTokens(items)),
+                  const SizedBox(height: 4),
+                  const Text(
+                    '20 derniers événements',
+                    style: TextStyle(fontSize: 10, color: Color(0xff86868b)),
+                  ),
+                  const SizedBox(height: 12),
+                  TokenGauge(tokens: lastTokens),
+                ],
+              ),
             ),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 12),
+          if (topModels.isNotEmpty)
+            Card(
+              child: Column(
+                children: [
+                  for (final entry in topModels.take(5))
+                    ListTile(
+                      dense: true,
+                      leading: const Icon(LucideIcons.cpu, size: 16),
+                      title: Text(
+                        entry.key,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: Text('${entry.value} tokens'),
+                    ),
+                ],
+              ),
+            ),
+          if (topModels.isNotEmpty) const SizedBox(height: 8),
           for (final item in items.take(100))
             Card(
               child: ListTile(
@@ -625,6 +833,7 @@ class _SettingsDetailState extends State<SettingsDetail> {
         return [
           for (final shortcut in [
             ('Ctrl / ⌘ + N', 'Nouvelle conversation'),
+            ('Ctrl / ⌘ + K', 'Recherche globale'),
             ('Ctrl / ⌘ + ,', 'Réglages'),
             ('Échap', 'Fermer un panneau'),
           ])
@@ -640,6 +849,169 @@ class _SettingsDetailState extends State<SettingsDetail> {
           const SizedBox(height: 20),
           const Notice(
             'Sur téléphone, les mêmes actions sont accessibles dans la barre supérieure et le menu latéral.',
+          ),
+        ];
+      case 'notifications':
+        final notification = object(draft['notification']);
+        bool flag(String key, bool fallback) {
+          final value = notification[key];
+          return value is bool ? value : fallback;
+        }
+
+        void setFlag(String key, bool value) {
+          notification[key] = value;
+          draft['notification'] = notification;
+          setState(() {});
+        }
+
+        return [
+          const Notice(
+            'Les notifications push et les e-mails sont envoyés par votre serveur ARO. Cette page règle les alertes in-app sur ce téléphone ; la configuration SMTP reste sur le desktop.',
+          ),
+          const SizedBox(height: 20),
+          Card(
+            child: Column(
+              children: [
+                SwitchListTile(
+                  title: const Text('Notifications in-app'),
+                  subtitle: const Text('Toasts pour agents, plans et sync'),
+                  value: flag('desktopNotificationsEnabled', true),
+                  onChanged: saving
+                      ? null
+                      : (v) => setFlag('desktopNotificationsEnabled', v),
+                ),
+                SwitchListTile(
+                  title: const Text('Son'),
+                  subtitle: const Text('Signal sonore avec les toasts'),
+                  value: flag('soundEnabled', true),
+                  onChanged: saving
+                      ? null
+                      : (v) => setFlag('soundEnabled', v),
+                ),
+                SwitchListTile(
+                  title: const Text('Fin des agents'),
+                  subtitle: const Text('Me prévenir quand un agent termine'),
+                  value: flag('agentCompletionNotifications', true),
+                  onChanged: saving
+                      ? null
+                      : (v) => setFlag('agentCompletionNotifications', v),
+                ),
+                SwitchListTile(
+                  title: const Text('Résumés planifiés'),
+                  subtitle: const Text('Alertes des tâches du planificateur'),
+                  value: flag('routineNotifications', false),
+                  onChanged: saving
+                      ? null
+                      : (v) => setFlag('routineNotifications', v),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          FilledButton(
+            onPressed: saving ? null : saveDraft,
+            child: const Text('Enregistrer'),
+          ),
+        ];
+      case 'browser':
+        final history = w.preferences
+            .getStringList('aro.browser.history')
+            ?.reversed
+            .take(20)
+            .toList();
+        return [
+          const Notice(
+            'Sur mobile, les liens s’ouvrent dans le navigateur de votre appareil, avec votre consentement à chaque ouverture. Aucune navigation intégrée silencieuse.',
+          ),
+          const SizedBox(height: 20),
+          Card(
+            child: ListTile(
+              leading: const Icon(LucideIcons.globe),
+              title: const Text('Ouverture externe'),
+              subtitle: Text(
+                history == null || history.isEmpty
+                    ? 'Aucun lien ouvert depuis ARO pour le moment.'
+                    : '${history.length} derniers liens ouverts depuis ARO.',
+              ),
+              trailing: (history == null || history.isEmpty)
+                  ? null
+                  : IconButton(
+                      tooltip: 'Effacer l’historique local',
+                      onPressed: () => perform(context, () async {
+                        await w.preferences.remove('aro.browser.history');
+                        if (mounted) setState(() {});
+                      }, success: 'Historique effacé'),
+                      icon: const Icon(LucideIcons.trash2, size: 18),
+                    ),
+            ),
+          ),
+          if (history != null && history.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            for (final url in history)
+              Card(
+                child: ListTile(
+                  leading: const Icon(LucideIcons.history, size: 18),
+                  title: Text(
+                    url,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  trailing: const Icon(
+                    LucideIcons.externalLink,
+                    size: 16,
+                  ),
+                  onTap: () => perform(context, () async {
+                    final uri = Uri.tryParse(url);
+                    if (uri == null || uri.host.isEmpty) {
+                      throw const ApiException(
+                        0,
+                        'Ce lien enregistré est invalide.',
+                      );
+                    }
+                    if (!await launchUrl(
+                      uri,
+                      mode: LaunchMode.externalApplication,
+                    )) {
+                      throw const ApiException(
+                        0,
+                        'Impossible d’ouvrir ce lien.',
+                      );
+                    }
+                  }),
+                ),
+              ),
+          ],
+        ];
+      case 'computer':
+        return [
+          const Notice(
+            'Le contrôle du PC (volume, batterie, Wi-Fi, captures, lancement d’apps, terminal) reste sur l’application desktop, avec autorisation explicite. Cette page décrit uniquement ce téléphone.',
+          ),
+          const SizedBox(height: 20),
+          Card(
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(LucideIcons.monitorSmartphone),
+                  title: const Text('Cet appareil'),
+                  subtitle: Text(
+                    Theme.of(context).platform.name,
+                  ),
+                ),
+                ListTile(
+                  leading: const Icon(LucideIcons.server),
+                  title: const Text('Serveur ARO'),
+                  subtitle: Text(w.api.baseUrl),
+                ),
+                ListTile(
+                  leading: const Icon(LucideIcons.shieldCheck),
+                  title: const Text('Permissions natives'),
+                  subtitle: const Text(
+                    'Microphone, fichiers et notifications demandés au moment de l’usage.',
+                  ),
+                ),
+              ],
+            ),
           ),
         ];
       case 'system':
@@ -686,6 +1058,10 @@ class _SettingsDetailState extends State<SettingsDetail> {
     model['modelId'] = ref['modelId'];
     draft['model'] = model;
     await saveDraft();
+    // Le défaut global change : toute surcharge par message devient caduque.
+    w.setModelOverride(null);
+    await w.refreshAiStatus();
+    if (mounted) setState(() {});
   }
 
   Future<void> saveDraft() async {
@@ -736,6 +1112,123 @@ class _SettingsDetailState extends State<SettingsDetail> {
       await w.switchOrganization(id);
       if (mounted) setState(() {});
     });
+  }
+
+  Future<void> inviteMember() async {
+    final result = await editFields(context, 'Inviter un membre', const [
+      SettingField('name', 'Nom complet', required: true),
+      SettingField('email', 'Adresse e-mail', required: true),
+      SettingField('role', 'Rôle', options: ['member', 'admin']),
+    ], const {'role': 'member'});
+    if (result == null || !mounted) return;
+    await perform(context, () async {
+      try {
+        await w.api.request('POST', '/memberships', body: result);
+      } on ApiException catch (e) {
+        if (e.status == 503) {
+          throw const ApiException(
+            503,
+            'L’envoi d’invitations n’est pas configuré sur ce serveur.',
+          );
+        }
+        rethrow;
+      }
+      await load();
+    }, success: 'Invitation envoyée');
+  }
+
+  Future<void> changeMemberRole(Json member) async {
+    final current = '${member['role'] ?? 'member'}';
+    final next = await showDialog<String>(
+      context: context,
+      builder: (_) => SimpleDialog(
+        title: const Text('Rôle du membre'),
+        children: [
+          for (final role in ['member', 'admin'])
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, role),
+              child: Row(
+                children: [
+                  if (role == current) const Icon(LucideIcons.check, size: 16),
+                  if (role == current) const SizedBox(width: 8),
+                  Text(role == 'admin' ? 'Admin' : 'Membre'),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+    if (next == null || next == current || !mounted) return;
+    await perform(context, () async {
+      await w.api.request(
+        'PATCH',
+        '/memberships/${member['id']}',
+        body: {'role': next},
+      );
+      await load();
+    }, success: 'Rôle mis à jour');
+  }
+
+  Future<void> removeMember(Json member) async {
+    final label =
+        '${member['name'] ?? member['email'] ?? member['userId'] ?? 'Membre'}';
+    if (!await confirmDelete(context, label)) return;
+    if (!mounted) return;
+    await perform(context, () async {
+      await w.api.request('DELETE', '/memberships/${member['id']}');
+      await load();
+    }, success: 'Membre retiré');
+  }
+
+  Future<void> revokeInvitation(Json invitation) async {
+    final label =
+        '${invitation['email'] ?? invitation['name'] ?? 'Invitation'}';
+    if (!await confirmDelete(context, label)) return;
+    if (!mounted) return;
+    await perform(context, () async {
+      await w.api.request('DELETE', '/invitations/${invitation['id']}');
+      await load();
+    }, success: 'Invitation révoquée');
+  }
+
+  Future<void> renameOrganization() async {
+    final result = await editFields(
+      context,
+      'Renommer l’organisation',
+      const [SettingField('name', 'Nom', required: true)],
+      {'name': w.orgName},
+    );
+    if (result == null || !mounted) return;
+    await perform(context, () async {
+      final orgId = object(w.api.session?['activeOrganization'])['id'];
+      await w.api.request(
+        'PATCH',
+        '/organizations/$orgId',
+        body: {'name': result['name']},
+      );
+      await w.refresh();
+      if (mounted) setState(() {});
+    }, success: 'Organisation renommée');
+  }
+
+  Future<void> createOrganization() async {
+    final result = await editFields(
+      context,
+      'Créer une organisation',
+      const [SettingField('name', 'Nom', required: true)],
+      const {},
+    );
+    if (result == null || !mounted) return;
+    await perform(context, () async {
+      final created = object(
+        await w.api.request('POST', '/organizations', body: result),
+      );
+      final org = object(created['organization']);
+      if (org['id'] != null) {
+        await w.switchOrganization('${org['id']}');
+      }
+      await load();
+    }, success: 'Organisation créée');
   }
 
   Future<void> edit([Json? item]) async {

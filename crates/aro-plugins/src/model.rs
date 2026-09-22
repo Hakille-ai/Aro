@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -63,6 +64,21 @@ pub struct InstalledPlugin {
     pub skills: Vec<PluginSkillSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<crate::marketplace::PluginAuthConfig>,
+    /// Raw client extensions from plugin.json (agent-plugins.org §5, reverse-domain
+    /// namespaces). ARO reads branding from `extensions["com.aro.client"]`
+    /// (`{ logo, brandColor }`). The official manifest has NO logo/icon field.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub extensions: HashMap<String, serde_json::Value>,
+    /// Resolved display logo: an emoji glyph, or `file:<name>` for an image
+    /// confined to the plugin root (bytes via `read_plugin_logo`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,
+    /// `"emoji"` | `"file"` — mirrors `logo`, so clients know whether the
+    /// bytes must be fetched lazily.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brand_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,4 +119,14 @@ pub struct CreateCustomPluginRequest {
     pub mcp_servers: std::collections::HashMap<String, crate::mcp_config::PluginMcpServerConfig>,
     #[serde(default)]
     pub skills: Vec<CustomSkillDefinition>,
+    /// Branding for the new plugin (persisted into
+    /// `extensions["com.aro.client"]`, never as top-level manifest fields).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo_emoji: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brand_color: Option<String>,
+    /// Raw upload (`data:image/...;base64,...`, PNG/JPEG/WebP/SVG, ≤2 MiB).
+    /// Stored as `logo.<ext>` inside the plugin directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo_data_url: Option<String>,
 }

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Fond du splash : identique au SplashPage Flutter (thème sombre). -->
+    <color name="splash_background">#FF111115</color>
+</resources>

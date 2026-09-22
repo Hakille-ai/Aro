@@ -46,4 +46,44 @@ describe("parseMessageThinking", () => {
       hasReasoning: false,
     });
   });
+
+  it("suppresses actualContent if it erroneously duplicates reasoning", () => {
+    const content = "<think>\nOkay, the user said salut\n</think>\nOkay, the user said salut";
+    expect(parseMessageThinking(content)).toEqual({
+      reasoning: "Okay, the user said salut",
+      isReasoningComplete: true,
+      actualContent: "",
+      hasReasoning: true,
+    });
+  });
+
+  it("handles multiple thinking blocks from multi-step reasoning models", () => {
+    const content =
+      "<think>Initial plan: search news.</think>" +
+      "<think>The search tool was blocked due to network access being disabled. I will explain to user.</think>" +
+      "\nDésolé Diallo, je ne peux pas accéder à Internet pour le moment.";
+
+    const result = parseMessageThinking(content);
+    expect(result.hasReasoning).toBe(true);
+    expect(result.isReasoningComplete).toBe(true);
+    expect(result.reasoning).toBe(
+      "Initial plan: search news.\n\nThe search tool was blocked due to network access being disabled. I will explain to user."
+    );
+    expect(result.actualContent).toBe("Désolé Diallo, je ne peux pas accéder à Internet pour le moment.");
+    expect(result.actualContent).not.toContain("<think>");
+    expect(result.actualContent).not.toContain("</think>");
+  });
+
+  it("handles multiple thinking blocks when the last one is still streaming", () => {
+    const content =
+      "<think>First thought complete</think>" +
+      "Some intermediate status" +
+      "<think>Second thought still streaming...";
+
+    const result = parseMessageThinking(content);
+    expect(result.hasReasoning).toBe(true);
+    expect(result.isReasoningComplete).toBe(false);
+    expect(result.reasoning).toBe("First thought complete\n\nSecond thought still streaming...");
+    expect(result.actualContent).toBe("Some intermediate status");
+  });
 });

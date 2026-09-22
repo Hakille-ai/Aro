@@ -127,8 +127,9 @@ impl PluginManifest {
     }
 }
 
-/// Validates plugin names per agent-plugins.org §5.5
-fn is_valid_plugin_name(s: &str) -> bool {
+/// Validates plugin names per agent-plugins.org §5.5.
+/// Public so install paths can reject traversal names *before* touching disk.
+pub fn is_valid_plugin_name(s: &str) -> bool {
     if s.is_empty() || s.len() > 64 {
         return false;
     }

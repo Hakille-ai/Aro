@@ -18,10 +18,12 @@
 
 <script lang="ts">
   import BrushCleaning from "@lucide/svelte/icons/brush-cleaning";
+  import Building2 from "@lucide/svelte/icons/building-2";
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import ChevronsUpDown from "@lucide/svelte/icons/chevrons-up-down";
   import Database from "@lucide/svelte/icons/database";
+  import User from "@lucide/svelte/icons/user";
   import Download from "@lucide/svelte/icons/download";
   import Edit2 from "@lucide/svelte/icons/edit-2";
   import FolderPlus from "@lucide/svelte/icons/folder-plus";
@@ -46,7 +48,12 @@
   } from "../../lib/types";
   import FolderTreeItem from "../folders/FolderTreeItem.svelte";
   import { buildFolderTree } from "../folders/model";
-  import { computeProjectStats } from "../projects/model";
+  import {
+    computeProjectStats,
+    filterProjectsForScope,
+    filterFoldersForScope,
+    filterConversationsForScope,
+  } from "../projects/model";
 
   export let sidebarOpen: boolean = true;
   export let onToggleSidebar: () => void = () => {};
@@ -54,6 +61,7 @@
   export let searchQuery: string;
   export let activeSidebarMenuId: string | null;
   export let showCloudAuthPanel: boolean;
+  export let activeScope: "personal" | "organization" = "personal";
   export let conversations: Conversation[];
   export let projects: Project[] = [];
   export let folders: Folder[] = [];
@@ -115,14 +123,36 @@
   let dragOverProjectId: string | null = null;
   let dragOverUnassigned = false;
 
-  $: projectStats = computeProjectStats(projects, folders, conversations);
+  $: scopedProjects = filterProjectsForScope(
+    projects,
+    activeScope,
+    cloudSession?.activeOrganization?.id,
+    conversations,
+    folders,
+  );
+  $: scopedFolders = filterFoldersForScope(
+    folders,
+    activeScope,
+    cloudSession?.activeOrganization?.id,
+    projects,
+    conversations,
+  );
+  $: scopedConversations = filterConversationsForScope(
+    conversations,
+    activeScope,
+    cloudSession?.activeOrganization?.id,
+    projects,
+    folders,
+  );
 
-  $: globalFolders = folders.filter((f) => !f.projectId);
-  $: globalFolderTree = buildFolderTree(globalFolders, conversations, null);
+  $: projectStats = computeProjectStats(scopedProjects, scopedFolders, scopedConversations);
 
-  $: unassignedConversations = conversations.filter((c) => {
+  $: globalFolders = scopedFolders.filter((f) => !f.projectId);
+  $: globalFolderTree = buildFolderTree(globalFolders, scopedConversations, null);
+
+  $: unassignedConversations = scopedConversations.filter((c) => {
     if (c.projectId) return false;
-    if (c.folderId && folders.some((f) => f.id === c.folderId)) return false;
+    if (c.folderId && (folders.some((f) => f.id === c.folderId) || scopedFolders.some((f) => f.id === c.folderId))) return false;
     return true;
   });
 
@@ -237,7 +267,7 @@
           </button>
         {/each}
 
-        {#if activeConversation}
+        {#if activeConversation && scopedConversations.some((c) => c.id === activeConversation?.id)}
           <div class="dock-divider"></div>
           <button
             class="dock-icon-btn active-chat"
@@ -253,14 +283,19 @@
       <div class="dock-bottom">
         <button
           class="dock-icon-btn cloud-dock-btn"
-          class:connected={cloudAuthenticated}
-          class:offline={cloudSyncStatus.health !== "online"}
+          class:connected={cloudAuthenticated || activeScope === "personal"}
+          class:personal={activeScope === "personal"}
+          class:offline={activeScope !== "personal" && cloudSyncStatus.health !== "online"}
           type="button"
-          title={cloudAuthenticated ? (cloudWriteDisabledTitle("modifier cet espace") ?? (cloudSession?.activeOrganization.name || "Cloud connecté")) : "Connecter ARO Cloud"}
+          title={activeScope === "personal" ? "Espace Personnel" : (cloudAuthenticated ? (cloudWriteDisabledTitle("modifier cet espace") ?? (cloudSession?.activeOrganization.name || "Cloud connecté")) : "Connecter ARO Cloud")}
           on:click|stopPropagation={() => (showCloudAuthPanel = !showCloudAuthPanel)}
         >
-          <Database size={13} />
-          <span class="dock-status-dot" class:connected={cloudAuthenticated}></span>
+          {#if activeScope === "personal"}
+            <User size={13} style="color: #bf5af2;" />
+          {:else}
+            <Database size={13} />
+          {/if}
+          <span class="dock-status-dot" class:connected={cloudAuthenticated || activeScope === "personal"}></span>
         </button>
 
         <button
@@ -360,9 +395,9 @@
         <!-- List of Projects -->
         {#each projectStats as proj, index (proj.id)}
           {@const isExpanded = expandedProjects[proj.id] ?? true}
-          {@const projFolders = folders.filter((f) => f.projectId === proj.id)}
-          {@const projFolderTree = buildFolderTree(projFolders, conversations, proj.id)}
-          {@const projDirectConversations = conversations.filter((c) => c.projectId === proj.id && !c.folderId)}
+          {@const projFolders = scopedFolders.filter((f) => f.projectId === proj.id)}
+          {@const projFolderTree = buildFolderTree(projFolders, scopedConversations, proj.id)}
+          {@const projDirectConversations = scopedConversations.filter((c) => c.projectId === proj.id && !c.folderId)}
           {@const projColor = getProjectColor(proj, index)}
 
           <div
@@ -601,7 +636,7 @@
           on:drop={handleUnassignedDrop}
           title="Glissez une conversation ici pour la retirer de son projet/dossier"
         >
-          <span>{projects.length > 0 ? "CONVERSATIONS" : labels.conversations}</span>
+          <span>{scopedProjects.length > 0 ? "CONVERSATIONS" : labels.conversations}</span>
           {#if unassignedConversations.length > 0}
             <span class="section-count-badge">{unassignedConversations.length}</span>
           {/if}
@@ -723,23 +758,21 @@
 
       <button
         class="cloud-status-button"
-        class:connected={cloudAuthenticated}
-        class:offline={cloudSyncStatus.health !== "online"}
+        class:connected={cloudAuthenticated || activeScope === "personal"}
+        class:personal={activeScope === "personal"}
+        class:offline={activeScope !== "personal" && cloudSyncStatus.health !== "online"}
         type="button"
-        title={cloudAuthenticated ? (cloudWriteDisabledTitle("modifier cet espace") ?? cloudSyncStatus.health) : "Connecter ARO Cloud"}
+        title={activeScope === "personal" ? "Espace Personnel" : (cloudAuthenticated ? (cloudWriteDisabledTitle("modifier cet espace") ?? cloudSyncStatus.health) : "Connecter ARO Cloud")}
         on:click|stopPropagation={() => (showCloudAuthPanel = !showCloudAuthPanel)}
       >
-        <Database size={13} class="db-icon" />
-        <span>{cloudAuthenticated ? (cloudSession?.activeOrganization.name || "Cloud") : "Cloud"}</span>
-        {#if cloudAuthenticated}
-          <ChevronsUpDown size={11} class="chevron-icon" />
+        {#if activeScope === "personal"}
+          <User size={13} class="db-icon personal-icon" style="color: #bf5af2;" />
+          <span style="font-weight: 600;">Espace Personnel</span>
         {:else}
-          {#if cloudStatusShortLabel}
-            <small>{cloudStatusShortLabel}</small>
-          {:else if cloudSyncStatus.pendingEvents > 0}
-            <small>{cloudSyncStatus.pendingEvents}</small>
-          {/if}
+          <Building2 size={13} class="db-icon" />
+          <span>{cloudAuthenticated ? (cloudSession?.activeOrganization.name || "Organisation") : "Cloud"}</span>
         {/if}
+        <ChevronsUpDown size={11} class="chevron-icon" />
       </button>
 
       <div class="sidebar-footer">
@@ -1046,6 +1079,101 @@
     background: rgba(59, 130, 246, 0.2) !important;
     border-color: rgba(59, 130, 246, 0.32) !important;
     color: #93c5fd !important;
+  }
+
+  /* SIDEBAR SEARCH CONTAINER */
+  .sidebar-search-container {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.03);
+    box-sizing: border-box;
+    transition: all 150ms ease;
+  }
+
+  .sidebar-search-container:focus-within {
+    border-color: #0071e3;
+    background: #ffffff;
+    box-shadow: 0 0 0 2px rgba(0, 113, 227, 0.15);
+  }
+
+  .sidebar-search-container :global(.search-icon) {
+    position: static !important;
+    left: auto !important;
+    color: #86868b;
+    flex-shrink: 0;
+    pointer-events: none;
+  }
+
+  .sidebar-search-input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    color: #1a1a1a;
+    font-size: 12.5px;
+    outline: none;
+    padding: 0;
+  }
+
+  .sidebar-search-input::placeholder {
+    color: #868e96;
+  }
+
+  .search-clear-btn {
+    background: transparent;
+    border: none;
+    color: #868e96;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+    border-radius: 50%;
+    transition: all 150ms ease;
+  }
+
+  .search-clear-btn:hover {
+    background: rgba(0, 0, 0, 0.06);
+    color: #111;
+  }
+
+  :global(body.dark-theme) .sidebar-search-container {
+    border-color: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  :global(body.dark-theme) .sidebar-search-container:focus-within {
+    border-color: #0a84ff;
+    background: rgba(255, 255, 255, 0.08);
+    box-shadow: 0 0 0 2px rgba(10, 132, 255, 0.25);
+  }
+
+  :global(body.dark-theme) .sidebar-search-input {
+    color: #ffffff;
+  }
+
+  :global(body.dark-theme) .sidebar-search-input::placeholder {
+    color: #86868b;
+  }
+
+  :global(body.dark-theme) .sidebar-search-container :global(.search-icon) {
+    color: #86868b;
+  }
+
+  :global(body.dark-theme) .search-clear-btn {
+    color: #86868b;
+  }
+
+  :global(body.dark-theme) .search-clear-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #ffffff;
   }
 
   /* SECTION HEADER */

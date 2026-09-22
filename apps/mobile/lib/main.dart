@@ -48,7 +48,7 @@ class AroApp extends StatelessWidget {
       supportedLocales: const [Locale('fr'), Locale('en')],
       localizationsDelegates: GlobalMaterialLocalizations.delegates,
       home: workspace.starting
-          ? const Scaffold(body: Center(child: Brand(size: 70)))
+          ? const SplashPage()
           : workspace.api.authenticated
           ? HomePage(workspace: workspace)
           : AuthPage(workspace: workspace),

@@ -1,6 +1,7 @@
 mod api_client;
 mod plugin_accounts;
 mod state;
+mod billing;
 mod workspace_patch;
 use workspace_patch::apply_unified_patch;
 
@@ -16,7 +17,8 @@ use aro_core::{
     AgentContextItem, AgentLaneView, AgentOrchestratorSnapshot, AgentRun, AgentRunPriority,
     AgentRunStartRequest, AgentRunStatus, AgentRunView, AppSettings, AroError, AroResult,
     AssistantMode, AuthSession, ChatMessage, Conversation, Episode, FileObject, Folder, LongTermMemory,
-    Membership, MembershipRole, ModelProviderConnection, ModelProviderKind, ModelRef, Organization,
+    Membership, MembershipRole, ModelProviderConnection, ModelProviderKind, ModelRef,
+    NotificationFilter, NotificationItem, Organization,
     OrganizationMember, PermissionProfile, Project, PublicApiKey, RuntimeStatus,
     SendMessageRequest, SendMessageResponse, SyncStatus, SynthesisRequest, SynthesisResult,
     TranscriptionRequest, TranscriptionResult, User, UserPreferences, VoiceReadinessIssue,
@@ -1582,7 +1584,7 @@ async fn conversation_create(
         .await
         .map_err(to_command_error)?
     {
-        let cloud_conversation = state
+        match state
             .cloud
             .create_conversation(
                 &session.access_token,
@@ -1592,25 +1594,34 @@ async fn conversation_create(
                 folder_id.map(|id| id.to_string()),
             )
             .await
-            .map_err(to_command_error)?;
-        let _ = state.engine.delete_conversation(conversation.id);
-        if state
-            .engine
-            .upsert_conversation(&cloud_conversation)
-            .is_ok()
         {
-            conversation = cloud_conversation;
-            // Le cloud peut ignorer le placement : on le ré-applique en local.
-            if (project_id.is_some() || folder_id.is_some())
-                && (conversation.project_id.is_none() && conversation.folder_id.is_none())
-            {
-                if let Ok(moved) =
-                    state
-                        .engine
-                        .move_conversation(conversation.id, project_id, folder_id)
+            Ok(cloud_conversation) => {
+                let _ = state.engine.delete_conversation(conversation.id);
+                if state
+                    .engine
+                    .upsert_conversation(&cloud_conversation)
+                    .is_ok()
                 {
-                    conversation = moved;
+                    conversation = cloud_conversation;
+                    // Le cloud peut ignorer le placement : on le ré-applique en local.
+                    if (project_id.is_some() || folder_id.is_some())
+                        && (conversation.project_id.is_none() && conversation.folder_id.is_none())
+                    {
+                        if let Ok(moved) =
+                            state
+                                .engine
+                                .move_conversation(conversation.id, project_id, folder_id)
+                        {
+                            conversation = moved;
+                        }
+                    }
                 }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "Cloud conversation creation failed or was rate-limited; keeping local conversation"
+                );
             }
         }
     }
@@ -1796,12 +1807,16 @@ async fn project_list(state: State<'_, AppState>) -> CommandResult<Vec<Project>>
                 .await;
         }
         if let Ok(cloud_projects) = state.cloud.list_projects(&session.access_token).await {
-            for proj in &cloud_projects {
-                let _ = state.engine.save_project(proj);
+            let active_org_id = session.active_organization.id.to_string();
+            for mut proj in cloud_projects.clone() {
+                proj.organization_id = Some(active_org_id.clone());
+                let _ = state.engine.save_project(&proj);
             }
             if let Ok(local_projects) = state.engine.projects() {
                 for local in &local_projects {
-                    if !cloud_projects.iter().any(|c| c.id == local.id) {
+                    if local.organization_id.as_deref() == Some(&active_org_id)
+                        && !cloud_projects.iter().any(|c| c.id == local.id)
+                    {
                         let _ = state
                             .cloud
                             .create_project(&session.access_token, local)
@@ -1813,7 +1828,14 @@ async fn project_list(state: State<'_, AppState>) -> CommandResult<Vec<Project>>
                 Ok(local) => Ok(local),
                 Err(err) => {
                     tracing::warn!(error = %err, "local project list failed; showing cloud list");
-                    Ok(cloud_projects)
+                    let tagged_cloud = cloud_projects
+                        .into_iter()
+                        .map(|mut p| {
+                            p.organization_id = Some(active_org_id.clone());
+                            p
+                        })
+                        .collect();
+                    Ok(tagged_cloud)
                 }
             };
         }
@@ -1830,6 +1852,7 @@ async fn project_create(
     root_path: Option<String>,
     color: Option<String>,
     icon: Option<String>,
+    organization_id: Option<String>,
 ) -> CommandResult<Project> {
     let now = chrono::Utc::now();
     let project = Project {
@@ -1842,6 +1865,7 @@ async fn project_create(
         icon: icon.unwrap_or_else(|| "folder-tree".into()),
         created_at: now,
         updated_at: now,
+        organization_id,
     };
     state
         .engine
@@ -1852,10 +1876,12 @@ async fn project_create(
         .await
         .map_err(to_command_error)?
     {
-        let _ = state
-            .cloud
-            .create_project(&session.access_token, &project)
-            .await;
+        if project.organization_id.as_deref() == Some(&session.active_organization.id.to_string()) {
+            let _ = state
+                .cloud
+                .create_project(&session.access_token, &project)
+                .await;
+        }
     }
     Ok(project)
 }
@@ -1955,12 +1981,16 @@ async fn folder_list(state: State<'_, AppState>) -> CommandResult<Vec<Folder>> {
                 .await;
         }
         if let Ok(cloud_folders) = state.cloud.list_folders(&session.access_token).await {
-            for fold in &cloud_folders {
-                let _ = state.engine.save_folder(fold);
+            let active_org_id = session.active_organization.id.to_string();
+            for mut fold in cloud_folders.clone() {
+                fold.organization_id = Some(active_org_id.clone());
+                let _ = state.engine.save_folder(&fold);
             }
             if let Ok(local_folders) = state.engine.folders() {
                 for local in &local_folders {
-                    if !cloud_folders.iter().any(|c| c.id == local.id) {
+                    if local.organization_id.as_deref() == Some(&active_org_id)
+                        && !cloud_folders.iter().any(|c| c.id == local.id)
+                    {
                         let _ = state
                             .cloud
                             .create_folder(&session.access_token, local)
@@ -1972,7 +2002,14 @@ async fn folder_list(state: State<'_, AppState>) -> CommandResult<Vec<Folder>> {
                 Ok(local) => Ok(local),
                 Err(err) => {
                     tracing::warn!(error = %err, "local folder list failed; showing cloud list");
-                    Ok(cloud_folders)
+                    let tagged_cloud = cloud_folders
+                        .into_iter()
+                        .map(|mut f| {
+                            f.organization_id = Some(active_org_id.clone());
+                            f
+                        })
+                        .collect();
+                    Ok(tagged_cloud)
                 }
             };
         }
@@ -1988,6 +2025,7 @@ async fn folder_create(
     root_path: Option<String>,
     color: Option<String>,
     icon: Option<String>,
+    organization_id: Option<String>,
 ) -> CommandResult<Folder> {
     let now = chrono::Utc::now();
     let proj_uuid = match project_id {
@@ -2003,6 +2041,7 @@ async fn folder_create(
         icon: icon.unwrap_or_else(|| "folder".into()),
         created_at: now,
         updated_at: now,
+        organization_id,
     };
     state
         .engine
@@ -2013,10 +2052,12 @@ async fn folder_create(
         .await
         .map_err(to_command_error)?
     {
-        let _ = state
-            .cloud
-            .create_folder(&session.access_token, &folder)
-            .await;
+        if folder.organization_id.as_deref() == Some(&session.active_organization.id.to_string()) {
+            let _ = state
+                .cloud
+                .create_folder(&session.access_token, &folder)
+                .await;
+        }
     }
     Ok(folder)
 }
@@ -2505,17 +2546,304 @@ async fn notify_desktop_os(
 ) -> CommandResult<()> {
     #[cfg(target_os = "windows")]
     {
+        let clean_title = title.replace('\'', "''");
+        let clean_body = body.replace('\'', "''");
         let script = format!(
-            "[reflection.assembly]::loadwithpartialname('System.Windows.Forms'); $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; $n.ShowBalloonTip(5000, '{}', '{}', [System.Windows.Forms.ToolTipIcon]::Info);",
-            title.replace("'", "''"),
-            body.replace("'", "''")
+            "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; $n.ShowBalloonTip(4000, '{clean_title}', '{clean_body}', [System.Windows.Forms.ToolTipIcon]::Info); Start-Sleep -Seconds 3; $n.Dispose();"
         );
         let _ = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", &script])
             .spawn();
     }
-    let _ = (title, body, conversation_id);
+    #[cfg(target_os = "macos")]
+    {
+        let clean_title = title.replace('"', "\\\"").replace('\\', "\\\\");
+        let clean_body = body.replace('"', "\\\"").replace('\\', "\\\\");
+        let script = format!("display notification \"{clean_body}\" with title \"{clean_title}\"");
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("notify-send")
+            .args(["--app-name=ARO", &title, &body])
+            .spawn();
+    }
+    let _ = conversation_id;
     Ok(())
+}
+
+#[tauri::command]
+async fn notification_list(
+    state: State<'_, AppState>,
+    filter: Option<NotificationFilter>,
+) -> CommandResult<Vec<NotificationItem>> {
+    let f = filter.unwrap_or_default();
+    state.engine.list_notifications(&f).map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn notification_create(
+    state: State<'_, AppState>,
+    item: NotificationItem,
+) -> CommandResult<NotificationItem> {
+    let created = state.engine.create_notification(&item).map_err(to_command_error)?;
+    let settings = state.settings().await;
+    if settings.notification.desktop_notifications_enabled {
+        let _ = notify_desktop_os(created.title.clone(), created.body.clone(), created.action_url.clone()).await;
+    }
+    Ok(created)
+}
+
+#[tauri::command]
+async fn notification_mark_read(
+    state: State<'_, AppState>,
+    id: String,
+) -> CommandResult<bool> {
+    state.engine.mark_notification_as_read(&id).map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn notification_mark_all_read(
+    state: State<'_, AppState>,
+    organization_id: Option<Uuid>,
+) -> CommandResult<u64> {
+    state.engine.mark_all_notifications_as_read(organization_id).map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn notification_delete(
+    state: State<'_, AppState>,
+    id: String,
+) -> CommandResult<bool> {
+    state.engine.delete_notification(&id).map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn notification_clear_all(
+    state: State<'_, AppState>,
+    organization_id: Option<Uuid>,
+) -> CommandResult<u64> {
+    state.engine.clear_all_notifications(organization_id).map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn notification_unread_count(
+    state: State<'_, AppState>,
+    organization_id: Option<Uuid>,
+) -> CommandResult<u64> {
+    state.engine.get_unread_notification_count(organization_id).map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn notification_set_secret(
+    state: State<'_, AppState>,
+    secret_type: String,
+    secret_value: String,
+) -> CommandResult<AppSettings> {
+    let key = secret_value.trim();
+    if key.is_empty() {
+        return Err("Secret value cannot be empty".to_string());
+    }
+    let keyring_id = match secret_type.as_str() {
+        "smtp_password" | "smtpPassword" => "notification-smtp-password",
+        "api_key" | "apiKey" => "notification-api-key",
+        _ => return Err(format!("Unsupported notification secret type: {secret_type}")),
+    };
+    save_provider_api_key(keyring_id, key).map_err(to_command_error)?;
+    let settings = state.settings().await;
+    Ok(settings)
+}
+
+#[tauri::command]
+async fn notification_clear_secret(
+    state: State<'_, AppState>,
+    secret_type: String,
+) -> CommandResult<AppSettings> {
+    let keyring_id = match secret_type.as_str() {
+        "smtp_password" | "smtpPassword" => "notification-smtp-password",
+        "api_key" | "apiKey" => "notification-api-key",
+        _ => return Err(format!("Unsupported notification secret type: {secret_type}")),
+    };
+    clear_provider_api_key(keyring_id).map_err(to_command_error)?;
+    let settings = state.settings().await;
+    Ok(settings)
+}
+
+#[tauri::command]
+async fn email_send_direct(
+    state: State<'_, AppState>,
+    to: String,
+    subject: String,
+    body: String,
+    is_html: Option<bool>,
+) -> CommandResult<serde_json::Value> {
+    let settings = state.settings().await;
+    let provider = settings.notification.email_provider.to_ascii_lowercase();
+
+    match provider.as_str() {
+        "resend" => {
+            let api_key = settings.notification.api_key
+                .or_else(|| std::env::var("RESEND_API_KEY").ok())
+                .filter(|k| !k.trim().is_empty())
+                .ok_or_else(|| "Clé API Resend non configurée dans les Paramètres ARO".to_string())?;
+
+            let from_str = settings.notification.smtp_from.as_deref().unwrap_or("onboarding@resend.dev");
+            let client = reqwest::Client::new();
+            let payload = serde_json::json!({
+                "from": from_str,
+                "to": [to.trim()],
+                "subject": subject,
+                "text": body,
+                "html": if is_html.unwrap_or(false) { Some(body.as_str()) } else { None }
+            });
+
+            let resp = client.post("https://api.resend.com/emails")
+                .header("Authorization", format!("Bearer {api_key}"))
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| format!("Erreur réseau Resend: {e}"))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let err_text = resp.text().await.unwrap_or_default();
+                return Err(format!("Erreur API Resend ({status}): {err_text}"));
+            }
+
+            let resp_json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({ "success": true }));
+            Ok(serde_json::json!({
+                "success": true,
+                "provider": "resend",
+                "recipient": to,
+                "detail": resp_json,
+            }))
+        }
+        "sendgrid" => {
+            let api_key = settings.notification.api_key
+                .or_else(|| std::env::var("SENDGRID_API_KEY").ok())
+                .filter(|k| !k.trim().is_empty())
+                .ok_or_else(|| "Clé API SendGrid non configurée dans les Paramètres ARO".to_string())?;
+
+            let from_str = settings.notification.smtp_from.as_deref().unwrap_or("noreply@aro-ai.com");
+            let client = reqwest::Client::new();
+            let content_type = if is_html.unwrap_or(false) { "text/html" } else { "text/plain" };
+            let payload = serde_json::json!({
+                "personalizations": [{
+                    "to": [{ "email": to.trim() }]
+                }],
+                "from": { "email": from_str },
+                "subject": subject,
+                "content": [{
+                    "type": content_type,
+                    "value": body
+                }]
+            });
+
+            let resp = client.post("https://api.sendgrid.com/v3/mail/send")
+                .header("Authorization", format!("Bearer {api_key}"))
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| format!("Erreur réseau SendGrid: {e}"))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let err_text = resp.text().await.unwrap_or_default();
+                return Err(format!("Erreur API SendGrid ({status}): {err_text}"));
+            }
+
+            Ok(serde_json::json!({
+                "success": true,
+                "provider": "sendgrid",
+                "recipient": to,
+                "detail": "Dispatched via SendGrid",
+            }))
+        }
+        _ => {
+            let host = settings.notification.smtp_host.as_deref().unwrap_or("").trim();
+            if host.is_empty() {
+                return Err("Serveur SMTP non configuré dans les Paramètres ARO".into());
+            }
+            let port = settings.notification.smtp_port.unwrap_or(587);
+            let from_str = settings.notification.smtp_from.as_deref().unwrap_or("noreply@aro-ai.com");
+            let tls_mode = settings.notification.smtp_tls_mode.as_deref().unwrap_or("starttls");
+            
+            use lettre::{
+                message::{header::ContentType, Mailbox},
+                transport::smtp::authentication::Credentials,
+                AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+            };
+            use std::time::Duration;
+
+            let from: Mailbox = from_str.parse().map_err(|e| format!("Adresse expéditeur invalide: {e}"))?;
+            let to_mb: Mailbox = to.trim().parse().map_err(|e| format!("Adresse destinataire invalide: {e}"))?;
+
+            let builder = Message::builder()
+                .from(from)
+                .to(to_mb)
+                .subject(subject);
+
+            let message = if is_html.unwrap_or(false) {
+                builder.header(ContentType::TEXT_HTML).body(body)
+            } else {
+                builder.header(ContentType::TEXT_PLAIN).body(body)
+            }.map_err(|e| format!("Erreur de composition de message: {e}"))?;
+
+            let transport_builder = if tls_mode.eq_ignore_ascii_case("tls") {
+                AsyncSmtpTransport::<Tokio1Executor>::relay(host)
+                    .map_err(|e| format!("Erreur de configuration SMTP relay: {e}"))?
+                    .port(port)
+                    .timeout(Some(Duration::from_secs(20)))
+            } else {
+                AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
+                    .map_err(|e| format!("Erreur de configuration SMTP starttls: {e}"))?
+                    .port(port)
+                    .timeout(Some(Duration::from_secs(20)))
+            };
+
+            let mut transport_builder = transport_builder;
+            if let (Some(username), Some(password)) = (&settings.notification.smtp_user, &settings.notification.smtp_password) {
+                if !username.trim().is_empty() && !password.trim().is_empty() {
+                    transport_builder = transport_builder.credentials(Credentials::new(username.clone(), password.clone()));
+                }
+            }
+
+            let mailer = transport_builder.build();
+            let response = mailer.send(message).await.map_err(|e| format!("Échec de l'envoi d'e-mail: {e}"))?;
+
+            Ok(serde_json::json!({
+                "success": true,
+                "provider": "smtp",
+                "recipient": to,
+                "detail": format!("{:?}", response),
+            }))
+        }
+    }
+}
+
+#[tauri::command]
+async fn email_test_connection(
+    state: State<'_, AppState>,
+) -> CommandResult<serde_json::Value> {
+    let settings = state.settings().await;
+    let recipient = settings.notification.email_recipient.clone()
+        .filter(|r| !r.trim().is_empty())
+        .ok_or_else(|| "Veuillez configurer une adresse e-mail de destinataire dans les Paramètres".to_string())?;
+
+    email_send_direct(
+        state,
+        recipient.clone(),
+        "ARO - Test de Notification E-mail".to_string(),
+        format!(
+            "Bonjour,\n\nCeci est un e-mail de test généré par ARO Intelligence.\nVotre configuration SMTP ({}:{}) fonctionne à merveille !\n\nHorodatage : {}\n\nCordialement,\nARO Assistant",
+            settings.notification.smtp_host.as_deref().unwrap_or("localhost"),
+            settings.notification.smtp_port.unwrap_or(587),
+            chrono::Utc::now().to_rfc3339()
+        ),
+        Some(false),
+    ).await
 }
 
 #[tauri::command]
@@ -3144,7 +3472,7 @@ async fn message_regenerate(
         .map_err(to_command_error)?;
     state
         .engine
-        .regenerate_message(id, system_prompt, &provider)
+        .regenerate_message(id, system_prompt, &provider, Some(&settings.memory))
         .await
         .map_err(to_command_error)
 }
@@ -3213,14 +3541,16 @@ async fn message_send_stream(
         return Err("generation already in progress for this conversation".to_string());
     }
 
-    let mut step_callback = |step| {
-        let _ = app_clone_step.emit(
-            "agent-step-update",
-            AgentStepPayload {
-                conversation_id: initial_conv_id_str.clone(),
-                step,
-            },
-        );
+    let mut step_callback = |step: aro_core::AgentStep| {
+        if matches!(step.kind, aro_core::AgentStepKind::Tool | aro_core::AgentStepKind::Error) {
+            let _ = app_clone_step.emit(
+                "agent-step-update",
+                AgentStepPayload {
+                    conversation_id: initial_conv_id_str.clone(),
+                    step,
+                },
+            );
+        }
     };
     let mut on_step: Option<&mut (dyn FnMut(aro_core::AgentStep) + Send)> =
         Some(&mut step_callback);
@@ -3427,17 +3757,24 @@ async fn message_regenerate_stream(
 
     let assistant_msg = state
         .engine
-        .regenerate_message_stream(id, system_prompt, &provider, temp_msg_id, &mut |chunk| {
-            let _ = app_clone.emit(
-                "chat-stream-chunk",
-                StreamChunkPayload {
-                    conversation_id: conversation_id.clone(),
-                    message_id: temp_msg_id_str.clone(),
-                    content: chunk.to_string(),
-                    done: false,
-                },
-            );
-        })
+        .regenerate_message_stream(
+            id,
+            system_prompt,
+            &provider,
+            temp_msg_id,
+            &mut |chunk| {
+                let _ = app_clone.emit(
+                    "chat-stream-chunk",
+                    StreamChunkPayload {
+                        conversation_id: conversation_id.clone(),
+                        message_id: temp_msg_id_str.clone(),
+                        content: chunk.to_string(),
+                        done: false,
+                    },
+                );
+            },
+            Some(&settings.memory),
+        )
         .await
         .map_err(to_command_error)?;
 
@@ -3719,6 +4056,123 @@ async fn plugins_get(
     Ok(state.engine.plugins().get_plugin(&plugin_id).await)
 }
 
+/// Sovereign-AI server controls: thin pass-through to the API with the cloud
+/// session token. The server enforces org-admin; secrets never transit back
+/// (presence flags only). Payloads stay `serde_json::Value` so no aro-store
+/// dependency is needed here.
+async fn ai_cloud_session(state: &State<'_, AppState>) -> CommandResult<String> {
+    state
+        .refresh_cloud_session_from_keyring()
+        .await
+        .map_err(to_command_error)?
+        .map(|session| session.access_token)
+        .ok_or_else(|| "cloud session required".to_string())
+}
+
+#[tauri::command]
+async fn ai_cloud_status(state: State<'_, AppState>) -> CommandResult<serde_json::Value> {
+    let token = ai_cloud_session(&state).await?;
+    state
+        .cloud
+        .ai_cloud_status(&token)
+        .await
+        .map_err(to_command_error)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiCloudConsentCommand {
+    enabled: bool,
+    provider_ids: Vec<String>,
+    data_residency: Option<String>,
+}
+
+#[tauri::command]
+async fn ai_cloud_set_consent(
+    state: State<'_, AppState>,
+    request: AiCloudConsentCommand,
+) -> CommandResult<serde_json::Value> {
+    let token = ai_cloud_session(&state).await?;
+    let body = serde_json::json!({
+        "enabled": request.enabled,
+        "providerIds": request.provider_ids,
+        "dataResidency": request.data_residency,
+    });
+    state
+        .cloud
+        .ai_cloud_set_consent(&token, &body)
+        .await
+        .map_err(to_command_error)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AiCloudPutKeyCommand {
+    #[serde(rename = "providerId")]
+    provider_id: String,
+    #[serde(rename = "apiKey")]
+    api_key: String,
+}
+
+#[tauri::command]
+async fn ai_cloud_put_key(
+    state: State<'_, AppState>,
+    request: AiCloudPutKeyCommand,
+) -> CommandResult<serde_json::Value> {
+    let token = ai_cloud_session(&state).await?;
+    let body = serde_json::json!({ "apiKey": request.api_key });
+    state
+        .cloud
+        .ai_cloud_put_key(&token, &request.provider_id, &body)
+        .await
+        .map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn ai_cloud_delete_key(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> CommandResult<serde_json::Value> {
+    let token = ai_cloud_session(&state).await?;
+    state
+        .cloud
+        .ai_cloud_delete_key(&token, &provider_id)
+        .await
+        .map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn assistant_status(state: State<'_, AppState>) -> CommandResult<serde_json::Value> {
+    let token = ai_cloud_session(&state).await?;
+    state
+        .cloud
+        .assistant_status(&token)
+        .await
+        .map_err(to_command_error)
+}
+
+/// Read an uploaded plugin logo as `{ mime, dataUrl }` (JSON transport).
+/// Returns `None` when the plugin carries no file logo.
+#[tauri::command]
+async fn plugins_read_plugin_logo(
+    state: State<'_, AppState>,
+    plugin_id: String,
+) -> CommandResult<Option<serde_json::Value>> {
+    let data_url = state
+        .engine
+        .plugins()
+        .read_plugin_logo_data_url(&plugin_id)
+        .await
+        .map_err(to_command_error)?;
+    Ok(data_url.map(|data_url| {
+        let mime = data_url
+            .split(';')
+            .next()
+            .unwrap_or("data:image/png")
+            .trim_start_matches("data:");
+        serde_json::json!({ "mime": mime, "dataUrl": data_url })
+    }))
+}
+
 #[tauri::command]
 async fn plugins_uninstall(
     state: State<'_, AppState>,
@@ -3974,6 +4428,14 @@ async fn document_create(
     request: serde_json::Value,
 ) -> CommandResult<aro_core::ToolExecutionResult> {
     execute_tool_with_workspace_root(&state, aro_core::TOOL_CORE_DOCUMENT_CREATE, request).await
+}
+
+#[tauri::command]
+async fn computer_use(
+    state: State<'_, AppState>,
+    request: serde_json::Value,
+) -> CommandResult<aro_core::ToolExecutionResult> {
+    execute_tool_with_workspace_root(&state, aro_core::TOOL_CORE_COMPUTER_USE, request).await
 }
 
 fn to_command_error(error: impl std::fmt::Display) -> String {
@@ -4480,6 +4942,8 @@ fn main() {
             cloud_user_profile_update,
             cloud_organization_update,
             cloud_api_keys_list,
+            billing::billing_request,
+            billing::billing_open_payment,
             cloud_api_key_create,
             cloud_api_key_revoke,
             cloud_members_list,
@@ -4522,6 +4986,17 @@ fn main() {
             workspace_git_diff,
             select_folder_dialog,
             notify_desktop_os,
+            notification_list,
+            notification_create,
+            notification_mark_read,
+            notification_mark_all_read,
+            notification_delete,
+            notification_clear_all,
+            notification_unread_count,
+            notification_set_secret,
+            notification_clear_secret,
+            email_send_direct,
+            email_test_connection,
             auth_password_reset_request,
             auth_password_reset_confirm,
             project_list,
@@ -4573,6 +5048,7 @@ fn main() {
             plugins_install,
             plugins_custom_create,
             plugins_get,
+            plugins_read_plugin_logo,
             plugins_uninstall,
             plugins_toggle,
             plugins_mcp_test,
@@ -4585,8 +5061,14 @@ fn main() {
             plugins_account_update_label,
             plugins_account_disconnect,
             plugins_account_test_health,
+            ai_cloud_status,
+            ai_cloud_set_consent,
+            ai_cloud_put_key,
+            ai_cloud_delete_key,
+            assistant_status,
             code_execute,
-            document_create
+            document_create,
+            computer_use
         ])
         .run(tauri::generate_context!())
         .expect("error while running ARO");

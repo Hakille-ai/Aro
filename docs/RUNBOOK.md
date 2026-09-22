@@ -54,6 +54,30 @@ Expected result:
 
 `/live` confirms the process is running. `/ready` checks PostgreSQL, embedded SQLx migrations, and Redis when configured. `/metrics` exposes a small Prometheus-compatible baseline including Redis readiness and rate-limit status.
 
+## 2b. Local AI Engines (Mobile + Browser Chat)
+
+Mobile and browser clients generate exclusively server-side, so the server needs a local engine. Nothing leaves the machine (sovereign by default).
+
+```powershell
+# Install Ollama from https://ollama.com/download, then:
+ollama pull gemma3:1b
+curl.exe -s http://127.0.0.1:11434/api/tags
+```
+
+Expected: a JSON list containing a chat model (embedding-only models such as `nomic-embed-text` do not count). The API honors `ARO_OLLAMA_ENDPOINT` (default `http://127.0.0.1:11434`) and `ARO_LLAMA_CPP_ENDPOINT` (default `http://127.0.0.1:8080`, OpenAI-compatible `/v1/models`) — loopback only.
+
+Server generation order for `/assistant/stream` (no explicit model requested): explicit local override, active local provider, same model id found on local Ollama, first local Ollama chat model, llama.cpp model, then server cloud (only under org opt-in), otherwise an honest actionable error (never persisted as an assistant message).
+
+Explicit selection (`modelId` + `provider`, sent per message by web and mobile composers) is STRICT: the server serves exactly that model (local engine or consented server cloud key) or fails honestly naming it — never a silent substitution. Thin clients send `promptScope: "personal"` so the server completes the prompt like the desktop harness (mode instructions + recalled memories); desktop web sends `"full"` (pre-compiled prompt used as-is).
+
+Check what a client would see (needs a user JWT in `Authorization`):
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8710/v1/assistant/status -Headers @{ Authorization = "Bearer <access-token>" }
+```
+
+`canGenerate: true` with `source: local` means mobile and browser chat work.
+
 ## 3. Start the Desktop Client
 
 In a second terminal:

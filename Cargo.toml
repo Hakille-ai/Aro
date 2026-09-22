@@ -23,8 +23,8 @@ members = [
 
 [workspace.package]
 edition = "2021"
-license = "Proprietary"
-repository = "https://example.local/aro"
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/Hakille-ai/Aro"
 rust-version = "1.95"
 
 [workspace.dependencies]

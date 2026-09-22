@@ -46,6 +46,15 @@
   import WorkspaceFileViewer from "../workspace/WorkspaceFileViewer.svelte";
   import AgentLiveLogViewer from "../workspace/AgentLiveLogViewer.svelte";
   import CodeDiffViewer from "../workspace/CodeDiffViewer.svelte";
+  import IntegratedBrowser from "../browser/IntegratedBrowser.svelte";
+  import {
+    navigateBrowser,
+    takeBrowserControl,
+    createBrowserTab,
+    browserTabs,
+    switchBrowserTab,
+  } from "../browser/browser-store";
+  import { get } from "svelte/store";
   import { computeLineDiff, parseUnifiedDiff, type DiffLine } from "../../lib/diff";
 
 
@@ -223,6 +232,72 @@
     const p = detail?.path ?? detail?.relativePath;
     if (p) void openWorkspaceFileByPath(p);
   }
+
+  onMount(() => {
+    window.addEventListener("aro:open-workspace-file", handleAroOpenWorkspaceFile);
+    const handleAgentBrowserStep = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && detail.url) {
+        const tabs = get(browserTabs);
+        const existing = tabs.find((t) => t.url === detail.url);
+        if (existing) {
+          browserTabs.update((all) =>
+            all.map((t) =>
+              t.id === existing.id
+                ? {
+                    ...t,
+                    isAiControlled: true,
+                    aiStatusMessage: detail.stepTitle || (language === "fr" ? "L'IA analyse cette page..." : "AI is analyzing this page..."),
+                    extractedContent: detail.content || t.extractedContent,
+                  }
+                : t
+            )
+          );
+        } else {
+          createBrowserTab(
+            detail.url,
+            detail.title,
+            true,
+            detail.stepTitle || (language === "fr" ? "L'IA analyse cette page..." : "AI is analyzing this page...")
+          );
+        }
+      }
+    };
+    window.addEventListener("aro:agent-browser-step", handleAgentBrowserStep);
+
+    const handleOpenBrowser = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail) {
+        activeTab = "browser";
+        const isTakeControl = Boolean(detail.takeControl);
+        if (detail.url) {
+          if (detail.newTab) {
+            createBrowserTab(detail.url, detail.title, !isTakeControl);
+          } else {
+            const tabs = get(browserTabs);
+            const existing = tabs.find((t) => t.url === detail.url);
+            if (existing) {
+              switchBrowserTab(existing.id);
+            } else {
+              navigateBrowser(detail.url, !isTakeControl, detail.aiStatus);
+            }
+          }
+        }
+        if (isTakeControl) {
+          takeBrowserControl();
+        }
+        if (typeof window !== "undefined" && width < 700) {
+          width = Math.min(Math.max(window.innerWidth - 350, 650), 850);
+        }
+      }
+    };
+    window.addEventListener("aro:open-browser", handleOpenBrowser);
+    return () => {
+      window.removeEventListener("aro:open-workspace-file", handleAroOpenWorkspaceFile);
+      window.removeEventListener("aro:open-browser", handleOpenBrowser);
+      window.removeEventListener("aro:agent-browser-step", handleAgentBrowserStep);
+    };
+  });
 
   // Outputs & Artifacts Tab state
   let selectedArtifact: any | null = null;
@@ -1775,58 +1850,10 @@
 
       </div>
 
-    <!-- WEB BROWSER SIMULATOR TAB -->
+    <!-- INTEGRATED IN-APP BROWSER TAB -->
     {:else if activeTab === "browser"}
-      <div class="tab-content-view animate-fade-in">
-        <!-- Browser header address bar -->
-        <div class="browser-address-bar">
-          <div class="browser-input-row">
-            <span class="browser-icon-wrap"><Globe size={14} /></span>
-            <input type="text" bind:value={browserUrl} placeholder="https://..." on:keydown={e => e.key === "Enter" && handleGoToUrl()} />
-          </div>
-        </div>
-
-        <!-- Simulated Search Input -->
-        <div class="browser-search-box">
-          <input type="text" bind:value={browserSearchQuery} placeholder={language === "fr" ? "Rechercher avec Google..." : "Search with Google..."} on:keydown={e => e.key === "Enter" && handleBrowserSearch()} />
-          <button type="button" on:click={handleBrowserSearch}>
-            <Search size={14} />
-          </button>
-        </div>
-
-        <!-- Simulated screen -->
-        <div class="browser-screen">
-          {#if browserLoading}
-            <div class="browser-loading-overlay">
-              <span class="spinner"></span>
-              <p>{language === "fr" ? "Chargement de la page..." : "Loading page..."}</p>
-            </div>
-          {:else if browserResults.length > 0}
-            <div class="browser-search-results animate-fade-in" class:two-cols={width >= 550}>
-              <span class="results-kicker">{language === "fr" ? "Résultats de recherche" : "Search Results"}</span>
-              {#each browserResults as res}
-                <div class="search-result-card">
-                  <a href={res.url} target="_blank" class="result-title">{res.title}</a>
-                  <span class="result-url">{res.url}</span>
-                  <p class="result-snippet">{res.snippet}</p>
-                </div>
-              {/each}
-            </div>
-          {:else}
-            <!-- Home state -->
-            <div class="browser-home animate-fade-in">
-              <span class="browser-home-icon-wrap"><Globe size={32} /></span>
-              <p class="browser-home-title">{language === "fr" ? "Navigateur de l'Assistant" : "Assistant Web View"}</p>
-              <p class="browser-home-desc">
-                {language === "fr" ? "Visualisez et testez les requêtes réseau effectuées par l'agent ou lancez des recherches manuelles." : "Monitor network queries executed by the agent or run manual lookups."}
-              </p>
-              <div class="browser-home-tip">
-                <Info size={13} style="flex-shrink: 0;" />
-                <span>{language === "fr" ? "Les recherches utilisent le scraper Google configuré par défaut." : "Searches utilize the default configured Google search scraping engine."}</span>
-              </div>
-            </div>
-          {/if}
-        </div>
+      <div class="tab-content-view animate-fade-in" style="padding: 0; display: flex; flex-direction: column; height: 100%; overflow: hidden;">
+        <IntegratedBrowser {language} />
       </div>
 
     <!-- SOURCES & REFERENCES TAB -->

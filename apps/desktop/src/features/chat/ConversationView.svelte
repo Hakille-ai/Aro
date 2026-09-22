@@ -28,10 +28,14 @@
   import Brain from "@lucide/svelte/icons/brain";
   import Building2 from "@lucide/svelte/icons/building-2";
   import Check from "@lucide/svelte/icons/check";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import Copy from "@lucide/svelte/icons/copy";
   import Cpu from "@lucide/svelte/icons/cpu";
   import Edit2 from "@lucide/svelte/icons/edit-2";
+  import ExternalLink from "@lucide/svelte/icons/external-link";
   import FileText from "@lucide/svelte/icons/file-text";
+  import Globe from "@lucide/svelte/icons/globe";
+  import Puzzle from "@lucide/svelte/icons/puzzle";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import Search from "@lucide/svelte/icons/search";
   import Sliders from "@lucide/svelte/icons/sliders";
@@ -46,12 +50,96 @@
   import type { Folder as FolderType, Project as ProjectType } from "../../lib/types/projects-folders";
   import { initRichContent, destroyCharts } from "../../lib/richContent";
   import ConversationDestinationPicker from "../conversations/ConversationDestinationPicker.svelte";
+  import AgentStepCard from "./AgentStepCard.svelte";
 
   let expandedThinkingBlocks: Record<string, boolean> = {};
+  let copiedThinkingId: string | null = null;
+  let copiedThinkingTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  function toggleThinkingBlock(msgId: string) {
-    expandedThinkingBlocks[msgId] = !expandedThinkingBlocks[msgId];
-    expandedThinkingBlocks = expandedThinkingBlocks;
+  function isThinkingExpanded(
+    expandedMap: Record<string, boolean>,
+    msgId: string,
+    isReasoningComplete: boolean
+  ): boolean {
+    if (expandedMap && expandedMap[msgId] !== undefined) {
+      return expandedMap[msgId];
+    }
+    // While generating/streaming, auto-expand so reasoning is visible live.
+    // When completed, fold into a sleek Apple-style summary card.
+    return !isReasoningComplete;
+  }
+
+  function toggleThinkingBlock(msgId: string, isReasoningComplete: boolean) {
+    const current = expandedThinkingBlocks[msgId] !== undefined
+      ? expandedThinkingBlocks[msgId]
+      : !isReasoningComplete;
+    expandedThinkingBlocks = {
+      ...expandedThinkingBlocks,
+      [msgId]: !current,
+    };
+  }
+
+  async function handleCopyThinking(msgId: string, reasoningText: string) {
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(reasoningText);
+      }
+      copiedThinkingId = msgId;
+      if (copiedThinkingTimeout) clearTimeout(copiedThinkingTimeout);
+      copiedThinkingTimeout = setTimeout(() => {
+        copiedThinkingId = null;
+      }, 2000);
+    } catch (e) {
+      console.error("Failed to copy thinking", e);
+    }
+  }
+
+  function hasMeaningfulAgentSteps(steps: any[] | undefined): boolean {
+    if (!steps || steps.length === 0) return false;
+    return steps.some((s) => s.kind === "tool" || s.kind === "error");
+  }
+
+  function getMeaningfulAgentSteps(steps: any[] | undefined): any[] {
+    if (!steps) return [];
+    return steps.filter((s) => s.kind === "tool" || s.kind === "error");
+  }
+
+  function isBrowserStep(step: any): boolean {
+    if (!step) return false;
+    const tid = (step.input?.toolId || "").toLowerCase();
+    const st = (step.title || "").toLowerCase();
+    return (
+      tid.includes("browser") ||
+      st.includes("browser") ||
+      st.includes("navigate") ||
+      tid.includes("web.page.read") ||
+      tid.includes("web.fetch") ||
+      Boolean(step.input?.url) ||
+      Boolean(step.output?.url)
+    );
+  }
+
+  function getStepUrl(step: any): string {
+    return step?.input?.url || step?.output?.url || "";
+  }
+
+  function handleTakeBrowserControl(url: string, takeControl = true, newTab = false) {
+    window.dispatchEvent(
+      new CustomEvent("aro:open-browser", {
+        detail: { url, takeControl, newTab },
+      })
+    );
+  }
+
+  function getActiveToolStep(steps: any[] | undefined, isGenerating?: boolean | null, isExpanded?: boolean | null): any | null {
+    if (!steps || steps.length === 0) return null;
+    const running = steps.find((s) => s.status === "running");
+    if (running) return running;
+    if (isGenerating) return steps[steps.length - 1];
+    if (!isExpanded) {
+      return [...steps].reverse().find((s) => isBrowserStep(s)) || null;
+    }
+    return null;
   }
 
   import { onMount, afterUpdate, onDestroy } from "svelte";
@@ -392,61 +480,72 @@
               <span class="msg-time">{formatTime(message.createdAt)}</span>
             </div>
             {#if message.role === "assistant"}
-              {#if message.isGenerating && (!message.steps || message.steps.length === 0)}
+              {#if message.isGenerating && !hasMeaningfulAgentSteps(message.steps) && !message.content}
                 <div class="thinking-bubble"><div class="thinking-gemini-gradient"></div><div class="thinking-text-placeholder"><div class="thinking-bar-1"></div><div class="thinking-bar-2"></div></div></div>
               {:else}
-                {#if message.steps && message.steps.length > 0}
+                {#if hasMeaningfulAgentSteps(message.steps)}
                   <div class="agent-steps-container">
                     <div class="agent-steps-header">
-                      <div class="agent-active-badge"><span class="pulse-dot" class:generating={message.isGenerating} class:completed={!message.isGenerating}></span><span class="badge-label">{message.isGenerating ? (language === "fr" ? "Agent Actif" : "Agent Active") : (language === "fr" ? "Agent Terminé" : "Agent Finished")}</span></div>
-                      <button class="agent-steps-toggle-btn" type="button" on:click={() => onToggleMessageSteps(message.id)}>{expandedMessageSteps[message.id] ? (language === "fr" ? "Masquer les étapes" : "Hide steps") : (language === "fr" ? `Afficher les étapes (${message.steps.length})` : `Show steps (${message.steps.length})`)}</button>
+                      <div class="agent-active-badge"><span class="pulse-dot" class:generating={message.isGenerating} class:completed={!message.isGenerating}></span><span class="badge-label">{message.isGenerating ? (language === "fr" ? "Outil en cours" : "Tool in progress") : (language === "fr" ? "Outils exécutés" : "Tools completed")}</span></div>
+                      <button class="agent-steps-toggle-btn" type="button" on:click={() => onToggleMessageSteps(message.id)}>{expandedMessageSteps[message.id] ? (language === "fr" ? "Masquer les étapes" : "Hide steps") : (language === "fr" ? `Afficher les étapes (${getMeaningfulAgentSteps(message.steps).length})` : `Show steps (${getMeaningfulAgentSteps(message.steps).length})`)}</button>
                     </div>
+
+                    {#if getActiveToolStep(getMeaningfulAgentSteps(message.steps), message.isGenerating, Boolean(expandedMessageSteps[message.id]))}
+                      {@const activeToolStep = getActiveToolStep(getMeaningfulAgentSteps(message.steps), message.isGenerating, Boolean(expandedMessageSteps[message.id]))}
+                      <div class="agent-live-tool-strip" class:is-browser={isBrowserStep(activeToolStep)}>
+                        <div class="live-tool-desc">
+                          {#if isBrowserStep(activeToolStep)}
+                            <Globe size={13} class="live-tool-icon browser" />
+                          {:else if ((activeToolStep.input?.toolId || "") + " " + (activeToolStep.title || "")).toLowerCase().includes("connector") || ((activeToolStep.input?.toolId || "") + " " + (activeToolStep.title || "")).toLowerCase().includes("plugin")}
+                            <Puzzle size={13} class="live-tool-icon connector" />
+                          {:else if (activeToolStep.input?.toolId || "").toLowerCase().includes("shell") || (activeToolStep.input?.toolId || "").toLowerCase().includes("terminal")}
+                            <Terminal size={13} class="live-tool-icon shell" />
+                          {:else}
+                            <Cpu size={13} class="live-tool-icon default" />
+                          {/if}
+                          <div class="live-tool-texts">
+                            <span class="live-tool-title">{activeToolStep.title || (language === "fr" ? "Exécution de l'outil" : "Running tool")}</span>
+                            {#if getStepUrl(activeToolStep)}
+                              <span class="live-tool-url" title={getStepUrl(activeToolStep)}>{getStepUrl(activeToolStep)}</span>
+                            {/if}
+                          </div>
+                        </div>
+                        {#if isBrowserStep(activeToolStep) && getStepUrl(activeToolStep)}
+                          <div class="live-tool-buttons">
+                            <button
+                              type="button"
+                              class="live-take-control-btn"
+                              title={language === "fr" ? "Prendre le contrôle immédiat du navigateur" : "Take immediate browser control"}
+                              on:click|stopPropagation={() => handleTakeBrowserControl(getStepUrl(activeToolStep), true)}
+                            >
+                              <Sliders size={11} />
+                              <span>{language === "fr" ? "Prendre le contrôle" : "Take Control"}</span>
+                            </button>
+                            <button
+                              type="button"
+                              class="live-open-tab-btn"
+                              title={language === "fr" ? "Ouvrir dans un onglet dédié" : "Open in new tab"}
+                              on:click|stopPropagation={() => handleTakeBrowserControl(getStepUrl(activeToolStep), false, true)}
+                            >
+                              <ExternalLink size={11} />
+                              <span>{language === "fr" ? "Ouvrir l'onglet" : "Open tab"}</span>
+                            </button>
+                          </div>
+                        {/if}
+                      </div>
+                    {/if}
+
                     {#if expandedMessageSteps[message.id]}
                       <div class="agent-steps-list-embedded">
-                        {#each message.steps as step}
-                          <div class="agent-step-row-embedded" class:running={step.status === "running"} class:failed={step.status === "failed"}>
-                            <div class="agent-step-icon-col">
-                              {#if step.status === "running"}<div class="step-spinner"></div>
-                              {:else if step.status === "completed"}<span class="step-check-icon">✓</span>
-                              {:else if step.status === "failed"}<span class="step-error-icon">✗</span>
-                              {:else}<span class="step-bullet-icon">•</span>{/if}
-                            </div>
-                            <div class="agent-step-content-col">
-                              <div class="agent-step-title-row">
-                                <span class="step-emoji-icon">{#if step.kind === "run-started"}🚀{:else if step.kind === "context-built"}📄{:else if step.kind === "model"}🧠{:else if step.kind === "tool"}{#if step.title.toLowerCase().includes("memory") || step.title.toLowerCase().includes("mémoire") || (step.input && step.input.toolId && step.input.toolId.startsWith("memory"))}🧠{:else if step.title.toLowerCase().includes("search")}🔍{:else if step.title.toLowerCase().includes("fetch")}📖{:else}🛠️{/if}{:else if step.kind === "checkpoint"}💾{:else if step.kind === "final"}✅{:else}⚙️{/if}</span>
-                                <span class="step-title-text">{step.title}</span>
-                                {#if step.kind === "tool" && step.output && step.status === "completed"}
-                                  <button class="step-details-toggle-btn" type="button" on:click|stopPropagation={() => onToggleStepDetails(message.id, step.sequence)}>{expandedStepDetails[`${message.id}-${step.sequence}`] ? (language === "fr" ? "Fermer" : "Close") : (language === "fr" ? "Détails" : "Details")}</button>
-                                {/if}
-                              </div>
-                              {#if expandedStepDetails[`${message.id}-${step.sequence}`]}
-                                <div class="step-details-panel">
-                                  {#if step.input && (step.input.toolId === "memory.search" || step.input.toolId === "memory.recall" || (step.input.toolId && step.input.toolId.startsWith("memory")) || step.title.toLowerCase().includes("memory") || step.title.toLowerCase().includes("mémoire"))}
-                                    <div class="step-detail-section memory-cognitive-detail" style="border-left: 2.5px solid #bf5af2; padding-left: 8px; margin-bottom: 8px;">
-                                      <div class="detail-label" style="color: #bf5af2; font-weight: 600; display: flex; align-items: center; gap: 4px;">
-                                        <Brain size={12} />
-                                        <span>{language === "fr" ? "Mémoire Cognitive Hybride (RRF + Ebbinghaus)" : "Hybrid Cognitive Memory (RRF + Ebbinghaus)"}</span>
-                                      </div>
-                                      {#if step.input && step.input.input && (step.input.input.query || step.input.input.text)}
-                                        <div class="detail-value query-style" style="margin-top: 3px;">
-                                          "{step.input.input.query || step.input.input.text}"
-                                        </div>
-                                      {/if}
-                                      {#if step.output && step.output.summary}
-                                        <div class="detail-value summary-style" style="margin-top: 4px;">
-                                          {step.output.summary}
-                                        </div>
-                                      {/if}
-                                    </div>
-                                  {/if}
-                                  {#if step.input && step.input.toolId === "web.search"}<div class="step-detail-section"><div class="detail-label">Recherche :</div><div class="detail-value query-style">"{step.input.input?.query || ""}"</div></div>{/if}
-                                  {#if step.output && step.output.summary && !(step.input && (step.input.toolId && step.input.toolId.startsWith("memory") || step.title.toLowerCase().includes("memory")))}<div class="step-detail-section"><div class="detail-label">Résumé du résultat :</div><div class="detail-value summary-style">{step.output.summary}</div></div>{/if}
-                                  {#if step.output && step.output.results}<div class="step-detail-section"><div class="detail-label">Pages trouvées :</div><div class="detail-results-list">{#each step.output.results.slice(0, 3) as result}<a class="detail-result-link" href={result.url} target="_blank" rel="noopener noreferrer"><span class="result-title-txt">{result.title}</span><span class="result-url-txt">{result.url}</span></a>{/each}</div></div>{/if}
-                                  {#if step.error}<div class="step-detail-section error-sec"><div class="detail-label">Erreur :</div><div class="detail-value error-style">{step.error}</div></div>{/if}
-                                </div>
-                              {/if}
-                            </div>
-                          </div>
+                        {#each getMeaningfulAgentSteps(message.steps) as step}
+                          <AgentStepCard
+                            {step}
+                            messageId={message.id}
+                            isExpanded={Boolean(expandedStepDetails[`${message.id}-${step.sequence}`])}
+                            {language}
+                            {theme}
+                            onToggleDetails={() => onToggleStepDetails(message.id, step.sequence)}
+                          />
                         {/each}
                       </div>
                     {/if}
@@ -455,11 +554,17 @@
                 {#if message.content}
                   {@const parsed = parseMessageThinking(message.content)}
                   {#if parsed.hasReasoning}
+                    {@const isExpanded = isThinkingExpanded(expandedThinkingBlocks, message.id, parsed.isReasoningComplete)}
                     <div class="thinking-block-wrapper" class:generating={!parsed.isReasoningComplete}>
-                      <button 
+                      <!-- svelte-ignore a11y_click_events_have_key_events -->
+                      <!-- svelte-ignore a11y_no_static_element_interactions -->
+                      <div 
                         class="thinking-block-header" 
-                        type="button" 
-                        on:click={() => toggleThinkingBlock(message.id)}
+                        role="button"
+                        tabindex="0"
+                        on:click={() => toggleThinkingBlock(message.id, parsed.isReasoningComplete)}
+                        on:keydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleThinkingBlock(message.id, parsed.isReasoningComplete); } }}
+                        aria-expanded={isExpanded}
                       >
                         <div class="thinking-header-left">
                           <Brain class="thinking-brain-icon" size={14} />
@@ -474,15 +579,25 @@
                             <span class="thinking-pulse-dot"></span>
                           {/if}
                         </div>
-                        <span class="thinking-chevron" class:expanded={expandedThinkingBlocks[message.id] !== false}>
-                          {#if expandedThinkingBlocks[message.id] !== false}
-                            <X size={12} />
-                          {:else}
-                            <Brain size={12} />
-                          {/if}
-                        </span>
-                      </button>
-                      {#if expandedThinkingBlocks[message.id] !== false}
+                        <div class="thinking-header-right">
+                          <button
+                            type="button"
+                            class="thinking-copy-btn"
+                            title={language === "fr" ? "Copier la réflexion" : "Copy reasoning"}
+                            on:click|stopPropagation={() => handleCopyThinking(message.id, parsed.reasoning)}
+                          >
+                            {#if copiedThinkingId === message.id}
+                              <Check size={12} class="thinking-copied-icon" />
+                            {:else}
+                              <Copy size={12} />
+                            {/if}
+                          </button>
+                          <span class="thinking-chevron" class:expanded={isExpanded}>
+                            <ChevronDown size={14} />
+                          </span>
+                        </div>
+                      </div>
+                      {#if isExpanded}
                         <div class="thinking-block-content">
                           <div class="thinking-inner-text">
                             {parsed.reasoning}
@@ -500,6 +615,10 @@
                     <!-- Thinking in progress, wait for actual response content -->
                   {:else if message.isGenerating && !parsed.hasReasoning}
                     <div class="thinking-gemini-gradient" style="height: 4px; border-radius: 2px; margin-top: 8px;"></div>
+                  {:else if !message.isGenerating && parsed.hasReasoning && !parsed.actualContent}
+                    <div class="thinking-no-content-notice" style="margin-top: 8px; font-size: 13px; color: #86868b; font-style: italic;">
+                      {language === "fr" ? "Réflexion terminée sans réponse textuelle." : "Reasoning completed without textual response."}
+                    </div>
                   {/if}
                 {:else if message.isGenerating}
                   <div class="thinking-bubble">
