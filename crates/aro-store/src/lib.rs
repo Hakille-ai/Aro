@@ -8,9 +8,9 @@ use aro_core::{
     InvitationDeliveryStatus, LongTermMemory, Membership, MembershipRole, MembershipStatus,
     MessageAttachment, NotificationFilter, NotificationItem, NotificationKind,
     NotificationPriority, NotificationSource, NotificationStatus, Organization,
-    OrganizationInvitation, OrganizationInvitationStatus,
-    OrganizationMember, PermissionCommandApproval, PermissionProfile, Project, PublicApiKey,
-    SyncHealth, SyncStatus, User, UserPreferences, MEMORY_STATUS_APPROVED,
+    OrganizationInvitation, OrganizationInvitationStatus, OrganizationMember,
+    PermissionCommandApproval, PermissionProfile, Project, PublicApiKey, SyncHealth, SyncStatus,
+    User, UserPreferences, MEMORY_STATUS_APPROVED,
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -842,48 +842,6 @@ impl AroStore {
         Ok(id)
     }
 
-    pub async fn consume_password_reset_token(
-        &self,
-        token_hash: &str,
-    ) -> AroResult<Option<(Uuid, Uuid)>> {
-        let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
-        let row = sqlx::query(
-            r#"
-            SELECT id, user_id, expires_at, used_at
-            FROM password_reset_tokens
-            WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()
-            FOR UPDATE
-            "#,
-        )
-        .bind(token_hash)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(map_sqlx)?;
-
-        let Some(row) = row else {
-            return Ok(None);
-        };
-
-        let token_id: Uuid = row.get("id");
-        let user_id: Uuid = row.get("user_id");
-
-        sqlx::query(
-            r#"
-            UPDATE password_reset_tokens
-            SET used_at = NOW()
-            WHERE id = $1
-            "#,
-        )
-        .bind(token_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx)?;
-
-        tx.commit().await.map_err(map_sqlx)?;
-
-        Ok(Some((user_id, token_id)))
-    }
-
     pub async fn update_user_password(
         &self,
         user_id: Uuid,
@@ -909,12 +867,64 @@ impl AroStore {
         Ok(())
     }
 
-    pub async fn update_user_totp_secret(&self, user_id: Uuid, secret: &str) -> AroResult<()> {
+    /// Consume a reset token, change the password, and revoke all refresh
+    /// sessions atomically. A failed update must not burn a valid token.
+    pub async fn reset_password_with_token(
+        &self,
+        token_hash: &str,
+        new_password_hash: &str,
+    ) -> AroResult<bool> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx)?;
+        let token = sqlx::query(
+            "SELECT id, user_id FROM password_reset_tokens WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now() FOR UPDATE",
+        )
+        .bind(token_hash)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        let Some(token) = token else {
+            return Ok(false);
+        };
+        let token_id: Uuid = token.get("id");
+        let user_id: Uuid = token.get("user_id");
+        let updated = sqlx::query(
+            "UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2 AND deleted_at IS NULL",
+        )
+        .bind(new_password_hash)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        if updated.rows_affected() != 1 {
+            return Err(AroError::Unexpected("user not found".to_string()));
+        }
+        sqlx::query("UPDATE password_reset_tokens SET used_at = now() WHERE id = $1")
+            .bind(token_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
+        sqlx::query("UPDATE refresh_token_families SET revoked_at = COALESCE(revoked_at, now()), updated_at = now() WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx)?;
         sqlx::query(
+            "UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, now()) WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx)?;
+        tx.commit().await.map_err(map_sqlx)?;
+        Ok(true)
+    }
+
+    pub async fn update_user_totp_secret(&self, user_id: Uuid, secret: &str) -> AroResult<()> {
+        let result = sqlx::query(
             r#"
             UPDATE users
             SET totp_secret = $1, updated_at = NOW()
-            WHERE id = $2 AND deleted_at IS NULL
+            WHERE id = $2 AND deleted_at IS NULL AND totp_enabled_at IS NULL
             "#,
         )
         .bind(secret)
@@ -922,6 +932,12 @@ impl AroStore {
         .execute(&self.pool)
         .await
         .map_err(map_sqlx)?;
+        if result.rows_affected() != 1 {
+            return Err(AroError::Security(
+                "TOTP is already enabled; disable it with a current code before enrolling again"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -5372,15 +5388,15 @@ impl AroStore {
         .await
         .map_err(map_sqlx)?;
 
-        let notifs = rows.into_iter().map(map_notification_row).collect::<AroResult<Vec<_>>>()?;
+        let notifs = rows
+            .into_iter()
+            .map(map_notification_row)
+            .collect::<AroResult<Vec<_>>>()?;
         tx.commit().await.map_err(map_sqlx)?;
         Ok(notifs)
     }
 
-    pub async fn get_unread_notification_count(
-        &self,
-        context: TenantContext,
-    ) -> AroResult<u64> {
+    pub async fn get_unread_notification_count(&self, context: TenantContext) -> AroResult<u64> {
         let mut tx = self.begin_tenant_tx(context).await?;
         let count: i64 = sqlx::query_scalar(
             r#"
@@ -5428,10 +5444,7 @@ impl AroStore {
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn mark_all_notifications_as_read(
-        &self,
-        context: TenantContext,
-    ) -> AroResult<u64> {
+    pub async fn mark_all_notifications_as_read(&self, context: TenantContext) -> AroResult<u64> {
         let mut tx = self.begin_tenant_tx(context).await?;
         let result = sqlx::query(
             r#"
@@ -5452,11 +5465,7 @@ impl AroStore {
         Ok(result.rows_affected())
     }
 
-    pub async fn delete_notification(
-        &self,
-        context: TenantContext,
-        id: Uuid,
-    ) -> AroResult<bool> {
+    pub async fn delete_notification(&self, context: TenantContext, id: Uuid) -> AroResult<bool> {
         let mut tx = self.begin_tenant_tx(context).await?;
         let result = sqlx::query(
             r#"
@@ -5477,10 +5486,7 @@ impl AroStore {
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn clear_all_notifications(
-        &self,
-        context: TenantContext,
-    ) -> AroResult<u64> {
+    pub async fn clear_all_notifications(&self, context: TenantContext) -> AroResult<u64> {
         let mut tx = self.begin_tenant_tx(context).await?;
         let result = sqlx::query(
             r#"
@@ -9701,8 +9707,14 @@ impl AroStore {
         let conversation_id = optional_uuid(&payload, &["conversationId", "conversation_id"])?
             .ok_or_else(|| AroError::Configuration("a plan requires a conversationId".into()))?;
         let tenant = TenantContext::new(owner_user_id, organization_id)?;
-        if self.get_conversation(tenant, conversation_id).await?.is_none() {
-            return Err(AroError::Security("plan conversation is not accessible".into()));
+        if self
+            .get_conversation(tenant, conversation_id)
+            .await?
+            .is_none()
+        {
+            return Err(AroError::Security(
+                "plan conversation is not accessible".into(),
+            ));
         }
         let title = required_string(&payload, &["title"])?;
         let description = optional_string(&payload, &["description"]);
@@ -10915,9 +10927,7 @@ fn map_notification_row(row: sqlx::postgres::PgRow) -> AroResult<NotificationIte
 fn map_message_row(row: sqlx::postgres::PgRow) -> AroResult<ChatMessage> {
     let steps: Option<Vec<AgentStep>> = row
         .get::<Option<serde_json::Value>, _>("steps")
-        .map(|value| {
-            serde_json::from_value(value).map_err(|err| AroError::Memory(err.to_string()))
-        })
+        .map(|value| serde_json::from_value(value).map_err(|err| AroError::Memory(err.to_string())))
         .transpose()?;
     Ok(ChatMessage {
         id: row.get("id"),
@@ -11553,6 +11563,84 @@ mod tests {
             .await
     }
 
+    #[tokio::test]
+    async fn password_reset_is_one_time_and_revokes_refresh_sessions() -> AroResult<()> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let principal = create_test_principal(&store, "password-reset-atomic").await?;
+        let user_id = principal.user.id;
+        let refresh = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        store
+            .create_refresh_token(
+                user_id,
+                principal.active_organization.id,
+                None,
+                &refresh,
+                7,
+                90,
+            )
+            .await?;
+        let token_hash = hash_secret(&format!("reset-{}", Uuid::new_v4()));
+        store
+            .create_password_reset_token(user_id, &token_hash, Utc::now() + Duration::minutes(30))
+            .await?;
+        assert!(
+            !store
+                .reset_password_with_token("wrong-token", "new-hash")
+                .await?
+        );
+        assert!(
+            store
+                .reset_password_with_token(&token_hash, "new-hash")
+                .await?
+        );
+        assert!(
+            !store
+                .reset_password_with_token(&token_hash, "another-hash")
+                .await?
+        );
+        assert_eq!(
+            store
+                .find_user_credentials(&principal.user.email)
+                .await?
+                .expect("user")
+                .password_hash,
+            "new-hash"
+        );
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_one(store.pool())
+        .await
+        .map_err(map_sqlx)?;
+        assert_eq!(active, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn enabled_totp_secret_cannot_be_replaced_by_enrollment() -> AroResult<()> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let principal = create_test_principal(&store, "totp-enrollment-guard").await?;
+        let user_id = principal.user.id;
+        store
+            .update_user_totp_secret(user_id, "original-secret")
+            .await?;
+        store.enable_user_totp(user_id).await?;
+
+        assert!(store
+            .update_user_totp_secret(user_id, "replacement-secret")
+            .await
+            .is_err());
+        let (secret, enabled_at) = store.get_user_totp_info(user_id).await?.expect("user");
+        assert_eq!(secret.as_deref(), Some("original-secret"));
+        assert!(enabled_at.is_some());
+        Ok(())
+    }
+
     fn tenant_context(user_id: Uuid, organization_id: Uuid) -> TenantContext {
         TenantContext::new(user_id, organization_id).expect("non-nil test tenant context")
     }
@@ -11637,16 +11725,41 @@ mod tests {
 
     #[tokio::test]
     async fn plans_require_an_accessible_conversation_and_persist_it() -> AroResult<()> {
-        let Some(store) = postgres_store().await? else { return Ok(()); };
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
         let owner = create_test_principal(&store, "mobile-plan").await?;
         let other = create_test_principal(&store, "mobile-plan-other").await?;
         let org = owner.active_organization.id;
         let user = owner.user.id;
-        let conversation = store.create_conversation(tenant_context(user, org), "Plan source".into(), AssistantMode::Chat).await?;
-        assert!(store.create_plan(org, user, serde_json::json!({"title":"Missing"})).await.is_err());
-        assert_security(store.create_plan(other.active_organization.id, other.user.id,
-            serde_json::json!({"title":"Forbidden", "conversationId":conversation.id})).await, "conversation");
-        let plan = store.create_plan(org, user, serde_json::json!({"title":"Valid", "conversationId":conversation.id})).await?;
+        let conversation = store
+            .create_conversation(
+                tenant_context(user, org),
+                "Plan source".into(),
+                AssistantMode::Chat,
+            )
+            .await?;
+        assert!(store
+            .create_plan(org, user, serde_json::json!({"title":"Missing"}))
+            .await
+            .is_err());
+        assert_security(
+            store
+                .create_plan(
+                    other.active_organization.id,
+                    other.user.id,
+                    serde_json::json!({"title":"Forbidden", "conversationId":conversation.id}),
+                )
+                .await,
+            "conversation",
+        );
+        let plan = store
+            .create_plan(
+                org,
+                user,
+                serde_json::json!({"title":"Valid", "conversationId":conversation.id}),
+            )
+            .await?;
         assert_eq!(plan["conversation_id"], serde_json::json!(conversation.id));
         Ok(())
     }
@@ -14016,11 +14129,7 @@ mod tests {
             serde_json::json!({}),
             serde_json::json!({ "count": 10 }),
         );
-        let user = ChatMessage::new(
-            conversation.id,
-            MessageRole::User,
-            "liste mes connecteurs",
-        );
+        let user = ChatMessage::new(conversation.id, MessageRole::User, "liste mes connecteurs");
         let mut assistant = ChatMessage::new(
             conversation.id,
             MessageRole::Assistant,

@@ -2,9 +2,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum NotificationKind {
+    #[default]
     Info,
     Success,
     Warning,
@@ -13,12 +14,6 @@ pub enum NotificationKind {
     Routine,
     System,
     Security,
-}
-
-impl Default for NotificationKind {
-    fn default() -> Self {
-        Self::Info
-    }
 }
 
 impl NotificationKind {
@@ -36,19 +31,14 @@ impl NotificationKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum NotificationPriority {
     Low,
+    #[default]
     Normal,
     High,
     Urgent,
-}
-
-impl Default for NotificationPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 impl NotificationPriority {
@@ -62,18 +52,13 @@ impl NotificationPriority {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum NotificationStatus {
+    #[default]
     Unread,
     Read,
     Archived,
-}
-
-impl Default for NotificationStatus {
-    fn default() -> Self {
-        Self::Unread
-    }
 }
 
 impl NotificationStatus {
@@ -86,19 +71,14 @@ impl NotificationStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum NotificationSource {
     Agent,
     Routine,
+    #[default]
     System,
     Cloud,
-}
-
-impl Default for NotificationSource {
-    fn default() -> Self {
-        Self::System
-    }
 }
 
 impl NotificationSource {
@@ -221,7 +201,6 @@ impl Default for NotificationSettings {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

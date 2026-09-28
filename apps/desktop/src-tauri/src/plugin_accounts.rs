@@ -29,9 +29,7 @@ pub fn save_plugin_account_secret(account_id: &str, secret: &str) -> Result<(), 
     )
     .map_err(|e| e.to_string())?;
 
-    entry
-        .set_password(secret.trim())
-        .map_err(|e| e.to_string())
+    entry.set_password(secret.trim()).map_err(|e| e.to_string())
 }
 
 pub fn load_plugin_account_secret(account_id: &str) -> Result<Option<String>, String> {
@@ -83,7 +81,10 @@ pub fn generate_pkce() -> Pkce {
     hasher.update(verifier.as_bytes());
     let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
 
-    Pkce { verifier, challenge }
+    Pkce {
+        verifier,
+        challenge,
+    }
 }
 
 // ============================================================================
@@ -212,7 +213,10 @@ pub async fn start_oauth_flow(
 fn resolve_oauth_endpoints(
     plugin_id: &str,
 ) -> (String, String, Option<String>, String, Vec<String>) {
-    if plugin_id == "google-workspace" || plugin_id.contains("google") || plugin_id.contains("gmail") {
+    if plugin_id == "google-workspace"
+        || plugin_id.contains("google")
+        || plugin_id.contains("gmail")
+    {
         (
             "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
             "https://oauth2.googleapis.com/token".to_string(),
@@ -232,7 +236,11 @@ fn resolve_oauth_endpoints(
             "https://github.com/login/oauth/access_token".to_string(),
             Some("https://api.github.com/user".to_string()),
             "aro-github-desktop".to_string(),
-            vec!["repo".to_string(), "read:user".to_string(), "user:email".to_string()],
+            vec![
+                "repo".to_string(),
+                "read:user".to_string(),
+                "user:email".to_string(),
+            ],
         )
     } else if plugin_id == "slack-workspace" || plugin_id.contains("slack") {
         (
@@ -253,6 +261,7 @@ fn resolve_oauth_endpoints(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_loopback_callback(
     listener: TcpListener,
     plugin_mgr: Arc<PluginManager>,
@@ -437,10 +446,18 @@ async fn handle_loopback_callback(
                         email = Some(e.to_string());
                         account_identifier = e.to_string();
                     }
-                    if let Some(n) = info_json.get("name").or_else(|| info_json.get("login")).and_then(|v| v.as_str()) {
+                    if let Some(n) = info_json
+                        .get("name")
+                        .or_else(|| info_json.get("login"))
+                        .and_then(|v| v.as_str())
+                    {
                         display_name = Some(n.to_string());
                     }
-                    if let Some(p) = info_json.get("picture").or_else(|| info_json.get("avatar_url")).and_then(|v| v.as_str()) {
+                    if let Some(p) = info_json
+                        .get("picture")
+                        .or_else(|| info_json.get("avatar_url"))
+                        .and_then(|v| v.as_str())
+                    {
                         avatar_url = Some(p.to_string());
                     }
                 }

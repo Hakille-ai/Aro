@@ -488,16 +488,16 @@ impl PluginManager {
         // half-written directories): emoji/color inline in the portable
         // extension namespace; an uploaded image becomes a fixed
         // `logo.<ext>` file next to the manifest, referenced from it.
-        let decoded_logo: Option<crate::branding::DecodedLogo> =
-            match req.logo_data_url.as_deref() {
-                Some(data_url) if !data_url.trim().is_empty() => {
-                    Some(crate::branding::parse_logo_data_url(data_url.trim())?)
-                }
-                _ => None,
-            };
-        let logo_file: Option<String> = decoded_logo.as_ref().map(|d| {
-            format!("{}.{}", crate::branding::LOGO_FILE_STEM, d.extension)
-        });
+        let decoded_logo: Option<crate::branding::DecodedLogo> = match req.logo_data_url.as_deref()
+        {
+            Some(data_url) if !data_url.trim().is_empty() => {
+                Some(crate::branding::parse_logo_data_url(data_url.trim())?)
+            }
+            _ => None,
+        };
+        let logo_file: Option<String> = decoded_logo
+            .as_ref()
+            .map(|d| format!("{}.{}", crate::branding::LOGO_FILE_STEM, d.extension));
         if let Some(file) = logo_file.as_deref() {
             if !crate::branding::is_allowed_logo_file_name(file) {
                 return Err(anyhow!("Invalid logo file name"));
@@ -665,10 +665,7 @@ impl PluginManager {
     /// root). Returns `(mime, bytes)` or `None` when the plugin has no file
     /// logo. The path is allow-listed + confined: a hostile `plugin.json`
     /// can never make this read outside the plugin directory.
-    pub async fn read_plugin_logo(
-        &self,
-        plugin_id: &str,
-    ) -> Result<Option<(String, Vec<u8>)>> {
+    pub async fn read_plugin_logo(&self, plugin_id: &str) -> Result<Option<(String, Vec<u8>)>> {
         let plugin = self
             .get_plugin(plugin_id)
             .await
@@ -711,14 +708,10 @@ impl PluginManager {
             "image/jpeg" => {
                 bytes.len() > 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF
             }
-            "image/webp" => {
-                bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
-            }
+            "image/webp" => bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
             "image/svg+xml" => {
                 let text = String::from_utf8_lossy(&bytes).to_lowercase();
-                text.contains("<svg")
-                    && !text.contains("<script")
-                    && !text.contains("javascript:")
+                text.contains("<svg") && !text.contains("<script") && !text.contains("javascript:")
             }
             _ => false,
         };
@@ -1815,8 +1808,13 @@ impl PluginManager {
                 })
             }
             "read_doc" => {
-                let fid = args.get("file_id").and_then(|v| v.as_str()).unwrap_or("doc_1");
-                let doc_text = format!("Content of document '{fid}': Synchronized notes and project specifications.");
+                let fid = args
+                    .get("file_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("doc_1");
+                let doc_text = format!(
+                    "Content of document '{fid}': Synchronized notes and project specifications."
+                );
                 Ok(CallToolResult {
                     content: vec![McpContent {
                         content_type: "text".to_string(),
@@ -1884,7 +1882,10 @@ impl PluginManager {
             }
             "token_counter" => {
                 let txt = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                let model = args.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4o");
+                let model = args
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("gpt-4o");
                 let estimated_tokens = (txt.len() / 4).max(1);
                 let words = txt.split_whitespace().count();
                 let res = serde_json::json!({
@@ -1904,9 +1905,15 @@ impl PluginManager {
                 })
             }
             "format_completion" => {
-                let sys_msg = args.get("system").and_then(|v| v.as_str()).unwrap_or("You are a helpful AI assistant.");
+                let sys_msg = args
+                    .get("system")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("You are a helpful AI assistant.");
                 let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-                let model = args.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4o");
+                let model = args
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("gpt-4o");
                 let payload = serde_json::json!({
                     "model": model,
                     "messages": [
@@ -1927,7 +1934,9 @@ impl PluginManager {
             }
             "validate_schema" => {
                 let sch = args.get("schema");
-                let is_valid = sch.map_or(false, |s| s.is_object() && s.get("type").and_then(|t| t.as_str()) == Some("object"));
+                let is_valid = sch.is_some_and(|s| {
+                    s.is_object() && s.get("type").and_then(|t| t.as_str()) == Some("object")
+                });
                 let res = serde_json::json!({
                     "valid": is_valid,
                     "has_additionalProperties_false": sch.and_then(|s| s.get("additionalProperties")).and_then(|v| v.as_bool()) == Some(false)
@@ -1943,7 +1952,10 @@ impl PluginManager {
                 })
             }
             "list_issues" => {
-                let repo = args.get("repo").and_then(|v| v.as_str()).unwrap_or("aro/aro");
+                let repo = args
+                    .get("repo")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("aro/aro");
                 let issues = serde_json::json!([
                     { "number": 101, "title": "Support default agent plugins", "state": "open", "author": "dev" },
                     { "number": 95, "title": "Memory vector search indexing fix", "state": "closed", "author": "contributor" }
@@ -2014,7 +2026,10 @@ impl PluginManager {
                 })
             }
             "post_message" => {
-                let ch = args.get("channel").and_then(|v| v.as_str()).unwrap_or("general");
+                let ch = args
+                    .get("channel")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("general");
                 let txt = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 let res = serde_json::json!({
                     "ok": true,
@@ -2049,11 +2064,14 @@ impl PluginManager {
                 })
             }
             "read_history" => {
-                let ch = args.get("channel").and_then(|v| v.as_str()).unwrap_or("general");
+                let ch = args
+                    .get("channel")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("general");
                 let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(5) as usize;
                 let messages = [
                     serde_json::json!({ "user": "alex", "text": "Deployment to staging completed.", "ts": "1726245000.000100" }),
-                    serde_json::json!({ "user": "sarah", "text": "All unit tests passing cleanly.", "ts": "1726245300.000100" })
+                    serde_json::json!({ "user": "sarah", "text": "All unit tests passing cleanly.", "ts": "1726245300.000100" }),
                 ];
                 let slice = &messages[..limit.min(messages.len())];
                 let res = serde_json::json!({ "channel": ch, "messages": slice });
@@ -2147,8 +2165,7 @@ fn validate_git_url(raw: &str) -> Result<String> {
 fn fresh_clone_dir() -> Result<PathBuf> {
     for _ in 0..8 {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let dir = std::env::temp_dir()
-            .join(format!("{}{}", GIT_CLONE_DIR_PREFIX, &suffix[..8]));
+        let dir = std::env::temp_dir().join(format!("{}{}", GIT_CLONE_DIR_PREFIX, &suffix[..8]));
         if !dir.exists() {
             return Ok(dir);
         }

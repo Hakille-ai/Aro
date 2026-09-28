@@ -141,8 +141,13 @@ pub async fn account(
     } else {
         None
     };
-    let portal_available = can_manage && configured()
-        && state.store.billing_customer(auth.tenant_context()).await?.is_some();
+    let portal_available = can_manage
+        && configured()
+        && state
+            .store
+            .billing_customer(auth.tenant_context())
+            .await?
+            .is_some();
     Ok(Json(
         json!({"account":account,"entitlements":account.entitlements(Utc::now()),"canManage":can_manage,"ledger":ledger,"pendingCheckoutId":pending,"portalAvailable":portal_available,"checkoutAvailable":configured(),"computeAvailable":crate::compute::configured()}),
     ))

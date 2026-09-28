@@ -52,8 +52,22 @@ impl Default for SandboxLimits {
 /// (`SystemRoot`, `PATH`, `PYTHONPATH`…), so we remove what must never
 /// cross into plugin code instead of guessing what it needs.
 const SECRET_ENV_SUBSTRINGS: &[&str] = &[
-    "SECRET", "PASSWORD", "PASSWD", "TOKEN", "ARO_", "DATABASE", "REDIS_", "API_KEY", "APIKEY",
-    "AUTH", "PRIVATE", "COOKIE", "SESSION", "CREDENTIAL", "BEARER", "SMTP",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "TOKEN",
+    "ARO_",
+    "DATABASE",
+    "REDIS_",
+    "API_KEY",
+    "APIKEY",
+    "AUTH",
+    "PRIVATE",
+    "COOKIE",
+    "SESSION",
+    "CREDENTIAL",
+    "BEARER",
+    "SMTP",
 ];
 
 /// Filtered `(key, value)` pairs inherited by a sandboxed child.
@@ -198,9 +212,9 @@ pub async fn execute_sandboxed(
     let staged = stage_skill_dir(&skill.skill_dir, limits.max_stage_bytes)?;
     // Preserve the script's location *inside* the skill tree (usually
     // `scripts/…`), not just its file name.
-    let relative = script_path.strip_prefix(&skill.skill_dir).map_err(|_| {
-        anyhow!("skill script escapes its skill directory and is refused")
-    })?;
+    let relative = script_path
+        .strip_prefix(&skill.skill_dir)
+        .map_err(|_| anyhow!("skill script escapes its skill directory and is refused"))?;
     let staged_script = staged.path().join(relative);
     if !staged_script.is_file() {
         return Err(anyhow!("staged skill script is missing"));
@@ -245,27 +259,26 @@ pub async fn execute_sandboxed(
         Ok::<_, std::io::Error>((status, out?, err?))
     };
     let timeout = std::time::Duration::from_secs(limits.timeout_secs.max(1));
-    let (status, stdout_bytes, stderr_bytes) =
-        match tokio::time::timeout(timeout, collect).await {
-            Ok(Ok(collected)) => collected,
-            Ok(Err(err)) => {
-                let _ = child.kill().await;
-                return Err(anyhow!("sandboxed skill I/O failed: {err}"));
-            }
-            Err(_) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Ok(SkillOutput {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!(
-                        "skill exceeded the {}s sandbox timeout and was killed",
-                        limits.timeout_secs
-                    )),
-                    skill_id: skill.id.clone(),
-                });
-            }
-        };
+    let (status, stdout_bytes, stderr_bytes) = match tokio::time::timeout(timeout, collect).await {
+        Ok(Ok(collected)) => collected,
+        Ok(Err(err)) => {
+            let _ = child.kill().await;
+            return Err(anyhow!("sandboxed skill I/O failed: {err}"));
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Ok(SkillOutput {
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "skill exceeded the {}s sandbox timeout and was killed",
+                    limits.timeout_secs
+                )),
+                skill_id: skill.id.clone(),
+            });
+        }
+    };
 
     let (stdout, stdout_cut) = truncate_output(
         &String::from_utf8_lossy(&stdout_bytes),
@@ -276,7 +289,11 @@ pub async fn execute_sandboxed(
         limits.max_output_bytes,
     );
     let success = status.success();
-    let mut text = if !stdout.is_empty() { stdout } else { stderr.clone() };
+    let mut text = if !stdout.is_empty() {
+        stdout
+    } else {
+        stderr.clone()
+    };
     if stdout_cut || stderr_cut {
         text.push_str("\n[sandbox: output truncated]");
     }
@@ -300,7 +317,9 @@ mod tests {
         std::env::set_var("SANDBOX_PROBE_SECRET_TOKEN_XYZ", "s3cr3t");
         std::env::set_var("SANDBOX_PROBE_PLAIN_XYZ", "hello");
         let env = scrubbed_env();
-        assert!(!env.iter().any(|(k, _)| k == "SANDBOX_PROBE_SECRET_TOKEN_XYZ"));
+        assert!(!env
+            .iter()
+            .any(|(k, _)| k == "SANDBOX_PROBE_SECRET_TOKEN_XYZ"));
         assert!(env
             .iter()
             .any(|(k, v)| k == "SANDBOX_PROBE_PLAIN_XYZ" && v == "hello"));
@@ -376,7 +395,11 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
 
         assert!(out.success, "probe failed: {:?}", out.error);
-        assert!(out.output.contains("PING=1"), "input arg echoed: {}", out.output);
+        assert!(
+            out.output.contains("PING=1"),
+            "input arg echoed: {}",
+            out.output
+        );
         assert!(
             !out.output.contains("topsecret"),
             "secret leaked into sandbox: {}",

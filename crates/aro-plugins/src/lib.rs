@@ -10,9 +10,10 @@ pub mod skills_discovery;
 
 pub use accounts::{CreatePluginAccountInput, PluginAccount, PluginAccountStore};
 pub use branding::{
-    branding_from_extensions, build_branding_extension, confine_logo_path, is_allowed_logo_file_name,
-    is_valid_brand_color, is_valid_logo_emoji, parse_logo_data_url, ARO_BRANDING_EXTENSION,
-    LOGO_FILE_STEM, MAX_LOGO_BYTES, DecodedLogo, LogoKind, ResolvedBranding,
+    branding_from_extensions, build_branding_extension, confine_logo_path,
+    is_allowed_logo_file_name, is_valid_brand_color, is_valid_logo_emoji, parse_logo_data_url,
+    DecodedLogo, LogoKind, ResolvedBranding, ARO_BRANDING_EXTENSION, LOGO_FILE_STEM,
+    MAX_LOGO_BYTES,
 };
 pub use manager::{PluginManager, CORE_DEFAULT_PLUGINS};
 pub use manifest::{

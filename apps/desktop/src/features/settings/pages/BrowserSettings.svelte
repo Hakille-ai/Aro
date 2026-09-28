@@ -7,22 +7,25 @@
   import History from "@lucide/svelte/icons/history";
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import Plus from "@lucide/svelte/icons/plus";
-  import Eye from "@lucide/svelte/icons/eye";
-  import EyeOff from "@lucide/svelte/icons/eye-off";
   import Search from "@lucide/svelte/icons/search";
   import Cpu from "@lucide/svelte/icons/cpu";
   import ExternalLink from "@lucide/svelte/icons/external-link";
   import Check from "@lucide/svelte/icons/check";
+  import Download from "@lucide/svelte/icons/download";
   import {
     browserHistory,
-    browserCredentials,
     browserPermissions,
     clearBrowserHistory,
     deleteBrowserHistoryEntry,
-    addBrowserCredential,
-    deleteBrowserCredential,
     updateBrowserPermissions,
-    type BrowserCredential,
+    vaultAccounts,
+    vaultAccountAdd,
+    vaultAccountRemove,
+    vaultSave,
+    vaultDelete,
+    importSystemBookmarks,
+    importSystemHistory,
+    addBrowserHistoryEntry,
   } from "../../browser/browser-store";
 
   export let language: "fr" | "en" = "fr";
@@ -33,8 +36,11 @@
   let newCredDomain = "";
   let newCredUsername = "";
   let newCredPassword = "";
-  let visiblePasswordIds = new Set<string>();
   let clearedHistoryNotice = false;
+  let vaultNotice = "";
+  let vaultWorking = false;
+  let importNotice = "";
+  let importing = false;
 
   $: filteredHistory = $browserHistory.filter((item) => {
     if (!historySearch.trim()) return true;
@@ -42,26 +48,81 @@
     return item.title.toLowerCase().includes(q) || item.url.toLowerCase().includes(q);
   });
 
-  function togglePasswordVisibility(id: string) {
-    if (visiblePasswordIds.has(id)) {
-      visiblePasswordIds.delete(id);
-    } else {
-      visiblePasswordIds.add(id);
+  async function handleAddCredential() {
+    const domain = newCredDomain.trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "").toLowerCase();
+    if (!domain || !newCredUsername.trim() || !newCredPassword) return;
+    vaultWorking = true;
+    vaultNotice = "";
+    try {
+      const okUser = await vaultSave(domain, "username", newCredUsername.trim());
+      const okPass = await vaultSave(domain, "password", newCredPassword);
+      if (okUser && okPass) {
+        vaultAccountAdd(domain);
+        newCredDomain = "";
+        newCredUsername = "";
+        newCredPassword = "";
+        showAddCredModal = false;
+        vaultNotice = language === "fr"
+          ? `Identifiant ${domain} chiffré dans le coffre système.`
+          : `Credential for ${domain} encrypted in the system vault.`;
+      } else {
+        vaultNotice = language === "fr"
+          ? "Coffre indisponible hors de l'application Tauri."
+          : "Vault unavailable outside the Tauri app.";
+      }
+    } finally {
+      vaultWorking = false;
+      setTimeout(() => (vaultNotice = ""), 4000);
     }
-    visiblePasswordIds = new Set(visiblePasswordIds);
   }
 
-  function handleAddCredential() {
-    if (!newCredDomain.trim() || !newCredUsername.trim() || !newCredPassword.trim()) return;
-    addBrowserCredential({
-      domain: newCredDomain.trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, ""),
-      username: newCredUsername.trim(),
-      password: newCredPassword,
-    });
-    newCredDomain = "";
-    newCredUsername = "";
-    newCredPassword = "";
-    showAddCredModal = false;
+  async function handleDeleteCredential(account: string) {
+    vaultWorking = true;
+    try {
+      await vaultDelete(account, "username");
+      await vaultDelete(account, "password");
+      vaultAccountRemove(account);
+    } finally {
+      vaultWorking = false;
+    }
+  }
+
+  async function handleImportBookmarks() {
+    importing = true;
+    importNotice = "";
+    try {
+      const items = await importSystemBookmarks();
+      for (const item of items.slice(0, 200)) {
+        addBrowserHistoryEntry(item.url, item.name);
+      }
+      importNotice = language === "fr"
+        ? `${items.length} favoris importés de Chrome/Edge.`
+        : `${items.length} bookmarks imported from Chrome/Edge.`;
+    } catch (err) {
+      importNotice = err instanceof Error ? err.message : String(err);
+    } finally {
+      importing = false;
+      setTimeout(() => (importNotice = ""), 5000);
+    }
+  }
+
+  async function handleImportHistory() {
+    importing = true;
+    importNotice = "";
+    try {
+      const items = await importSystemHistory(200);
+      for (const item of items) {
+        addBrowserHistoryEntry(item.url, item.title || item.url);
+      }
+      importNotice = language === "fr"
+        ? `${items.length} entrées d'historique importées.`
+        : `${items.length} history entries imported.`;
+    } catch (err) {
+      importNotice = err instanceof Error ? err.message : String(err);
+    } finally {
+      importing = false;
+      setTimeout(() => (importNotice = ""), 5000);
+    }
   }
 
   function handleClearHistory() {
@@ -289,49 +350,33 @@
       </div>
     {/if}
 
-    <!-- Credentials List -->
-    {#if $browserCredentials.length === 0}
+    <!-- Vault accounts (domains only — secrets stay in the OS keyring) -->
+    {#if $vaultAccounts.length === 0}
       <div class="empty-placeholder">
         <Key size={24} style="color: #86868b; margin-bottom: 8px;" />
-        <p>{language === "fr" ? "Aucun identifiant enregistré pour le navigateur." : "No saved credentials yet."}</p>
+        <p>{language === "fr" ? "Aucun identifiant dans le coffre. Les secrets sont chiffrés par le système et ne sont jamais affichés." : "Vault is empty. Secrets are encrypted by the OS and never displayed."}</p>
       </div>
     {:else}
       <div class="credentials-list">
-        {#each $browserCredentials as cred}
+        {#each $vaultAccounts as account}
           <div class="credential-row">
             <div class="cred-left">
               <div class="cred-avatar">
                 <Globe size={16} />
               </div>
               <div class="cred-meta">
-                <span class="cred-domain">{cred.domain}</span>
-                <span class="cred-username">{cred.username}</span>
+                <span class="cred-domain">{account}</span>
+                <span class="cred-username">{language === "fr" ? "Identifiant + mot de passe chiffrés" : "Encrypted username + password"}</span>
               </div>
             </div>
             <div class="cred-right">
-              <div class="cred-pwd-wrap">
-                <span class="cred-password">
-                  {visiblePasswordIds.has(cred.id) ? cred.password : "••••••••••••"}
-                </span>
-                <button
-                  type="button"
-                  class="icon-btn"
-                  title={visiblePasswordIds.has(cred.id) ? "Masquer" : "Afficher"}
-                  on:click={() => togglePasswordVisibility(cred.id)}
-                >
-                  {#if visiblePasswordIds.has(cred.id)}
-                    <EyeOff size={13} />
-                  {:else}
-                    <Eye size={13} />
-                  {/if}
-                </button>
-              </div>
+              <span class="vault-badge"><ShieldCheck size={12} /> {language === "fr" ? "Coffre" : "Vault"}</span>
               <button
                 type="button"
                 class="icon-btn danger"
                 title={language === "fr" ? "Supprimer" : "Delete"}
-                disabled={writeLocked}
-                on:click={() => deleteBrowserCredential(cred.id)}
+                disabled={writeLocked || vaultWorking}
+                on:click={() => void handleDeleteCredential(account)}
               >
                 <Trash2 size={13} />
               </button>
@@ -340,6 +385,25 @@
         {/each}
       </div>
     {/if}
+    {#if vaultNotice}<p class="vault-notice">{vaultNotice}</p>{/if}
+
+    <!-- Import depuis Chrome / Edge -->
+    <div class="import-row">
+      <button type="button" class="apple-btn secondary small" disabled={importing} on:click={() => void handleImportBookmarks()}>
+        <Download size={13} style="margin-right: 4px;" />
+        <span>{language === "fr" ? "Importer les favoris Chrome/Edge" : "Import Chrome/Edge bookmarks"}</span>
+      </button>
+      <button type="button" class="apple-btn secondary small" disabled={importing} on:click={() => void handleImportHistory()}>
+        <History size={13} style="margin-right: 4px;" />
+        <span>{language === "fr" ? "Importer l'historique" : "Import history"}</span>
+      </button>
+    </div>
+    {#if importNotice}<p class="vault-notice">{importNotice}</p>{/if}
+    <p class="vault-hint">
+      {language === "fr"
+        ? "L'import des mots de passe Chrome/Edge (DPAPI/Keychain) arrive en Phase 5 : enregistrez-les dans le coffre ci-dessus en attendant."
+        : "Chrome/Edge password import (DPAPI/Keychain) ships in Phase 5: save them in the vault above for now."}
+    </p>
   </div>
 
   <!-- SECTION 4: Historique de Navigation -->
@@ -602,20 +666,36 @@
     gap: 12px;
   }
 
-  .cred-pwd-wrap {
-    display: flex;
+  .vault-badge {
+    display: inline-flex;
     align-items: center;
-    gap: 6px;
-    background: rgba(0, 0, 0, 0.25);
-    padding: 4px 8px;
-    border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    gap: 4px;
+    font-size: 11px;
+    color: #4ade80;
+    background: rgba(74, 222, 128, 0.12);
+    border: 1px solid rgba(74, 222, 128, 0.3);
+    border-radius: 999px;
+    padding: 3px 9px;
   }
 
-  .cred-password {
-    font-family: monospace;
+  .vault-notice {
     font-size: 12px;
-    letter-spacing: 1px;
+    color: #4ade80;
+    margin: 8px 0 0;
+  }
+
+  .import-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+  }
+
+  .vault-hint {
+    font-size: 11px;
+    opacity: 0.65;
+    margin: 8px 0 0;
+    line-height: 1.5;
   }
 
   .inline-cred-form {

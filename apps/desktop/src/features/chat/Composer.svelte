@@ -56,7 +56,7 @@
   import FileIcon from "@lucide/svelte/icons/file";
   import FolderIcon from "@lucide/svelte/icons/folder";
   import VoiceOrb from "../voice/VoiceOrb.svelte";
-  import type { ModelOption, WebAccessMode, PermissionProfile, PermissionPresetMode } from "../../lib/types";
+  import type { ModelOption, WebAccessMode, PermissionProfile, PermissionPresetMode, SubAgentInfo } from "../../lib/types";
   import {
     applyMentionSelection,
     buildUnifiedMentionItems,
@@ -150,6 +150,7 @@
   export let plugins: any[] = [];
   export let mcpServers: any[] = [];
   export let agents: any[] = [];
+  export let activeSubAgent: SubAgentInfo | null = null;
 
   // Reference optional voice and counter props passed by parent
   $: void [
@@ -768,8 +769,13 @@
       {/if}
       <textarea
         bind:this={composerInput}
+        class="composer-textarea"
         bind:value={input}
-        placeholder={cloudWriteLocked ? (cloudWriteDisabledTitle("envoyer un message") ?? labels.askAroPlaceholder) : (recordingHint || labels.askAroPlaceholder)}
+        placeholder={cloudWriteLocked
+          ? (cloudWriteDisabledTitle("envoyer un message") ?? labels.askAroPlaceholder)
+          : (activeSubAgent
+            ? (language === "fr" ? `Envoyer une consigne à ${activeSubAgent.name}...` : `Send directive to ${activeSubAgent.name}...`)
+            : (recordingHint || labels.askAroPlaceholder))}
         rows="1"
         disabled={cloudWriteLocked}
         on:input={() => {
@@ -1360,6 +1366,39 @@
 <style>
   .composer-field {
     position: relative;
+    width: 100%;
+  }
+
+  .composer-textarea,
+  .composer-field textarea {
+    width: 100%;
+    min-height: 28px;
+    max-height: 180px;
+    padding: 4px 6px;
+    margin: 0;
+    border: none !important;
+    outline: none !important;
+    outline-offset: 0 !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    resize: none;
+    font-family: inherit;
+    font-size: 15px;
+    line-height: 1.5;
+    color: inherit;
+    box-sizing: border-box;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+
+  .composer-textarea:focus,
+  .composer-textarea:focus-visible,
+  .composer-field textarea:focus,
+  .composer-field textarea:focus-visible {
+    border: none !important;
+    outline: none !important;
+    outline-offset: 0 !important;
+    box-shadow: none !important;
   }
   /* ==========================================================================
      Apple-Grade Mention Popover (@) Styling

@@ -1,29 +1,38 @@
 pub mod documents;
+pub mod security;
+
+pub use aro_browser::{BrowserTabInfo, PageSnapshot, TabId as BrowserTabId};
+pub use security::{
+    classify_tool, PermissionDecision, PermissionPreset, ToolAuthorizationError,
+    ToolAuthorizationGuard, ToolCategory,
+};
 
 use std::{
     env,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::Arc,
     time::Duration,
 };
+
+use aro_browser::{BrowserLaunchConfig, BrowserService};
 
 use aro_core::{
     AgentArtifact, AroError, AroResult, ContextSource, PermissionProfile, ToolExecutionRequest,
     ToolExecutionResult, ToolExecutionStatus, WebFetchRequest, WebPageSnapshot, WebSearchRequest,
-    WebSearchResponse, WebSearchResult, TOOL_ARTIFACT_CREATE, TOOL_CODE_EXECUTE,
-    TOOL_CORE_CODE_EXECUTE, TOOL_CORE_DOCUMENT_CREATE, TOOL_CORE_SEARCH_WEB,
-    TOOL_CORE_SHELL_EXECUTE, TOOL_CORE_WEB_PAGE_READ, TOOL_CORE_WORKSPACE_GREP,
+    WebSearchResponse, WebSearchResult, TOOL_APP_LAUNCH, TOOL_ARTIFACT_CREATE, TOOL_BROWSER_ACTION,
+    TOOL_BROWSER_NAVIGATE, TOOL_BROWSER_SNAPSHOT, TOOL_BROWSER_TABS, TOOL_BROWSER_AUTOFILL, TOOL_CODE_EXECUTE, TOOL_COMPUTER_USE, TOOL_CORE_APP_LAUNCH,
+    TOOL_CORE_BROWSER_ACTION,     TOOL_CORE_BROWSER_NAVIGATE, TOOL_CORE_BROWSER_SNAPSHOT, TOOL_CORE_BROWSER_TABS,
+    TOOL_CORE_BROWSER_AUTOFILL, TOOL_CORE_CODE_EXECUTE,
+    TOOL_CORE_COMPUTER_USE, TOOL_CORE_DOCUMENT_CREATE, TOOL_CORE_EMAIL_SEND,
+    TOOL_CORE_NETWORK_INFO, TOOL_CORE_NOTIFICATION_SCHEDULE, TOOL_CORE_NOTIFICATION_SEND,
+    TOOL_CORE_SCREEN_CAPTURE, TOOL_CORE_SEARCH_WEB, TOOL_CORE_SHELL_EXECUTE, TOOL_CORE_SYSTEM_INFO,
+    TOOL_CORE_VOLUME_CONTROL, TOOL_CORE_WEB_PAGE_READ, TOOL_CORE_WORKSPACE_GREP,
     TOOL_CORE_WORKSPACE_LIST, TOOL_CORE_WORKSPACE_READ, TOOL_CORE_WORKSPACE_SEARCH,
-    TOOL_CORE_WORKSPACE_WRITE, TOOL_DOCUMENT_CREATE, TOOL_SHELL_EXECUTE, TOOL_WEB_FETCH,
-    TOOL_WEB_SEARCH, TOOL_WORKSPACE_DELETE, TOOL_WORKSPACE_GIT_DIFF, TOOL_WORKSPACE_GREP,
-    TOOL_WORKSPACE_LIST, TOOL_WORKSPACE_READ, TOOL_WORKSPACE_REPLACE_IN_FILES,
-    TOOL_WORKSPACE_SEARCH, TOOL_WORKSPACE_WRITE, TOOL_CORE_BROWSER_NAVIGATE,
-    TOOL_CORE_BROWSER_ACTION, TOOL_CORE_COMPUTER_USE, TOOL_BROWSER_NAVIGATE,
-    TOOL_BROWSER_ACTION, TOOL_COMPUTER_USE,
-    TOOL_CORE_VOLUME_CONTROL, TOOL_VOLUME_CONTROL, TOOL_CORE_SCREEN_CAPTURE, TOOL_SCREEN_CAPTURE,
-    TOOL_CORE_SYSTEM_INFO, TOOL_SYSTEM_INFO, TOOL_CORE_APP_LAUNCH, TOOL_APP_LAUNCH,
-    TOOL_CORE_NETWORK_INFO, TOOL_NETWORK_INFO,
-    TOOL_CORE_NOTIFICATION_SEND, TOOL_NOTIFICATION_SEND, TOOL_CORE_EMAIL_SEND, TOOL_EMAIL_SEND,
-    TOOL_CORE_NOTIFICATION_SCHEDULE, TOOL_NOTIFICATION_SCHEDULE,
+    TOOL_CORE_WORKSPACE_WRITE, TOOL_DOCUMENT_CREATE, TOOL_EMAIL_SEND, TOOL_NETWORK_INFO,
+    TOOL_NOTIFICATION_SCHEDULE, TOOL_NOTIFICATION_SEND, TOOL_SCREEN_CAPTURE, TOOL_SHELL_EXECUTE,
+    TOOL_SYSTEM_INFO, TOOL_VOLUME_CONTROL, TOOL_WEB_FETCH, TOOL_WEB_SEARCH, TOOL_WORKSPACE_DELETE,
+    TOOL_WORKSPACE_GIT_DIFF, TOOL_WORKSPACE_GREP, TOOL_WORKSPACE_LIST, TOOL_WORKSPACE_READ,
+    TOOL_WORKSPACE_REPLACE_IN_FILES, TOOL_WORKSPACE_SEARCH, TOOL_WORKSPACE_WRITE,
 };
 use chrono::Utc;
 
@@ -43,10 +52,31 @@ const DEFAULT_MAX_PAGE_CHARS: usize = 24_000;
 const DEFAULT_SEARCH_LIMIT: usize = 6;
 const MAX_REDIRECTS: usize = 5;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolExecutor {
     client: Client,
     config: ToolExecutorConfig,
+    /// Lazily-launched real Chromium (CDP). `None` until the first browser
+    /// tool call, so every non-browser path (and test) is unaffected.
+    browser: Arc<tokio::sync::RwLock<Option<BrowserService>>>,
+}
+
+impl std::fmt::Debug for ToolExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolExecutor")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod send_sync_assert {
+    use super::ToolExecutor;
+    #[test]
+    fn executor_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ToolExecutor>();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -87,11 +117,155 @@ impl Default for ToolExecutorConfig {
     }
 }
 
+pub const MAX_EXECUTION_OUTPUT_BYTES: usize = 64 * 1024;
+
+pub fn strip_verbatim_prefix(path: &std::path::Path) -> std::path::PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(stripped)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+pub fn truncate_output_safe(text: &str, max_bytes: usize) -> (String, bool) {
+    if text.len() <= max_bytes {
+        return (text.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (format!("{}...\n[truncated]", &text[..end]), true)
+}
+
+pub fn is_sensitive_env_var(key: &str) -> bool {
+    let upper = key.to_uppercase();
+
+    // 1. Specific prefixes
+    if upper.starts_with("AWS_")
+        || upper.starts_with("GITHUB_")
+        || upper.starts_with("GH_")
+        || upper.starts_with("ARO_")
+        || upper.starts_with("OPENAI_")
+        || upper.starts_with("ANTHROPIC_")
+        || upper.starts_with("GEMINI_")
+        || upper.starts_with("GROQ_")
+        || upper.starts_with("MISTRAL_")
+        || upper.starts_with("DEEPSEEK_")
+        || upper.starts_with("COHERE_")
+        || upper.starts_with("STRIPE_")
+        || upper.starts_with("SLACK_")
+        || upper.starts_with("DISCORD_")
+        || upper.starts_with("TWILIO_")
+        || upper.starts_with("SENDGRID_")
+        || upper.starts_with("RESEND_")
+        || upper.starts_with("DATABASE_")
+        || upper.starts_with("DB_")
+        || upper.starts_with("POSTGRES_")
+        || upper.starts_with("MYSQL_")
+        || upper.starts_with("REDIS_")
+    {
+        return true;
+    }
+
+    // 2. Specific suffixes
+    if upper.ends_with("_KEY")
+        || upper.ends_with("_SECRET")
+        || upper.ends_with("_TOKEN")
+        || upper.ends_with("_PASSWORD")
+        || upper.ends_with("_PASSWD")
+        || upper.ends_with("_CREDENTIAL")
+        || upper.ends_with("_CREDENTIALS")
+        || upper.ends_with("_AUTH")
+        || upper.ends_with("_CERT")
+    {
+        return true;
+    }
+
+    // 3. Substrings
+    const SENSITIVE_SUBSTRINGS: &[&str] = &[
+        "API_KEY",
+        "APIKEY",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "TOKEN",
+        "DATABASE_URL",
+        "DATABASE",
+        "REDIS_",
+        "REDIS_URL",
+        "PRIVATE_KEY",
+        "SIGNING_KEY",
+        "BEARER",
+        "COOKIE",
+        "SESSION",
+        "CREDENTIAL",
+        "KEYRING",
+        "ENCRYPTION",
+        "SMTP",
+    ];
+
+    SENSITIVE_SUBSTRINGS
+        .iter()
+        .any(|needle| upper.contains(needle))
+}
+
+pub fn scrubbed_env() -> Vec<(String, String)> {
+    std::env::vars()
+        .filter(|(key, _)| !is_sensitive_env_var(key))
+        .collect()
+}
+
+fn normalize_path_components(path: &std::path::Path) -> AroResult<std::path::PathBuf> {
+    let mut normalized = std::path::PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::Prefix(p) => normalized.push(p.as_os_str()),
+            std::path::Component::RootDir => normalized.push(comp.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(AroError::Security(
+                        "access denied: path traversal escapes root".to_string(),
+                    ));
+                }
+            }
+            std::path::Component::Normal(c) => normalized.push(c),
+        }
+    }
+    Ok(strip_verbatim_prefix(&normalized))
+}
+
 pub fn resolve_workspace_path(
     input: &Value,
     path_field: &str,
     default_to_root: bool,
-) -> Option<std::path::PathBuf> {
+) -> AroResult<std::path::PathBuf> {
+    let root_str = input
+        .get("root_path")
+        .or_else(|| input.get("rootPath"))
+        .or_else(|| input.get("workspace_root"))
+        .or_else(|| input.get("workspaceRoot"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AroError::Security("workspace root path is required but missing or empty".to_string())
+        })?;
+
+    if root_str.contains('\0') {
+        return Err(AroError::Security(
+            "workspace root path contains null byte".to_string(),
+        ));
+    }
+
+    let root_path = std::path::Path::new(root_str);
+    let clean_root = normalize_path_components(&strip_verbatim_prefix(root_path))?;
+    let canon_root = std::fs::canonicalize(&clean_root)
+        .map(|p| strip_verbatim_prefix(&p))
+        .unwrap_or_else(|_| clean_root.clone());
+
     let raw_path = input
         .get(path_field)
         .or_else(|| {
@@ -105,76 +279,74 @@ pub fn resolve_workspace_path(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    let root_str = input
-        .get("root_path")
-        .or_else(|| input.get("rootPath"))
-        .or_else(|| input.get("workspace_root"))
-        .or_else(|| input.get("workspaceRoot"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    let root_buf = root_str.map(std::path::PathBuf::from);
-
-    match (raw_path, root_buf) {
-        (Some(p), Some(root)) => {
-            let path = std::path::Path::new(p);
-            let joined = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                root.join(path)
-            };
-            // Un chemin absolu ou des `..` ne doivent jamais sortir du root :
-            // sans ceci, `C:\Windows\...` ou `../../secret` passaient tels quels.
-            contained_in_root(&root, &joined)
+    let target_str = match raw_path {
+        Some(p) => p,
+        None if default_to_root => return Ok(canon_root),
+        None => {
+            return Err(AroError::Configuration(format!(
+                "'{path_field}' parameter is required"
+            )))
         }
-        (Some(p), None) => Some(std::path::PathBuf::from(p)),
-        (None, Some(root)) if default_to_root => Some(root),
-        (None, None) if default_to_root => {
-            Some(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
-        }
-        _ => None,
+    };
+
+    if target_str.contains('\0') {
+        return Err(AroError::Security(
+            "target path contains null byte".to_string(),
+        ));
     }
-}
 
-/// Normalise lexicalement puis exige le confinement dans `root`.
-/// Gère les cibles inexistantes (écriture) par comparaison lexicale et
-/// revalide les liens symboliques par canonicalisation quand les deux
-/// côtés existent. Retourne `None` en cas d'évasion.
-fn contained_in_root(
-    root: &std::path::Path,
-    candidate: &std::path::Path,
-) -> Option<std::path::PathBuf> {
-    fn normalize(path: &std::path::Path) -> Option<std::path::PathBuf> {
-        let mut out = std::path::PathBuf::new();
-        for comp in path.components() {
-            match comp {
-                std::path::Component::CurDir => {}
-                std::path::Component::ParentDir => {
-                    if !out.pop() {
-                        return None;
-                    }
+    let cand_path = std::path::Path::new(target_str);
+    let combined = if cand_path.is_absolute() {
+        cand_path.to_path_buf()
+    } else {
+        canon_root.join(cand_path)
+    };
+
+    let clean_normalized = normalize_path_components(&combined)?;
+
+    // Target exists on disk: verify canonical prefix
+    if let Ok(canon) = std::fs::canonicalize(&clean_normalized) {
+        let clean_canon = strip_verbatim_prefix(&canon);
+        if !clean_canon.starts_with(&canon_root) && !clean_canon.starts_with(&clean_root) {
+            return Err(AroError::Security(format!(
+                "access denied: resolved path '{}' escapes workspace root '{}'",
+                clean_canon.display(),
+                canon_root.display()
+            )));
+        }
+        return Ok(clean_canon);
+    }
+
+    // Target does not exist yet (file creation): if an ancestor exists within clean_root or canon_root, verify symlink resolution
+    let mut cur = clean_normalized.as_path();
+    while let Some(parent) = cur.parent() {
+        if (parent.starts_with(&clean_root) || parent.starts_with(&canon_root)) && parent.exists() {
+            if let Ok(canon_parent) = std::fs::canonicalize(parent) {
+                let clean_parent = strip_verbatim_prefix(&canon_parent);
+                if !clean_parent.starts_with(&canon_root) && !clean_parent.starts_with(&clean_root)
+                {
+                    return Err(AroError::Security(format!(
+                        "access denied: parent directory '{}' escapes workspace root '{}'",
+                        clean_parent.display(),
+                        canon_root.display()
+                    )));
                 }
-                c => out.push(c.as_os_str()),
             }
+            break;
         }
-        Some(out)
+        cur = parent;
     }
 
-    let root_norm = normalize(root)?;
-    let cand_norm = normalize(candidate)?;
-    if !cand_norm.starts_with(&root_norm) {
-        return None;
+    // Lexical containment check
+    if !clean_normalized.starts_with(&clean_root) && !clean_normalized.starts_with(&canon_root) {
+        return Err(AroError::Security(format!(
+            "access denied: path '{}' escapes workspace root '{}'",
+            clean_normalized.display(),
+            canon_root.display()
+        )));
     }
-    if let (Ok(canon_root), Ok(canon_cand)) = (
-        std::fs::canonicalize(&root_norm),
-        std::fs::canonicalize(&cand_norm),
-    ) {
-        if !canon_cand.starts_with(&canon_root) {
-            return None;
-        }
-    }
-    Some(cand_norm)
+
+    Ok(clean_normalized)
 }
 
 impl Default for ToolExecutor {
@@ -204,7 +376,169 @@ impl ToolExecutor {
             .user_agent(config.user_agent.clone())
             .build()
             .map_err(|err| AroError::Configuration(format!("web client setup failed: {err}")))?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            browser: Arc::new(tokio::sync::RwLock::new(None)),
+        })
+    }
+
+    /// Attach a pre-launched browser service (desktop app, tests).
+    pub async fn set_browser_service(&self, service: BrowserService) {
+        *self.browser.write().await = Some(service);
+    }
+
+    // ── Live browser bridge (user relay + Tauri commands) ──────────────
+    // Same shared service the agent tools use: one Chromium, one tab pool,
+    // both pilots. Snapshots (not diffs) are returned so the UI never acts
+    // on stale refs.
+
+    pub async fn browser_tab_list(&self) -> AroResult<Vec<BrowserTabInfo>> {
+        Ok(self.browser_service().await?.list_tabs().await)
+    }
+
+    pub async fn browser_tab_open(&self, url: Option<String>) -> AroResult<BrowserTabInfo> {
+        let service = self.browser_service().await?;
+        service
+            .open_tab(url.as_deref(), false)
+            .await
+            .map_err(map_browser_error)
+    }
+
+    pub async fn browser_tab_close(&self, id: BrowserTabId) -> AroResult<bool> {
+        let service = self.browser_service().await?;
+        service.close_tab(id).await.map_err(map_browser_error)?;
+        Ok(true)
+    }
+
+    pub async fn browser_navigate_tab(
+        &self,
+        id: Option<BrowserTabId>,
+        url: &str,
+    ) -> AroResult<PageSnapshot> {
+        let service = self.browser_service().await?;
+        let tab_id = match id {
+            Some(tab_id) => {
+                service
+                    .run_action(tab_id, &aro_browser::BrowserAction::Navigate { url: url.to_string() })
+                    .await
+                    .map_err(map_browser_error)?;
+                tab_id
+            }
+            None => {
+                service
+                    .open_tab(Some(url), false)
+                    .await
+                    .map_err(map_browser_error)?
+                    .id
+            }
+        };
+        service.snapshot(tab_id).await.map_err(map_browser_error)
+    }
+
+    pub async fn browser_snapshot_tab(&self, id: BrowserTabId) -> AroResult<PageSnapshot> {
+        let service = self.browser_service().await?;
+        service.snapshot(id).await.map_err(map_browser_error)
+    }
+
+    pub async fn browser_frame_png(&self, id: BrowserTabId) -> AroResult<Vec<u8>> {
+        let service = self.browser_service().await?;
+        service.frame_png(id).await.map_err(map_browser_error)
+    }
+
+    pub async fn browser_frame_jpeg(&self, id: BrowserTabId) -> AroResult<Vec<u8>> {
+        let service = self.browser_service().await?;
+        service.frame_jpeg(id).await.map_err(map_browser_error)
+    }
+
+    pub async fn browser_click_point(
+        &self,
+        id: BrowserTabId,
+        x: f64,
+        y: f64,
+    ) -> AroResult<PageSnapshot> {
+        let service = self.browser_service().await?;
+        service.click_point(id, x, y).await.map_err(map_browser_error)
+    }
+
+    pub async fn browser_click_ref(
+        &self,
+        id: BrowserTabId,
+        target_ref: &str,
+    ) -> AroResult<PageSnapshot> {
+        let service = self.browser_service().await?;
+        service.click_ref(id, target_ref).await.map_err(map_browser_error)
+    }
+
+    /// User-initiated vault autofill (Settings / browser panel button).
+    /// Same guarantees as the agent tool: secrets stay server-side.
+    pub async fn browser_autofill_user(
+        &self,
+        id: BrowserTabId,
+        username_ref: &str,
+        password_ref: &str,
+        account: &str,
+    ) -> AroResult<PageSnapshot> {
+        let service = self.browser_service().await?;
+        let username = aro_browser::load_credential(&format!("{account}:username"))
+            .map_err(map_browser_error)?;
+        let password = aro_browser::load_credential(&format!("{account}:password"))
+            .map_err(map_browser_error)?;
+        let outcome = service
+            .autofill(&aro_browser::AutofillRequest {
+                tab_id: id,
+                username_ref: username_ref.to_string(),
+                password_ref: password_ref.to_string(),
+                username,
+                password,
+            })
+            .await
+            .map_err(map_browser_error)?;
+        Ok(outcome.snapshot)
+    }
+
+    pub async fn browser_type_focused(
+        &self,
+        id: BrowserTabId,
+        text: &str,
+    ) -> AroResult<PageSnapshot> {
+        let service = self.browser_service().await?;
+        service.type_focused(id, text).await.map_err(map_browser_error)
+    }
+
+    pub async fn browser_press_key(&self, id: BrowserTabId, key: &str) -> AroResult<PageSnapshot> {
+        let service = self.browser_service().await?;
+        service.press(id, key).await.map_err(map_browser_error)
+    }
+
+    pub async fn browser_wheel(
+        &self,
+        id: BrowserTabId,
+        delta_x: f64,
+        delta_y: f64,
+    ) -> AroResult<PageSnapshot> {
+        let service = self.browser_service().await?;
+        service.wheel(id, delta_x, delta_y).await.map_err(map_browser_error)
+    }
+
+    /// Resolve the shared browser service, launching Chromium on first use.
+    /// Returns an actionable error when no executable is available.
+    pub async fn browser_service(&self) -> AroResult<BrowserService> {
+        if let Some(service) = self.browser.read().await.clone() {
+            return Ok(service);
+        }
+        let mut guard = self.browser.write().await;
+        if let Some(service) = guard.clone() {
+            return Ok(service);
+        }
+        let config = BrowserLaunchConfig::new(aro_browser::default_profile_dir());
+        let service = BrowserService::launch(&config).await.map_err(|err| {
+            AroError::RuntimeUnavailable(format!(
+                "browser unavailable ({err}); install Chrome/Edge/Chromium or set ARO_CHROME_EXECUTABLE"
+            ))
+        })?;
+        *guard = Some(service.clone());
+        Ok(service)
     }
 
     pub async fn execute(
@@ -255,6 +589,15 @@ impl ToolExecutor {
             TOOL_CORE_BROWSER_ACTION | TOOL_BROWSER_ACTION | "browser_action" => {
                 self.execute_browser_action(request, policy).await
             }
+            TOOL_CORE_BROWSER_TABS | TOOL_BROWSER_TABS | "browser_tabs" => {
+                self.execute_browser_tabs(request, policy).await
+            }
+            TOOL_CORE_BROWSER_SNAPSHOT | TOOL_BROWSER_SNAPSHOT | "browser_snapshot" => {
+                self.execute_browser_snapshot(request, policy).await
+            }
+            TOOL_CORE_BROWSER_AUTOFILL | TOOL_BROWSER_AUTOFILL | "browser_autofill" => {
+                self.execute_browser_autofill(request, policy).await
+            }
             TOOL_CORE_COMPUTER_USE
             | TOOL_COMPUTER_USE
             | "computer_use"
@@ -275,9 +618,7 @@ impl ToolExecutor {
             | "app_launch"
             | TOOL_CORE_NETWORK_INFO
             | TOOL_NETWORK_INFO
-            | "network_info" => {
-                self.execute_computer_use(request).await
-            }
+            | "network_info" => self.execute_computer_use(request).await,
             TOOL_CORE_NOTIFICATION_SEND | TOOL_NOTIFICATION_SEND | "send_notification" => {
                 self.execute_notification_send(request).await
             }
@@ -293,7 +634,6 @@ impl ToolExecutor {
         }
     }
 
-
     pub async fn execute_workspace_search(
         &self,
         request: ToolExecutionRequest,
@@ -306,8 +646,7 @@ impl ToolExecutor {
             .unwrap_or("")
             .trim()
             .to_lowercase();
-        let target_dir = resolve_workspace_path(&request.input, "path", true)
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let target_dir = resolve_workspace_path(&request.input, "path", true)?;
         let mut found_files = Vec::new();
 
         fn search_dir_rec(
@@ -395,8 +734,7 @@ impl ToolExecutor {
         request: ToolExecutionRequest,
     ) -> AroResult<ToolExecutionResult> {
         let started_at = Utc::now();
-        let target_file = resolve_workspace_path(&request.input, "path", false)
-            .ok_or_else(|| AroError::Configuration("path parameter is required".to_string()))?;
+        let target_file = resolve_workspace_path(&request.input, "path", false)?;
 
         let content = std::fs::read_to_string(&target_file).map_err(|err| {
             AroError::Unexpected(format!(
@@ -405,11 +743,7 @@ impl ToolExecutor {
             ))
         })?;
 
-        let truncated = if content.len() > 16_000 {
-            format!("{}...\n[truncated]", &content[..16_000])
-        } else {
-            content
-        };
+        let (truncated, _) = truncate_output_safe(&content, 16_000);
 
         let output = json!({
             "path": target_file.display().to_string(),
@@ -447,8 +781,7 @@ impl ToolExecutor {
         request: ToolExecutionRequest,
     ) -> AroResult<ToolExecutionResult> {
         let started_at = Utc::now();
-        let target_file = resolve_workspace_path(&request.input, "path", false)
-            .ok_or_else(|| AroError::Configuration("path parameter is required".to_string()))?;
+        let target_file = resolve_workspace_path(&request.input, "path", false)?;
         let content = request
             .input
             .get("content")
@@ -507,8 +840,7 @@ impl ToolExecutor {
         request: ToolExecutionRequest,
     ) -> AroResult<ToolExecutionResult> {
         let started_at = Utc::now();
-        let target_dir = resolve_workspace_path(&request.input, "path", true)
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let target_dir = resolve_workspace_path(&request.input, "path", true)?;
         let recursive = request
             .input
             .get("recursive")
@@ -622,8 +954,7 @@ impl ToolExecutor {
             .get("query")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let target_dir = resolve_workspace_path(&request.input, "path", true)
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let target_dir = resolve_workspace_path(&request.input, "path", true)?;
         if query.is_empty() {
             return Err(AroError::Configuration(
                 "query parameter is required".to_string(),
@@ -733,8 +1064,25 @@ impl ToolExecutor {
         request: ToolExecutionRequest,
     ) -> AroResult<ToolExecutionResult> {
         let started_at = Utc::now();
-        let target_path = resolve_workspace_path(&request.input, "path", false)
-            .ok_or_else(|| AroError::Configuration("path parameter is required".to_string()))?;
+        let target_path = resolve_workspace_path(&request.input, "path", false)?;
+        let root_str = request
+            .input
+            .get("root_path")
+            .or_else(|| request.input.get("rootPath"))
+            .or_else(|| request.input.get("workspace_root"))
+            .or_else(|| request.input.get("workspaceRoot"))
+            .and_then(|v| v.as_str());
+        if let Some(r) = root_str {
+            if let Ok(canon_root) = std::fs::canonicalize(r) {
+                let strip_root = strip_verbatim_prefix(&canon_root);
+                let strip_target = strip_verbatim_prefix(&target_path);
+                if strip_root == strip_target {
+                    return Err(AroError::Security(
+                        "cannot delete workspace root".to_string(),
+                    ));
+                }
+            }
+        }
 
         if target_path.is_dir() {
             std::fs::remove_dir_all(&target_path).map_err(|err| {
@@ -878,10 +1226,27 @@ impl ToolExecutor {
             }
         }
 
-        let working_dir =
-            resolve_workspace_path(&request.input, "cwd", true).unwrap_or_else(|| {
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-            });
+        let has_root = request
+            .input
+            .get("root_path")
+            .or_else(|| request.input.get("rootPath"))
+            .or_else(|| request.input.get("workspace_root"))
+            .or_else(|| request.input.get("workspaceRoot"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty());
+        let working_dir = if has_root {
+            resolve_workspace_path(&request.input, "cwd", true)?
+        } else if let Some(cwd_str) = request
+            .input
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            std::path::PathBuf::from(cwd_str)
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        };
 
         let shell_pref = request
             .input
@@ -911,6 +1276,11 @@ impl ToolExecutor {
             c
         };
 
+        cmd.env_clear();
+        for (k, v) in scrubbed_env() {
+            cmd.env(k, v);
+        }
+
         if working_dir.exists() {
             cmd.current_dir(&working_dir);
         }
@@ -933,7 +1303,7 @@ impl ToolExecutor {
         let wait_result =
             tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
 
-        let (stdout, stderr, exit_code, status, summary, err_msg) = match wait_result {
+        let (stdout_raw, stderr_raw, exit_code, status, summary, err_msg) = match wait_result {
             Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -973,6 +1343,9 @@ impl ToolExecutor {
                 Some(format!("Timeout after {timeout_secs}s")),
             ),
         };
+
+        let (stdout, _) = truncate_output_safe(&stdout_raw, MAX_EXECUTION_OUTPUT_BYTES);
+        let (stderr, _) = truncate_output_safe(&stderr_raw, MAX_EXECUTION_OUTPUT_BYTES);
 
         let result_json = json!({
             "command": command,
@@ -1035,10 +1408,27 @@ impl ToolExecutor {
             .trim()
             .to_lowercase();
 
-        let working_dir =
-            resolve_workspace_path(&request.input, "cwd", true).unwrap_or_else(|| {
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-            });
+        let has_root = request
+            .input
+            .get("root_path")
+            .or_else(|| request.input.get("rootPath"))
+            .or_else(|| request.input.get("workspace_root"))
+            .or_else(|| request.input.get("workspaceRoot"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty());
+        let working_dir = if has_root {
+            resolve_workspace_path(&request.input, "cwd", true)?
+        } else if let Some(cwd_str) = request
+            .input
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            std::path::PathBuf::from(cwd_str)
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        };
 
         let temp_dir = std::env::temp_dir().join("aro_code_exec");
         let _ = std::fs::create_dir_all(&temp_dir);
@@ -1105,6 +1495,11 @@ impl ToolExecutor {
             }
         };
 
+        cmd.env_clear();
+        for (k, v) in scrubbed_env() {
+            cmd.env(k, v);
+        }
+
         if working_dir.exists() {
             cmd.current_dir(&working_dir);
         }
@@ -1141,7 +1536,7 @@ impl ToolExecutor {
             let _ = std::fs::remove_file(temp_file);
         }
 
-        let (stdout, stderr, exit_code, success, err_msg) = match wait_result {
+        let (stdout_raw, stderr_raw, exit_code, success, err_msg) = match wait_result {
             Ok(Ok(output_res)) => {
                 let stdout = String::from_utf8_lossy(&output_res.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output_res.stderr).to_string();
@@ -1170,17 +1565,14 @@ impl ToolExecutor {
             ),
         };
 
-        let truncated_stdout = if stdout.len() > 64_000 {
-            format!("{}...\n[truncated]", &stdout[..64_000])
-        } else {
-            stdout.clone()
-        };
+        let (stdout, _) = truncate_output_safe(&stdout_raw, MAX_EXECUTION_OUTPUT_BYTES);
+        let (stderr, _) = truncate_output_safe(&stderr_raw, MAX_EXECUTION_OUTPUT_BYTES);
 
         let result_json = json!({
             "language": language,
             "success": success,
             "exitCode": exit_code,
-            "stdout": truncated_stdout,
+            "stdout": stdout,
             "stderr": stderr,
             "cwd": working_dir.display().to_string(),
         });
@@ -1253,23 +1645,8 @@ impl ToolExecutor {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let root_str = request
-            .input
-            .get("root_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let dest_path = if !path_str.is_empty() {
-            let p = std::path::Path::new(path_str);
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else if !root_str.is_empty() {
-                std::path::PathBuf::from(root_str).join(p)
-            } else {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .join(p)
-            }
+        let dest_path = if !path_str.trim().is_empty() {
+            resolve_workspace_path(&request.input, "path", false)?
         } else {
             let slug = title
                 .to_lowercase()
@@ -1284,13 +1661,9 @@ impl ToolExecutor {
                 _ => "md",
             };
             let file_name = format!("{slug}.{ext}");
-            if !root_str.is_empty() {
-                std::path::PathBuf::from(root_str).join(&file_name)
-            } else {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .join(&file_name)
-            }
+            let mut synthetic_input = request.input.clone();
+            synthetic_input["path"] = json!(file_name);
+            resolve_workspace_path(&synthetic_input, "path", false)?
         };
 
         if let Some(parent) = dest_path.parent() {
@@ -1554,7 +1927,13 @@ impl ToolExecutor {
             .and_then(|v| v.as_str())
             .unwrap_or("markdown");
 
-        let artifact_id = Uuid::new_v4();
+        let artifact_id = request
+            .input
+            .get("id")
+            .or_else(|| request.input.get("artifactId"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .unwrap_or_else(Uuid::new_v4);
         let artifact = AgentArtifact {
             id: artifact_id,
             run_id: request.run_id,
@@ -1600,15 +1979,17 @@ impl ToolExecutor {
         let target_str = request
             .input
             .get("target")
+            .or_else(|| request.input.get("search"))
+            .or_else(|| request.input.get("pattern"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let replacement_str = request
             .input
             .get("replacement")
+            .or_else(|| request.input.get("replace"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let base_path = resolve_workspace_path(&request.input, "path", true)
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let base_path = resolve_workspace_path(&request.input, "path", true)?;
 
         if target_str.is_empty() {
             return Err(AroError::Configuration(
@@ -1698,8 +2079,7 @@ impl ToolExecutor {
         request: ToolExecutionRequest,
     ) -> AroResult<ToolExecutionResult> {
         let started_at = Utc::now();
-        let target_dir = resolve_workspace_path(&request.input, "path", true)
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let target_dir = resolve_workspace_path(&request.input, "path", true)?;
 
         let mut cmd = if cfg!(target_os = "windows") {
             let mut c = tokio::process::Command::new("cmd");
@@ -1724,7 +2104,7 @@ impl ToolExecutor {
 
         let output = cmd.output().await;
 
-        let (stdout, stderr, exit_code) = match output {
+        let (stdout_raw, stderr_raw, exit_code) = match output {
             Ok(out) => (
                 String::from_utf8_lossy(&out.stdout).to_string(),
                 String::from_utf8_lossy(&out.stderr).to_string(),
@@ -1736,6 +2116,9 @@ impl ToolExecutor {
                 Some(-1),
             ),
         };
+
+        let (stdout, _) = truncate_output_safe(&stdout_raw, MAX_EXECUTION_OUTPUT_BYTES);
+        let (stderr, _) = truncate_output_safe(&stderr_raw, MAX_EXECUTION_OUTPUT_BYTES);
 
         let context_sources = vec![ContextSource {
             id: format!("tool:{}:git_diff", request.invocation_id),
@@ -1789,32 +2172,42 @@ impl ToolExecutor {
             .as_deref()
             .or(self.config.search_endpoint.as_deref());
 
+        let mut effective_provider = provider;
+
         let mut results = match provider {
             "searxng" => {
                 if let Some(ep) = endpoint {
                     self.search_searxng(ep, &request.query, limit).await?
                 } else {
-                    return Err(AroError::Configuration(
-                        "SearXNG search provider requires an endpoint URL".to_string(),
-                    ));
+                    // Instance non configurée : repli automatique sur le
+                    // scraper intégré au lieu d'échouer (ex. actu du jour).
+                    eprintln!(
+                        "ARO web search: SearXNG provider selected without endpoint URL; falling back to DuckDuckGo scraper"
+                    );
+                    effective_provider = "duckduckgo-fallback";
+                    self.search_duckduckgo(&request.query, limit).await?
                 }
             }
             "brave-api" => {
                 if let Some(key) = api_key {
                     self.search_brave_api(key, &request.query, limit).await?
                 } else {
-                    return Err(AroError::Configuration(
-                        "Brave Search API provider requires an API Key".to_string(),
-                    ));
+                    eprintln!(
+                        "ARO web search: Brave Search API provider selected without API key; falling back to DuckDuckGo scraper"
+                    );
+                    effective_provider = "duckduckgo-fallback";
+                    self.search_duckduckgo(&request.query, limit).await?
                 }
             }
             "serper" => {
                 if let Some(key) = api_key {
                     self.search_serper_api(key, &request.query, limit).await?
                 } else {
-                    return Err(AroError::Configuration(
-                        "Serper Google Search API provider requires an API Key".to_string(),
-                    ));
+                    eprintln!(
+                        "ARO web search: Serper provider selected without API key; falling back to DuckDuckGo scraper"
+                    );
+                    effective_provider = "duckduckgo-fallback";
+                    self.search_duckduckgo(&request.query, limit).await?
                 }
             }
             "duckduckgo" => self.search_duckduckgo_html(&request.query, limit).await?,
@@ -1842,7 +2235,7 @@ impl ToolExecutor {
         Ok(WebSearchResponse {
             query: request.query,
             results,
-            provider: provider.to_string(),
+            provider: effective_provider.to_string(),
             searched_at: Utc::now(),
         })
     }
@@ -2232,48 +2625,118 @@ impl ToolExecutor {
         })
     }
 
+    /// Real navigation in the shared Chromium (CDP). Opens a new tab unless
+    /// `tabId` names an existing one. The returned `tabId` threads every
+    /// follow-up call (`snapshot`, `action`, `tabs`).
     async fn execute_browser_navigate(
         &self,
         request: ToolExecutionRequest,
         policy: &WebAccessPolicy,
     ) -> AroResult<ToolExecutionResult> {
+        policy.ensure_network_allowed()?;
         let started_at = Utc::now();
         let target_url = request
             .input
             .get("url")
             .and_then(|v| v.as_str())
             .or_else(|| request.input.get("target").and_then(|v| v.as_str()))
-            .ok_or_else(|| AroError::Configuration("browser navigate requires a `url` parameter".into()))?;
+            .ok_or_else(|| {
+                AroError::Configuration("browser navigate requires a `url` parameter".into())
+            })?;
 
-        let fetch = WebFetchRequest {
-            url: target_url.to_string(),
-            max_chars: Some(self.config.max_page_chars),
+        let service = self.browser_service().await?;
+        let tab_id = match parse_browser_tab_id(&request.input)? {
+            Some(id) => {
+                service
+                    .navigate(id, target_url)
+                    .await
+                    .map_err(map_browser_error)?;
+                id
+            }
+            None => {
+                service
+                    .open_tab(Some(target_url), true)
+                    .await
+                    .map_err(map_browser_error)?
+                    .id
+            }
         };
-        let snapshot = self.fetch_web_page(fetch, policy).await?;
+        let snapshot = service.snapshot(tab_id).await.map_err(map_browser_error)?;
 
-        let output = json!({
-            "url": snapshot.final_url,
-            "title": snapshot.title,
-            "content": snapshot.content,
-            "excerpt": snapshot.excerpt,
-            "status": snapshot.status,
-            "browserState": "navigated"
-        });
+        Ok(browser_snapshot_result(
+            &request,
+            started_at,
+            &snapshot,
+            format!("Navigated to {}", snapshot.title),
+            format!(
+                "Browser navigated to {} ({} refs observed)",
+                snapshot.url,
+                snapshot.elements.len()
+            ),
+        ))
+    }
 
-        let artifact = AgentArtifact {
-            id: Uuid::new_v4(),
-            run_id: request.run_id,
-            kind: "browser-page".to_string(),
-            title: snapshot.title.clone(),
-            uri: Some(snapshot.final_url.clone()),
-            content: Some(snapshot.content.clone()),
-            metadata: json!({
-                "toolId": request.tool_id.clone(),
-                "invocationId": request.invocation_id,
-                "url": snapshot.final_url,
-                "status": snapshot.status,
-            }),
-            created_at: Utc::now(),
+    async fn execute_browser_tabs(
+        &self,
+        request: ToolExecutionRequest,
+        policy: &WebAccessPolicy,
+    ) -> AroResult<ToolExecutionResult> {
+        policy.ensure_network_allowed()?;
+        let started_at = Utc::now();
+        let operation = request
+            .input
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("list")
+            .to_ascii_lowercase();
+
+        let service = self.browser_service().await?;
+        let (title, output) = match operation.as_str() {
+            "open" => {
+                let url = request.input.get("url").and_then(|v| v.as_str());
+                let info = service
+                    .open_tab(url, true)
+                    .await
+                    .map_err(map_browser_error)?;
+                (
+                    format!("Opened tab {}", info.title),
+                    json!({ "tabId": info.id.to_string(), "url": info.url, "title": info.title }),
+                )
+            }
+            "close" => {
+                let id = parse_browser_tab_id(&request.input)?.ok_or_else(|| {
+                    AroError::Configuration("browser tabs close requires `tabId`".into())
+                })?;
+                service.close_tab(id).await.map_err(map_browser_error)?;
+                (
+                    "Closed tab".to_string(),
+                    json!({ "tabId": id.to_string(), "closed": true }),
+                )
+            }
+            "focus" | "switch" => {
+                let id = parse_browser_tab_id(&request.input)?.ok_or_else(|| {
+                    AroError::Configuration("browser tabs focus requires `tabId`".into())
+                })?;
+                let snapshot = service.snapshot(id).await.map_err(map_browser_error)?;
+                (
+                    format!("Focused tab {}", snapshot.title),
+                    json!({ "tabId": id.to_string(), "url": snapshot.url, "title": snapshot.title }),
+                )
+            }
+            _ => {
+                let tabs = service.list_tabs().await;
+                (
+                    format!("{} browser tab(s)", tabs.len()),
+                    json!({
+                        "tabs": tabs.iter().map(|t| json!({
+                            "tabId": t.id.to_string(),
+                            "url": t.url,
+                            "title": t.title,
+                            "aiControlled": t.ai_controlled,
+                        })).collect::<Vec<_>>(),
+                    }),
+                )
+            }
         };
 
         Ok(ToolExecutionResult {
@@ -2281,65 +2744,310 @@ impl ToolExecutor {
             run_id: request.run_id,
             tool_id: request.tool_id,
             status: ToolExecutionStatus::Completed,
-            title: format!("Navigated to {}", snapshot.title),
+            title: title.clone(),
             output,
-            summary: format!("Browser navigated to {} (status: {})", snapshot.final_url, snapshot.status),
-            context_sources: vec![ContextSource {
-                id: format!("tool:{}:browser", request.invocation_id),
-                kind: "browser-page".to_string(),
-                title: snapshot.title.clone(),
-                excerpt: snapshot.excerpt.clone(),
-                uri: Some(snapshot.final_url.clone()),
-                score: 0.95,
-                created_at: Some(snapshot.fetched_at),
-            }],
-            artifacts: vec![artifact],
+            summary: title,
+            context_sources: vec![],
+            artifacts: vec![],
             error: None,
             started_at,
             finished_at: Utc::now(),
         })
     }
 
+    async fn execute_browser_snapshot(
+        &self,
+        request: ToolExecutionRequest,
+        policy: &WebAccessPolicy,
+    ) -> AroResult<ToolExecutionResult> {
+        policy.ensure_network_allowed()?;
+        let started_at = Utc::now();
+        let service = self.browser_service().await?;
+        let (tab_id, _is_new) = self
+            .resolve_browser_tab(&service, &request.input)
+            .await?;
+        let snapshot = service.snapshot(tab_id).await.map_err(map_browser_error)?;
+        Ok(browser_snapshot_result(
+            &request,
+            started_at,
+            &snapshot,
+            format!("Snapshot of {}", snapshot.title),
+            format!(
+                "Observed {} ({} refs, {} chars)",
+                snapshot.url,
+                snapshot.elements.len(),
+                snapshot.text_excerpt.len()
+            ),
+        ))
+    }
+
+    /// Verified interaction with the live Chromium tab: click, type, keys,
+    /// scroll, history, wait, select. Read-style actions (`inspect`,
+    /// `extract`, `screenshot`) observe the tab (opening it from `url` when
+    /// needed). Every effect is proven by a post-action snapshot.
     async fn execute_browser_action(
         &self,
         request: ToolExecutionRequest,
-        _policy: &WebAccessPolicy,
+        policy: &WebAccessPolicy,
     ) -> AroResult<ToolExecutionResult> {
+        policy.ensure_network_allowed()?;
         let started_at = Utc::now();
-        let action = request
+        let action_name = request
             .input
             .get("action")
             .and_then(|v| v.as_str())
-            .unwrap_or("inspect");
-        let selector = request.input.get("selector").and_then(|v| v.as_str());
-        let text = request.input.get("text").and_then(|v| v.as_str());
+            .unwrap_or("inspect")
+            .to_ascii_lowercase();
 
-        let output = json!({
-            "action": action,
-            "selector": selector,
-            "text": text,
-            "success": true,
-            "message": format!("Browser action `{action}` executed on active page view"),
-            "viewport": {
-                "width": 1280,
-                "height": 800,
-                "scroll_y": 0
+        let service = self.browser_service().await?;
+        let (tab_id, _is_new) = self
+            .resolve_browser_tab(&service, &request.input)
+            .await?;
+
+        // Read-style actions: observe, don't mutate.
+        if matches!(
+            action_name.as_str(),
+            "inspect" | "extract" | "get_text" | "gettext" | "read" | "screenshot" | "snapshot"
+        ) {
+            let snapshot = service.snapshot(tab_id).await.map_err(map_browser_error)?;
+            return Ok(browser_snapshot_result(
+                &request,
+                started_at,
+                &snapshot,
+                format!("Browser action: {action_name} on {}", snapshot.title),
+                format!(
+                    "Observed {} ({} refs, {} chars)",
+                    snapshot.url,
+                    snapshot.elements.len(),
+                    snapshot.text_excerpt.len()
+                ),
+            ));
+        }
+
+        let target_ref = request
+            .input
+            .get("targetRef")
+            .or_else(|| request.input.get("target_ref"))
+            .or_else(|| request.input.get("ref"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let text = request
+            .input
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let browser_action = match action_name.as_str() {
+            "click" => {
+                require_ref(&target_ref, "click")?;
+                aro_browser::BrowserAction::Click { target_ref }
             }
-        });
+            "type" => {
+                require_ref(&target_ref, "type")?;
+                aro_browser::BrowserAction::Type { target_ref, text }
+            }
+            "press" | "key" => {
+                let key = request
+                    .input
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or(text);
+                aro_browser::BrowserAction::Press { key }
+            }
+            "scroll" => {
+                let direction = request
+                    .input
+                    .get("direction")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("down")
+                    .to_string();
+                let amount = request
+                    .input
+                    .get("amount")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(800) as u32;
+                aro_browser::BrowserAction::Scroll { direction, amount }
+            }
+            "back" => aro_browser::BrowserAction::Back,
+            "forward" => aro_browser::BrowserAction::Forward,
+            "reload" | "refresh" => aro_browser::BrowserAction::Reload,
+            "wait" => {
+                let text_contains = request
+                    .input
+                    .get("textContains")
+                    .or_else(|| request.input.get("text_contains"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let timeout_ms = request
+                    .input
+                    .get("timeoutMs")
+                    .or_else(|| request.input.get("timeout_ms"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(10_000);
+                aro_browser::BrowserAction::Wait { text_contains, timeout_ms }
+            }
+            "select" => {
+                require_ref(&target_ref, "select")?;
+                let value = request
+                    .input
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                aro_browser::BrowserAction::Select { target_ref, value }
+            }
+            other => {
+                return Err(AroError::Configuration(format!(
+                    "unknown browser action `{other}` (click, type, press, scroll, back, forward, reload, wait, select, inspect, extract, screenshot)"
+                )));
+            }
+        };
 
+        let outcome = service
+            .run_action(tab_id, &browser_action)
+            .await
+            .map_err(map_browser_error)?;
+        if !outcome.success {
+            return Err(AroError::RuntimeUnavailable(format!(
+                "browser action had no observable effect: {}",
+                outcome.detail
+            )));
+        }
+        Ok(browser_snapshot_result(
+            &request,
+            started_at,
+            &outcome.snapshot,
+            format!("Browser action: {} on {}", outcome.action, outcome.snapshot.title),
+            format!("{} — {}", outcome.action, outcome.detail),
+        ))
+    }
+
+    /// Fill a login form from the OS-keyring vault. Credentials are loaded
+    /// server-side and typed via CDP; they NEVER appear in output, context
+    /// sources, artifacts, or logs — only the outcome is reported. Sandbox /
+    /// read-only presets deny this through the Network category guard.
+    async fn execute_browser_autofill(
+        &self,
+        request: ToolExecutionRequest,
+        policy: &WebAccessPolicy,
+    ) -> AroResult<ToolExecutionResult> {
+        policy.ensure_network_allowed()?;
+        let started_at = Utc::now();
+        let username_ref = request
+            .input
+            .get("usernameRef")
+            .or_else(|| request.input.get("username_ref"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let password_ref = request
+            .input
+            .get("passwordRef")
+            .or_else(|| request.input.get("password_ref"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let account = request
+            .input
+            .get("account")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        // Validate everything BEFORE touching the browser or vault so bad
+        // input fails without side effects (and without needing Chrome).
+        if username_ref.is_empty() || password_ref.is_empty() {
+            return Err(AroError::Configuration(
+                "browser autofill requires `usernameRef` and `passwordRef` from a snapshot".into(),
+            ));
+        }
+        if account.is_empty() {
+            return Err(AroError::Configuration(
+                "browser autofill requires `account` (vault entry domain)".into(),
+            ));
+        }
+        let tab_id = parse_browser_tab_id(&request.input)?.ok_or_else(|| {
+            AroError::Configuration("browser autofill requires `tabId`".into())
+        })?;
+
+        let service = self.browser_service().await?;
+        let username = aro_browser::load_credential(&format!("{account}:username"))
+            .map_err(map_browser_error)?;
+        let password = aro_browser::load_credential(&format!("{account}:password"))
+            .map_err(map_browser_error)?;
+        let outcome = service
+            .autofill(&aro_browser::AutofillRequest {
+                tab_id,
+                username_ref: username_ref.to_string(),
+                password_ref: password_ref.to_string(),
+                username,
+                password,
+            })
+            .await
+            .map_err(map_browser_error)?;
+
+        // Deliberately secret-free output + audit trail (who/what/when).
+        tracing::info!(
+            tab_id = %tab_id,
+            account = %account,
+            url = %outcome.snapshot.url,
+            "browser autofill completed (credential values never logged)"
+        );
+        let output = json!({
+            "tabId": tab_id.to_string(),
+            "url": outcome.snapshot.url,
+            "title": outcome.snapshot.title,
+            "success": true,
+            "filledRefs": [username_ref, password_ref],
+            "account": account,
+            "auditedAt": Utc::now(),
+        });
         Ok(ToolExecutionResult {
             invocation_id: request.invocation_id,
             run_id: request.run_id,
             tool_id: request.tool_id,
             status: ToolExecutionStatus::Completed,
-            title: format!("Browser action: {action}"),
+            title: format!("Autofilled login for {account}"),
             output,
-            summary: format!("Executed browser action `{action}`"),
+            summary: format!("Filled login form for {account} on {}", outcome.snapshot.url),
             context_sources: vec![],
             artifacts: vec![],
             error: None,
             started_at,
             finished_at: Utc::now(),
+        })
+    }
+    /// Resolve which live tab an action/snapshot targets:
+    /// explicit `tabId` > fresh tab from `url` > most recent tab.
+    /// Returns the tab id and whether it was just created.
+    async fn resolve_browser_tab(
+        &self,
+        service: &BrowserService,
+        input: &Value,
+    ) -> AroResult<(aro_browser::TabId, bool)> {
+        if let Some(id) = parse_browser_tab_id(input)? {
+            let tabs = service.list_tabs().await;
+            if tabs.iter().any(|t| t.id == id) {
+                return Ok((id, false));
+            }
+            return Err(AroError::Configuration(format!("unknown browser tab {id}")));
+        }
+        if let Some(url) = input.get("url").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            let info = service
+                .open_tab(Some(url), true)
+                .await
+                .map_err(map_browser_error)?;
+            return Ok((info.id, true));
+        }
+        let mut tabs = service.list_tabs().await;
+        tabs.sort_by_key(|t| t.created_at);
+        tabs.last().map(|t| (t.id, false)).ok_or_else(|| {
+            AroError::Configuration(
+                "no browser tab open: open one with core.browser.tabs {\"operation\":\"open\",\"url\":\"…\"}".to_string(),
+            )
         })
     }
 
@@ -2399,14 +3107,22 @@ impl ToolExecutor {
                 }
             }
             "volume_up" => {
-                let delta = request.input.get("delta").and_then(|v| v.as_i64()).unwrap_or(10);
+                let delta = request
+                    .input
+                    .get("delta")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(10);
                 let cur = self.execute_os_volume_get().await;
                 let current_vol = cur.get("volume").and_then(|v| v.as_i64()).unwrap_or(50);
                 let level = (current_vol + delta).clamp(0, 100) as u8;
                 self.execute_os_volume_set(level).await
             }
             "volume_down" => {
-                let delta = request.input.get("delta").and_then(|v| v.as_i64()).unwrap_or(10);
+                let delta = request
+                    .input
+                    .get("delta")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(10);
                 let cur = self.execute_os_volume_get().await;
                 let current_vol = cur.get("volume").and_then(|v| v.as_i64()).unwrap_or(50);
                 let level = (current_vol - delta).clamp(0, 100) as u8;
@@ -2446,7 +3162,9 @@ impl ToolExecutor {
                 }
                 res
             }
-            "network_info" | "wifi_status" | "network" | "wifi" => self.execute_os_network_info().await,
+            "network_info" | "wifi_status" | "network" | "wifi" => {
+                self.execute_os_network_info().await
+            }
             "app_launch" | "open" | "launch" => {
                 let target = request
                     .input
@@ -2571,8 +3289,13 @@ Write-Output "$v,$m"
             if let Ok(output) = Self::run_powershell_encoded(script).output().await {
                 let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 let parts: Vec<&str> = text.split(',').collect();
-                let vol = parts.first().and_then(|s| s.trim().parse::<u8>().ok()).unwrap_or(50);
-                let muted = parts.get(1).map_or(false, |s| s.trim().eq_ignore_ascii_case("True"));
+                let vol = parts
+                    .first()
+                    .and_then(|s| s.trim().parse::<u8>().ok())
+                    .unwrap_or(50);
+                let muted = parts
+                    .get(1)
+                    .is_some_and(|s| s.trim().eq_ignore_ascii_case("True"));
                 return json!({
                     "volume": vol,
                     "muted": muted,
@@ -2595,7 +3318,9 @@ Write-Output "$v,$m"
                     .args(["-e", "output muted of (get volume settings)"])
                     .output()
                     .await;
-                let muted = mute_out.map_or(false, |o| String::from_utf8_lossy(&o.stdout).trim() == "true");
+                let muted = mute_out.map_or(false, |o| {
+                    String::from_utf8_lossy(&o.stdout).trim() == "true"
+                });
                 return json!({
                     "volume": vol,
                     "muted": muted,
@@ -2836,7 +3561,8 @@ $bitmap.Dispose();
         if success {
             if let Ok(bytes) = std::fs::read(&file_path) {
                 file_size = bytes.len();
-                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+                let b64 =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
                 base64_preview = Some(format!("data:image/png;base64,{b64}"));
             }
         }
@@ -3006,8 +3732,7 @@ $bitmap.Dispose();
             cmd.stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .stdin(std::process::Stdio::null());
-            match tokio::time::timeout(std::time::Duration::from_secs(20), cmd.output()).await
-            {
+            match tokio::time::timeout(std::time::Duration::from_secs(20), cmd.output()).await {
                 Ok(Ok(out)) => {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     if out.status.success() && stdout.contains("ARO_LAUNCH_OK") {
@@ -3017,9 +3742,7 @@ $bitmap.Dispose();
                         detail = stdout
                             .lines()
                             .find_map(|l| l.strip_prefix("ARO_LAUNCH_FAIL:"))
-                            .or_else(|| {
-                                stderr.lines().next().filter(|l| !l.trim().is_empty())
-                            })
+                            .or_else(|| stderr.lines().next().filter(|l| !l.trim().is_empty()))
                             .unwrap_or("")
                             .trim()
                             .chars()
@@ -3115,23 +3838,38 @@ $batt = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue;
 
         #[cfg(target_os = "macos")]
         {
-            if let Ok(out) = tokio::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output().await {
+            if let Ok(out) = tokio::process::Command::new("sysctl")
+                .args(["-n", "hw.memsize"])
+                .output()
+                .await
+            {
                 if let Ok(bytes) = String::from_utf8_lossy(&out.stdout).trim().parse::<u64>() {
                     total_ram_mb = bytes / (1024 * 1024);
                     free_ram_mb = total_ram_mb / 2;
                 }
             }
-            if let Ok(out) = tokio::process::Command::new("pmset").args(["-g", "batt"]).output().await {
+            if let Ok(out) = tokio::process::Command::new("pmset")
+                .args(["-g", "batt"])
+                .output()
+                .await
+            {
                 let text = String::from_utf8_lossy(&out.stdout);
                 if let Some(pct_idx) = text.find('%') {
-                    let start = text[..pct_idx].rfind(|c: char| !c.is_ascii_digit()).map(|i| i + 1).unwrap_or(0);
+                    let start = text[..pct_idx]
+                        .rfind(|c: char| !c.is_ascii_digit())
+                        .map(|i| i + 1)
+                        .unwrap_or(0);
                     if let Ok(pct) = text[start..pct_idx].trim().parse::<u8>() {
                         battery_level = pct;
                     }
                 }
                 battery_charging = text.contains("charging") || text.contains("AC Power");
             }
-            if let Ok(out) = tokio::process::Command::new("sw_vers").args(["-productVersion"]).output().await {
+            if let Ok(out) = tokio::process::Command::new("sw_vers")
+                .args(["-productVersion"])
+                .output()
+                .await
+            {
                 let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 os_caption = format!("macOS {ver}");
             }
@@ -3142,28 +3880,43 @@ $batt = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue;
             if let Ok(content) = tokio::fs::read_to_string("/proc/meminfo").await {
                 for line in content.lines() {
                     if line.starts_with("MemTotal:") {
-                        if let Some(kb) = line.split_whitespace().nth(1).and_then(|s| s.parse::<u64>().ok()) {
+                        if let Some(kb) = line
+                            .split_whitespace()
+                            .nth(1)
+                            .and_then(|s| s.parse::<u64>().ok())
+                        {
                             total_ram_mb = kb / 1024;
                         }
                     } else if line.starts_with("MemAvailable:") || line.starts_with("MemFree:") {
-                        if let Some(kb) = line.split_whitespace().nth(1).and_then(|s| s.parse::<u64>().ok()) {
+                        if let Some(kb) = line
+                            .split_whitespace()
+                            .nth(1)
+                            .and_then(|s| s.parse::<u64>().ok())
+                        {
                             free_ram_mb = kb / 1024;
                         }
                     }
                 }
             }
-            if let Ok(cap_str) = tokio::fs::read_to_string("/sys/class/power_supply/BAT0/capacity").await {
+            if let Ok(cap_str) =
+                tokio::fs::read_to_string("/sys/class/power_supply/BAT0/capacity").await
+            {
                 if let Ok(cap) = cap_str.trim().parse::<u8>() {
                     battery_level = cap;
                 }
             }
-            if let Ok(stat_str) = tokio::fs::read_to_string("/sys/class/power_supply/BAT0/status").await {
+            if let Ok(stat_str) =
+                tokio::fs::read_to_string("/sys/class/power_supply/BAT0/status").await
+            {
                 battery_charging = stat_str.trim().eq_ignore_ascii_case("Charging");
             }
             if let Ok(content) = tokio::fs::read_to_string("/etc/os-release").await {
                 for line in content.lines() {
                     if line.starts_with("PRETTY_NAME=") {
-                        os_caption = line.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string();
+                        os_caption = line
+                            .trim_start_matches("PRETTY_NAME=")
+                            .trim_matches('"')
+                            .to_string();
                         break;
                     }
                 }
@@ -3261,7 +4014,8 @@ $batt = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue;
             {
                 let clean_title = title.replace('"', "\\\"").replace('\\', "\\\\");
                 let clean_body = body.replace('"', "\\\"").replace('\\', "\\\\");
-                let script = format!("display notification \"{clean_body}\" with title \"{clean_title}\"");
+                let script =
+                    format!("display notification \"{clean_body}\" with title \"{clean_title}\"");
                 let _ = tokio::process::Command::new("osascript")
                     .args(["-e", &script])
                     .spawn();
@@ -3326,9 +4080,7 @@ $batt = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue;
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                AroError::Configuration("`body` is required for email".to_string())
-            })?;
+            .ok_or_else(|| AroError::Configuration("`body` is required for email".to_string()))?;
 
         let recipient = request
             .input
@@ -3358,7 +4110,8 @@ $batt = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue;
         let (delivered, provider_info) = if let Ok(resend_key) = env::var("RESEND_API_KEY") {
             let resend_key = resend_key.trim();
             if !resend_key.is_empty() {
-                let from = env::var("ARO_EMAIL_FROM").unwrap_or_else(|_| "onboarding@resend.dev".into());
+                let from =
+                    env::var("ARO_EMAIL_FROM").unwrap_or_else(|_| "onboarding@resend.dev".into());
                 let payload = json!({
                     "from": from,
                     "to": [recipient],
@@ -3366,21 +4119,31 @@ $batt = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue;
                     "text": body,
                     "html": html.unwrap_or(body)
                 });
-                let resp = self.client.post("https://api.resend.com/emails")
+                let resp = self
+                    .client
+                    .post("https://api.resend.com/emails")
                     .header("Authorization", format!("Bearer {resend_key}"))
                     .json(&payload)
                     .send()
                     .await;
                 match resp {
-                    Ok(r) if r.status().is_success() => (true, "Dispatched via Resend API".to_string()),
+                    Ok(r) if r.status().is_success() => {
+                        (true, "Dispatched via Resend API".to_string())
+                    }
                     Ok(r) => (false, format!("Resend returned status {}", r.status())),
                     Err(e) => (false, format!("Resend request error: {e}")),
                 }
             } else {
-                (true, "Queued in local outbox (offline/test mode)".to_string())
+                (
+                    true,
+                    "Queued in local outbox (offline/test mode)".to_string(),
+                )
             }
         } else {
-            (true, "Queued in local outbox (offline/test mode)".to_string())
+            (
+                true,
+                "Queued in local outbox (offline/test mode)".to_string(),
+            )
         };
 
         let output = json!({
@@ -3423,9 +4186,7 @@ $batt = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue;
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
-                AroError::Configuration(
-                    "`title` is required for notification schedule".to_string(),
-                )
+                AroError::Configuration("`title` is required for notification schedule".to_string())
             })?;
 
         let body = request
@@ -3435,9 +4196,7 @@ $batt = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue;
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
-                AroError::Configuration(
-                    "`body` is required for notification schedule".to_string(),
-                )
+                AroError::Configuration("`body` is required for notification schedule".to_string())
             })?;
 
         let delay_seconds = request
@@ -3470,7 +4229,8 @@ $batt = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue;
             {
                 let clean_title = t.replace('"', "\\\"").replace('\\', "\\\\");
                 let clean_body = b.replace('"', "\\\"").replace('\\', "\\\\");
-                let script = format!("display notification \"{clean_body}\" with title \"{clean_title}\"");
+                let script =
+                    format!("display notification \"{clean_body}\" with title \"{clean_title}\"");
                 let _ = tokio::process::Command::new("osascript")
                     .args(["-e", &script])
                     .spawn();
@@ -3510,7 +4270,6 @@ $batt = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue;
             finished_at: Utc::now(),
         })
     }
-
 
     async fn search_duckduckgo(
         &self,
@@ -3715,8 +4474,105 @@ impl WebAccessPolicy {
     }
 }
 
-fn domain_matches_allowlist(host: &str, allowed_domains: &[String]) -> bool {
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
+/// Parse an optional `tabId`/`tab_id` from tool input.
+fn parse_browser_tab_id(input: &Value) -> AroResult<Option<aro_browser::TabId>> {
+    let raw = input
+        .get("tabId")
+        .or_else(|| input.get("tab_id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match raw {
+        None => Ok(None),
+        Some(s) => Uuid::parse_str(s)
+            .map(|id| Some(aro_browser::TabId(id)))
+            .map_err(|_| AroError::Configuration(format!("invalid browser tabId `{s}`"))),
+    }
+}
+
+fn require_ref(target_ref: &str, action: &str) -> AroResult<()> {
+    if target_ref.trim().is_empty() {
+        return Err(AroError::Configuration(format!(
+            "browser action `{action}` requires `targetRef` from a snapshot (call core.browser.snapshot first)"
+        )));
+    }
+    Ok(())
+}
+
+/// Map aro-browser failures to honest tool errors: bad input / unknown tab
+/// are `Configuration`, everything else is `RuntimeUnavailable` so the
+/// model can reason and retry instead of trusting a fake success.
+fn map_browser_error(err: aro_browser::act::BrowserError) -> AroError {
+    use aro_browser::act::BrowserError as E;
+    match err {
+        E::InvalidInput(_) | E::NoSuchTab(_) => AroError::Configuration(err.to_string()),
+        other => AroError::RuntimeUnavailable(other.to_string()),
+    }
+}
+
+/// Build the standard tool result for a live page snapshot: machine output
+/// (url, title, refs, text, screenshot), a `browser-page` context source,
+/// and a PNG artifact for UI thumbnails (Phase 4).
+fn browser_snapshot_result(
+    request: &ToolExecutionRequest,
+    started_at: chrono::DateTime<Utc>,
+    snapshot: &aro_browser::PageSnapshot,
+    title: String,
+    summary: String,
+) -> ToolExecutionResult {
+    let output = json!({
+        "tabId": snapshot.tab_id.to_string(),
+        "url": snapshot.url,
+        "title": snapshot.title,
+        "elements": snapshot.elements,
+        "textExcerpt": snapshot.text_excerpt,
+        "screenshotBase64": snapshot.screenshot_base64,
+        "screenshotWidth": snapshot.screenshot_width,
+        "screenshotHeight": snapshot.screenshot_height,
+        "capturedAt": snapshot.captured_at,
+    });
+    let artifact = AgentArtifact {
+        id: Uuid::new_v4(),
+        run_id: request.run_id,
+        kind: "browser-snapshot".to_string(),
+        title: snapshot.title.clone(),
+        uri: Some(snapshot.url.clone()),
+        content: Some(snapshot.screenshot_base64.clone()),
+        metadata: json!({
+            "toolId": request.tool_id.clone(),
+            "invocationId": request.invocation_id,
+            "tabId": snapshot.tab_id.to_string(),
+            "mime": "image/png;base64",
+            "width": snapshot.screenshot_width,
+            "height": snapshot.screenshot_height,
+        }),
+        created_at: Utc::now(),
+    };
+    ToolExecutionResult {
+        invocation_id: request.invocation_id,
+        run_id: request.run_id,
+        tool_id: request.tool_id.clone(),
+        status: ToolExecutionStatus::Completed,
+        title,
+        output,
+        summary: summary.clone(),
+        context_sources: vec![ContextSource {
+            id: format!("tool:{}:browser", request.invocation_id),
+            kind: "browser-page".to_string(),
+            title: snapshot.title.clone(),
+            excerpt: snapshot.text_excerpt.chars().take(2000).collect(),
+            uri: Some(snapshot.url.clone()),
+            score: 0.95,
+            created_at: Some(snapshot.captured_at),
+        }],
+        artifacts: vec![artifact],
+        error: None,
+        started_at,
+        finished_at: Utc::now(),
+    }
+}
+
+fn domain_matches_allowlist(host: &str, allowed_domains: &[String]) -> bool {    let host = host.trim_end_matches('.').to_ascii_lowercase();
     allowed_domains.iter().any(|allowed| {
         let allowed = allowed.trim().trim_end_matches('.').to_ascii_lowercase();
         if allowed.is_empty() {
@@ -4449,6 +5305,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn misconfigured_provider_falls_back_instead_of_hard_failing() {        // Un provider mal configuré (searxng sans endpoint, brave/serper
+        // sans clé) ne doit jamais échouer en erreur de configuration :
+        // il bascule sur le scraper intégré (succès si réseau, sinon
+        // RuntimeUnavailable — jamais Configuration).
+        let executor = ToolExecutor::try_new(test_config()).expect("test executor");
+        for provider in ["searxng", "brave-api", "serper"] {
+            let policy = WebAccessPolicy {
+                allow_network: true,
+                allowed_domains: Vec::new(),
+                search_provider: Some(provider.to_string()),
+                search_api_key: None,
+                search_endpoint: None,
+            };
+            let request = WebSearchRequest {
+                query: "ARO test fallback".to_string(),
+                limit: Some(2),
+                freshness_days: None,
+                domains: Vec::new(),
+            };
+            match executor.search_web(request, &policy).await {
+                Ok(response) => assert_eq!(response.provider, "duckduckgo-fallback"),
+                Err(AroError::Configuration(message)) => panic!(
+                    "{provider} without credentials must fall back, got configuration error: {message}"
+                ),
+                Err(_) => { /* offline: fallback attempted, network unavailable */ }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_autofill_rejects_unsigned_input_without_launching() {
+        // La validation (refs, compte, tabId) a lieu AVANT tout lancement
+        // Chromium : ces cas n'ouvrent jamais le navigateur.
+        let executor = ToolExecutor::try_new(test_config()).expect("test executor");
+        let policy = WebAccessPolicy::unrestricted();
+        for input in [
+            json!({}),
+            json!({ "tabId": Uuid::new_v4().to_string(), "account": "example.com" }),
+            json!({ "tabId": Uuid::new_v4().to_string(), "usernameRef": "r1", "passwordRef": "r2" }),
+            json!({ "tabId": "not-a-uuid", "usernameRef": "r1", "passwordRef": "r2", "account": "example.com" }),
+            json!({ "usernameRef": "r1", "passwordRef": "r2", "account": "example.com" }),
+        ] {
+            let request =
+                ToolExecutionRequest::new(Uuid::new_v4(), None, TOOL_CORE_BROWSER_AUTOFILL, input);
+            let result = executor.execute(request, &policy).await;
+            assert!(
+                matches!(result, Err(AroError::Configuration(_))),
+                "autofill must reject unsigned input as Configuration, got {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn canonical_and_legacy_ids_dispatch_to_the_same_guarded_executors() {
         let executor = ToolExecutor::try_new(test_config()).expect("test executor");
         for (tool_id, input) in [
@@ -4730,15 +5639,45 @@ mod tests {
             )
         };
         // Légitimes : relatif simple et absolu contenu.
-        assert!(inside("src/app.rs").is_some());
-        assert!(inside("/tmp/aro-root-probe/src/app.rs").is_some());
+        assert!(inside("src/app.rs").is_ok());
+        assert!(inside("/tmp/aro-root-probe/src/app.rs").is_ok());
         // Évasions : absolu hors root, `..` direct ou caché, racine nue.
-        assert!(inside("C:\\Windows\\System32\\drivers\\etc\\hosts").is_none());
-        assert!(inside("/etc/passwd").is_none());
-        assert!(inside("../../secret.txt").is_none());
-        assert!(inside("src/../../secret.txt").is_none());
-        assert!(inside("/tmp/aro-root-probe-evil/x.txt").is_none());
-        assert!(inside("/").is_none());
+        assert!(inside("C:\\Windows\\System32\\drivers\\etc\\hosts").is_err());
+        assert!(inside("/etc/passwd").is_err());
+        assert!(inside("../../secret.txt").is_err());
+        assert!(inside("src/../../secret.txt").is_err());
+        assert!(inside("/tmp/aro-root-probe-evil/x.txt").is_err());
+        assert!(inside("/").is_err());
+
+        // Fail-closed checks on missing or empty roots
+        assert!(
+            resolve_workspace_path(&serde_json::json!({ "path": "file.txt" }), "path", false)
+                .is_err()
+        );
+        assert!(resolve_workspace_path(
+            &serde_json::json!({ "root_path": "", "path": "file.txt" }),
+            "path",
+            false
+        )
+        .is_err());
+        assert!(resolve_workspace_path(
+            &serde_json::json!({ "root_path": "   ", "path": "file.txt" }),
+            "path",
+            false
+        )
+        .is_err());
+        assert!(resolve_workspace_path(
+            &serde_json::json!({ "root_path": "/tmp/\0bad", "path": "file.txt" }),
+            "path",
+            false
+        )
+        .is_err());
+        assert!(resolve_workspace_path(
+            &serde_json::json!({ "root_path": "/tmp/aro-root-probe", "path": "bad\0file" }),
+            "path",
+            false
+        )
+        .is_err());
         let _ = root;
     }
 
@@ -4792,7 +5731,11 @@ mod tests {
             .await
             .expect("notification should succeed");
         assert_eq!(notif_res.status, ToolExecutionStatus::Completed);
-        assert!(notif_res.output.get("delivered").and_then(|v| v.as_bool()).unwrap());
+        assert!(notif_res
+            .output
+            .get("delivered")
+            .and_then(|v| v.as_bool())
+            .unwrap());
         assert_eq!(notif_res.output["kind"], "agent-completion");
 
         // 2. Send Email (canonical & alias)
@@ -4811,7 +5754,11 @@ mod tests {
             .await
             .expect("email should succeed");
         assert_eq!(email_res.status, ToolExecutionStatus::Completed);
-        assert!(email_res.output.get("success").and_then(|v| v.as_bool()).unwrap());
+        assert!(email_res
+            .output
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap());
         assert_eq!(email_res.output["recipient"], "dev@aro.local");
 
         // 3. Schedule Notification
@@ -4905,4 +5852,3 @@ mod tests {
         assert!(!aro_core::is_computer_tool("core.search.web"));
     }
 }
-

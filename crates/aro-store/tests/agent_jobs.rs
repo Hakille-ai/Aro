@@ -261,3 +261,84 @@ async fn durable_agent_jobs_are_idempotent_fenced_and_atomic() -> TestResult {
         .await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn model_pause_waits_and_can_be_resumed() -> TestResult {
+    let Ok(database_url) = std::env::var("DATABASE_URL") else {
+        eprintln!("skipping durable agent pause test: DATABASE_URL is not set");
+        return Ok(());
+    };
+    let store = AroStore::connect(&database_url, 8).await?;
+    let keyring = AgentSnapshotKeyring::single("test-v1", SNAPSHOT_KEY)?;
+    let suffix = Uuid::new_v4();
+    let principal = store
+        .create_user_with_org(NewUserWithOrg {
+            email: format!("agent-pause-{suffix}@example.test"),
+            name: "Pause test".to_string(),
+            role_title: None,
+            avatar_color: None,
+            password_hash: "not-a-real-password-hash".to_string(),
+            organization_name: format!("Pause test {suffix}"),
+            organization_domain: None,
+            organization_description: None,
+        })
+        .await?;
+    let context = TenantContext::new(principal.user.id, principal.active_organization.id)?;
+    let conversation = store
+        .create_conversation(context, "Pause test".to_string(), AssistantMode::Chat)
+        .await?;
+    let mut run = AgentRun::new(
+        "Pause and resume",
+        AssistantMode::Chat,
+        Some(conversation.id),
+        Some("test-provider".to_string()),
+        Some("test-model".to_string()),
+        None,
+    );
+    run.status = AgentRunStatus::Queued;
+    let snapshot = json!({ "version": 1, "goal": run.goal.clone() });
+    assert!(matches!(
+        store
+            .submit_agent_run_job(
+                context,
+                &run,
+                "queue-test-pause",
+                &snapshot,
+                AgentRunJobBudgets::default(),
+                &keyring,
+            )
+            .await?,
+        AgentRunJobSubmission::Created(_)
+    ));
+    let claimed = store
+        .claim_agent_run_job("queue-test-worker", 60, &keyring)
+        .await?
+        .ok_or("pause job was not claimable")?;
+    store.request_agent_run_job_pause(context, run.id).await?;
+    assert_eq!(
+        store
+            .release_agent_run_job_for_retry(&claimed.lease, "paused_by_model", 1)
+            .await?,
+        AgentRunJobRetryOutcome::Paused
+    );
+    let paused = store
+        .get_agent_run_job(context, run.id)
+        .await?
+        .expect("job");
+    assert_eq!(paused.status, AgentRunJobStatus::Waiting);
+    assert!(paused.completed_at.is_none());
+
+    let resumed = store.resume_agent_run_job(context, run.id).await?;
+    assert_eq!(resumed.status, AgentRunJobStatus::Queued);
+    assert!(resumed.pause_requested_at.is_none());
+    let claimed_again = store
+        .claim_agent_run_job("queue-test-worker", 60, &keyring)
+        .await?
+        .ok_or("resumed job was not claimable")?;
+    assert_eq!(claimed_again.lease.agent_run_id(), run.id);
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(principal.active_organization.id)
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}

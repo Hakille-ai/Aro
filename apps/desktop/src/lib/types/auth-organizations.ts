@@ -168,4 +168,5 @@ export interface CloudRegisterRequest {
 export interface CloudLoginRequest {
   email: string;
   password: string;
+  totpCode?: string;
 }

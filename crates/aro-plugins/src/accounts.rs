@@ -69,11 +69,7 @@ impl PluginAccountStore {
             )
         })?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|e| {
-                anyhow!(
-                    "Failed to set busy timeout on plugin accounts database: {e}"
-                )
-            })?;
+            .map_err(|e| anyhow!("Failed to set busy timeout on plugin accounts database: {e}"))?;
         Ok(conn)
     }
 
@@ -419,12 +415,13 @@ mod tests {
         assert!(updated_acc2.is_default);
 
         let updated_acc1 = store.get(&acc1.id).unwrap().unwrap();
-        assert!(!updated_acc1.is_default, "Previous default must now be false");
+        assert!(
+            !updated_acc1.is_default,
+            "Previous default must now be false"
+        );
 
         // 4. Update label
-        let relabeled = store
-            .update_label(&acc1.id, "Perso Secondaire")
-            .unwrap();
+        let relabeled = store.update_label(&acc1.id, "Perso Secondaire").unwrap();
         assert_eq!(relabeled.label, "Perso Secondaire");
 
         // 5. Update status
@@ -435,7 +432,10 @@ mod tests {
         store.delete(&acc2.id).unwrap();
         let remaining = store.list(Some("google-workspace")).unwrap();
         assert_eq!(remaining.len(), 1);
-        assert!(remaining[0].is_default, "Remaining account should become default");
+        assert!(
+            remaining[0].is_default,
+            "Remaining account should become default"
+        );
         assert_eq!(remaining[0].id, acc1.id);
 
         // 7. Delete by plugin

@@ -19,6 +19,7 @@ class _AuthPageState extends State<AuthPage> {
   final _form = GlobalKey<FormState>();
   final email = TextEditingController(),
       password = TextEditingController(),
+      totpCode = TextEditingController(),
       name = TextEditingController(),
       org = TextEditingController(),
       token = TextEditingController();
@@ -28,7 +29,10 @@ class _AuthPageState extends State<AuthPage> {
   @override
   void initState() {
     super.initState();
-    final params = Uri.base.queryParameters;
+    final params = {
+      ...Uri.base.queryParameters,
+      ...Uri.splitQueryString(Uri.base.fragment),
+    };
     if (params['reset_token'] != null) {
       mode = 'reset-password';
       token.text = params['reset_token']!;
@@ -41,7 +45,7 @@ class _AuthPageState extends State<AuthPage> {
 
   @override
   void dispose() {
-    for (final c in [email, password, name, org, token]) {
+    for (final c in [email, password, totpCode, name, org, token]) {
       c.dispose();
     }
     super.dispose();
@@ -87,6 +91,9 @@ class _AuthPageState extends State<AuthPage> {
           {
             'email': email.text.trim(),
             'password': password.text,
+            if ((mode == 'login' || mode == 'invitation') &&
+                totpCode.text.trim().isNotEmpty)
+              'totpCode': totpCode.text.trim(),
             if (mode == 'register') 'name': name.text.trim(),
             if (mode == 'register')
               'organizationName': org.text.trim().isEmpty
@@ -95,6 +102,7 @@ class _AuthPageState extends State<AuthPage> {
             if (mode == 'invitation') 'token': token.text.trim(),
           },
         );
+        totpCode.clear();
       }
     } catch (e) {
       error = '$e';
@@ -309,6 +317,27 @@ class _AuthPageState extends State<AuthPage> {
                                               size: 18,
                                             ),
                                           ),
+                                        ),
+                                      ),
+                                    if (mode == 'login' || mode == 'invitation')
+                                      TextFormField(
+                                        controller: totpCode,
+                                        enabled: !busy,
+                                        keyboardType: TextInputType.number,
+                                        autofillHints: const [
+                                          AutofillHints.oneTimeCode,
+                                        ],
+                                        maxLength: 6,
+                                        validator: (v) =>
+                                            v != null &&
+                                                v.isNotEmpty &&
+                                                !RegExp(
+                                                  r'^\d{6}$',
+                                                ).hasMatch(v.trim())
+                                            ? 'Saisissez un code à 6 chiffres.'
+                                            : null,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Code MFA si activé',
                                         ),
                                       ),
                                     if (mode == 'login')

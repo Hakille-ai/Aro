@@ -46,7 +46,7 @@
   import WorkspaceFileViewer from "../workspace/WorkspaceFileViewer.svelte";
   import AgentLiveLogViewer from "../workspace/AgentLiveLogViewer.svelte";
   import CodeDiffViewer from "../workspace/CodeDiffViewer.svelte";
-  import IntegratedBrowser from "../browser/IntegratedBrowser.svelte";
+  import BrowserWorkspace from "../browser/BrowserWorkspace.svelte";
   import {
     navigateBrowser,
     takeBrowserControl,
@@ -1853,7 +1853,7 @@
     <!-- INTEGRATED IN-APP BROWSER TAB -->
     {:else if activeTab === "browser"}
       <div class="tab-content-view animate-fade-in" style="padding: 0; display: flex; flex-direction: column; height: 100%; overflow: hidden;">
-        <IntegratedBrowser {language} />
+        <BrowserWorkspace {language} />
       </div>
 
     <!-- SOURCES & REFERENCES TAB -->

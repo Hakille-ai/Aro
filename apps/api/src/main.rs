@@ -62,6 +62,7 @@ pub struct ApiState {
     pub refresh_token_days: i64,
     pub refresh_token_family_days: i64,
     pub invitation_delivery_enabled: bool,
+    pub password_reset_delivery: Option<InvitationDeliveryService>,
     pub integration_flags: IntegrationFeatureFlags,
     pub trust_proxy_headers: bool,
     pub agent_web_access_enabled: bool,
@@ -1090,8 +1091,14 @@ fn router_with_http_config(state: ApiState, http_config: HttpConfig) -> Router {
         .route("/billing/checkout/resume", post(billing::resume_checkout))
         .route("/billing/portal", post(billing::portal))
         .route("/billing/webhook", post(billing::webhook))
-        .route("/billing/compute-keys", get(compute::list_keys).post(compute::create_key))
-        .route("/billing/compute-keys/{id}", axum::routing::delete(compute::revoke_key))
+        .route(
+            "/billing/compute-keys",
+            get(compute::list_keys).post(compute::create_key),
+        )
+        .route(
+            "/billing/compute-keys/{id}",
+            axum::routing::delete(compute::revoke_key),
+        )
         .route("/models", get(compute::models))
         .route("/chat/completions", post(compute::completion))
         .route("/.well-known/jwks.json", get(handlers::well_known_jwks))
@@ -1258,14 +1265,8 @@ fn router_with_http_config(state: ApiState, http_config: HttpConfig) -> Router {
             "/notifications/{id}",
             axum::routing::delete(handlers::notification_delete),
         )
-        .route(
-            "/email/send",
-            post(handlers::email_send),
-        )
-        .route(
-            "/email/test",
-            post(handlers::email_test),
-        )
+        .route("/email/send", post(handlers::email_send))
+        .route("/email/test", post(handlers::email_test))
         .route("/files", get(handlers::files_list))
         .route("/files/quota", get(handlers::files_storage_quota))
         .route("/files/quarantined", get(handlers::files_quarantined_list))
@@ -1417,7 +1418,10 @@ fn router_with_http_config(state: ApiState, http_config: HttpConfig) -> Router {
             "/plugins/{plugin_id}",
             get(handlers::plugins_get).delete(handlers::plugins_uninstall),
         )
-        .route("/plugins/{plugin_id}/logo", get(handlers::plugins_read_logo))
+        .route(
+            "/plugins/{plugin_id}/logo",
+            get(handlers::plugins_read_logo),
+        )
         .route(
             "/plugins/{plugin_id}/toggle",
             post(handlers::plugins_toggle),
@@ -1709,6 +1713,10 @@ async fn build_state_from_env_with_deployment(deployment: DeploymentConfig) -> A
     let file_storage = build_storage(&file_settings)?;
     let tools = ToolExecutor::try_new(ToolExecutorConfig::default())?;
     let integration_flags = IntegrationFeatureFlags::from_env();
+    let password_reset_delivery = InvitationDeliveryService::from_env(
+        &deployment.environment,
+        env_flag("ARO_PASSWORD_RESET_DELIVERY_ENABLED"),
+    )?;
     let envelope_crypto = build_envelope_crypto(&deployment, &secrets_key).await?;
     let agent_secrets_key = env::var("ARO_SECRETS_KEY").ok();
     let agent_keyring = if let Some(ref key) = agent_secrets_key {
@@ -1761,6 +1769,7 @@ async fn build_state_from_env_with_deployment(deployment: DeploymentConfig) -> A
         refresh_token_days,
         refresh_token_family_days,
         invitation_delivery_enabled: InvitationDeliveryService::enabled_from_env()?,
+        password_reset_delivery,
         integration_flags,
         trust_proxy_headers: env_flag("ARO_TRUST_PROXY_HEADERS"),
         agent_web_access_enabled: env_flag("ARO_AGENT_WEB_ACCESS"),
@@ -2209,9 +2218,14 @@ async fn request_timeout_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    let timeout = if matches!(request.uri().path(), "/chat/completions" | "/v1/chat/completions") {
+    let timeout = if matches!(
+        request.uri().path(),
+        "/chat/completions" | "/v1/chat/completions"
+    ) {
         timeout.max(Duration::from_secs(135))
-    } else { timeout };
+    } else {
+        timeout
+    };
     match tokio::time::timeout(timeout, next.run(request)).await {
         Ok(response) => response,
         Err(_) => ApiError::gateway_timeout("request deadline exceeded").into_response(),

@@ -1,4 +1,4 @@
-﻿use argon2::{
+use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
@@ -243,6 +243,36 @@ pub async fn auth_register(
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
+    #[serde(default)]
+    pub totp_code: Option<String>,
+}
+
+async fn verify_primary_auth_totp(
+    state: &ApiState,
+    user_id: Uuid,
+    code: Option<&str>,
+) -> Result<(), ApiError> {
+    let (secret, enabled_at) = state
+        .store
+        .get_user_totp_info(user_id)
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("invalid account credentials"))?;
+    if !totp_code_accepted(
+        secret.as_deref(),
+        enabled_at.is_some(),
+        code,
+        Utc::now().timestamp(),
+    ) {
+        return Err(ApiError::unauthorized("invalid account credentials"));
+    }
+    Ok(())
+}
+
+fn totp_code_accepted(secret: Option<&str>, enabled: bool, code: Option<&str>, now: i64) -> bool {
+    !enabled
+        || secret.is_some_and(|secret| {
+            code.is_some_and(|code| crate::auth::verify_totp_code(secret, code, now))
+        })
 }
 
 pub async fn auth_login(
@@ -255,6 +285,7 @@ pub async fn auth_login(
         .await?
         .ok_or_else(|| ApiError::unauthorized("invalid email or password"))?;
     verify_password(&request.password, &credentials.password_hash)?;
+    verify_primary_auth_totp(&state, credentials.user.id, request.totp_code.as_deref()).await?;
     let principal = state
         .store
         .principal_for_user(credentials.user.id)
@@ -280,6 +311,9 @@ pub async fn auth_password_reset_request(
     State(state): State<ApiState>,
     Json(payload): Json<PasswordResetRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let delivery = state.password_reset_delivery.as_ref().ok_or_else(|| {
+        ApiError::service_unavailable("password reset delivery is not configured")
+    })?;
     let email = payload.email.trim().to_lowercase();
     if email.is_empty() {
         return Err(ApiError::bad_request("email cannot be empty"));
@@ -296,7 +330,13 @@ pub async fn auth_password_reset_request(
             .create_password_reset_token(user_creds.user.id, &token_hash, expires_at)
             .await?;
 
-        tracing::info!(user_id = ?user_creds.user.id, "password reset token generated");
+        delivery
+            .send_password_reset(&email, &reset_token, expires_at)
+            .await
+            .map_err(|failure| {
+                tracing::warn!(code = failure.safe_code(), "password reset delivery failed");
+                ApiError::service_unavailable("password reset delivery is temporarily unavailable")
+            })?;
     }
 
     Ok(Json(json!({
@@ -319,16 +359,16 @@ pub async fn auth_password_reset_confirm(
     }
 
     let token_hash = sha256_hex(payload.token.trim().as_bytes());
-    let (user_id, _reset_token_id) = state
-        .store
-        .consume_password_reset_token(&token_hash)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("invalid or expired password reset token"))?;
-
     let new_hash = hash_password(&payload.new_password)?;
-    state.store.update_user_password(user_id, &new_hash).await?;
-
-    tracing::info!(?user_id, "password successfully reset");
+    if !state
+        .store
+        .reset_password_with_token(&token_hash, &new_hash)
+        .await?
+    {
+        return Err(ApiError::bad_request(
+            "invalid or expired password reset token",
+        ));
+    }
 
     Ok(Json(json!({
         "status": "success",
@@ -486,6 +526,8 @@ pub struct AcceptInvitationRequest {
     pub token: String,
     pub email: String,
     pub password: String,
+    #[serde(default)]
+    pub totp_code: Option<String>,
 }
 
 /// Unified invitation onboarding contract used by clients. The server chooses the safe path:
@@ -499,28 +541,30 @@ pub async fn auth_accept_invitation(
             "invalid account credentials or invitation",
         ));
     }
-    let (user_id, organization_id) =
-        if let Some(credentials) = state.store.find_user_credentials(&request.email).await? {
-            verify_password(&request.password, &credentials.password_hash)
-                .map_err(|_| ApiError::unauthorized("invalid account credentials or invitation"))?;
-            let organization_id = state
-                .store
-                .accept_existing_invitation_after_primary_auth(credentials.user.id, &request.token)
-                .await
-                .map_err(map_invitation_auth_error)?;
-            (credentials.user.id, organization_id)
-        } else {
-            let password_hash = hash_password(&request.password)?;
-            state
-                .store
-                .accept_new_organization_invitation_for_email(
-                    &request.token,
-                    &request.email,
-                    password_hash,
-                )
-                .await
-                .map_err(map_invitation_auth_error)?
-        };
+    let (user_id, organization_id) = if let Some(credentials) =
+        state.store.find_user_credentials(&request.email).await?
+    {
+        verify_password(&request.password, &credentials.password_hash)
+            .map_err(|_| ApiError::unauthorized("invalid account credentials or invitation"))?;
+        verify_primary_auth_totp(&state, credentials.user.id, request.totp_code.as_deref()).await?;
+        let organization_id = state
+            .store
+            .accept_existing_invitation_after_primary_auth(credentials.user.id, &request.token)
+            .await
+            .map_err(map_invitation_auth_error)?;
+        (credentials.user.id, organization_id)
+    } else {
+        let password_hash = hash_password(&request.password)?;
+        state
+            .store
+            .accept_new_organization_invitation_for_email(
+                &request.token,
+                &request.email,
+                password_hash,
+            )
+            .await
+            .map_err(map_invitation_auth_error)?
+    };
     let principal = state
         .store
         .principal_for_user_in_org(user_id, organization_id)
@@ -576,6 +620,8 @@ pub struct AcceptExistingInvitationWithPasswordRequest {
     pub token: String,
     pub email: String,
     pub password: String,
+    #[serde(default)]
+    pub totp_code: Option<String>,
 }
 
 /// Account-level recovery path for an existing account that has no active organization and thus
@@ -596,6 +642,7 @@ pub async fn auth_accept_existing_invitation_with_password(
         .ok_or_else(|| ApiError::unauthorized("invalid account credentials or invitation"))?;
     verify_password(&request.password, &credentials.password_hash)
         .map_err(|_| ApiError::unauthorized("invalid account credentials or invitation"))?;
+    verify_primary_auth_totp(&state, credentials.user.id, request.totp_code.as_deref()).await?;
     let organization_id = state
         .store
         .accept_existing_invitation_after_primary_auth(credentials.user.id, &request.token)
@@ -3028,16 +3075,14 @@ pub async fn assistant_stream(
                 let step = runtime.context_step_at(&run, enrichment.next_sequence, &context_pack);
                 state
                     .store
-                    .add_agent_step(
-                        auth.user_id,
-                        auth.organization_id,
-                        &step,
-                    )
+                    .add_agent_step(auth.user_id, auth.organization_id, &step)
                     .await?;
-                let _ = tx.send(Ok(Event::default().event("step").data(sse_json_data(&json!({
-                    "conversationId": conversation.id,
-                    "step": step
-                })))));
+                let _ = tx.send(Ok(Event::default().event("step").data(sse_json_data(
+                    &json!({
+                        "conversationId": conversation.id,
+                        "step": step
+                    }),
+                ))));
                 agent_run_id = Some(run.id);
             }
 
@@ -3243,9 +3288,9 @@ pub async fn agent_tool_execute(
         .into_iter()
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| ApiError::forbidden("agent permission profile is unavailable"))?;
-    if !permission_profile.allow_network || permission_profile.allowed_domains.is_empty() {
+    if !permission_profile.allow_network {
         return Err(ApiError::forbidden(
-            "agent permission profile does not allow network access to any domain",
+            "agent permission profile does not allow network access",
         ));
     }
     let steps = state
@@ -6040,7 +6085,10 @@ fn integration_callback_page(attempt_id: Option<Uuid>, status: &str) -> Response
         ),
         "denied" => ("denied", "Autorisation refusÃ©e."),
         "expired" => ("expired", "Cette tentative de connexion a expirÃ©."),
-        "cancelled" => ("cancelled", "Cette tentative de connexion a Ã©tÃ© annulÃ©e."),
+        "cancelled" => (
+            "cancelled",
+            "Cette tentative de connexion a Ã©tÃ© annulÃ©e.",
+        ),
         "processing" => ("processing", "Connexion en cours de finalisation."),
         _ => ("failed", "La connexion nâ€™a pas pu Ãªtre finalisÃ©e."),
     };
@@ -7030,9 +7078,7 @@ async fn try_server_cloud(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let Some(connection) = model_settings.connection(provider_id) else {
-            return None;
-        };
+        let connection = model_settings.connection(provider_id)?;
         return server_cloud_attempt(
             state,
             auth,
@@ -7365,6 +7411,16 @@ fn validate_client_state_key(key: &str) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enabled_totp_requires_a_valid_code_before_session_issuance() {
+        const SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        assert!(totp_code_accepted(None, false, None, 59));
+        assert!(!totp_code_accepted(Some(SECRET), true, None, 59));
+        assert!(!totp_code_accepted(Some(SECRET), true, Some("000000"), 59));
+        assert!(!totp_code_accepted(None, true, Some("287082"), 59));
+        assert!(totp_code_accepted(Some(SECRET), true, Some("287082"), 59));
+    }
 
     #[test]
     fn invitation_cursors_are_opaque_bounded_and_round_trip() {

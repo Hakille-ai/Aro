@@ -1083,11 +1083,31 @@
     box-shadow: none;
   }
 
-  body.dark-theme .composer-field textarea {
+  body.dark-theme .composer-field textarea,
+  body.dark-theme .composer textarea,
+  body.dark-theme .composer-textarea {
     color: #ffffff;
+    border: none !important;
+    outline: none !important;
+    outline-offset: 0 !important;
+    box-shadow: none !important;
   }
 
-  body.dark-theme .composer-field textarea::placeholder {
+  body.dark-theme .composer-field textarea:focus,
+  body.dark-theme .composer-field textarea:focus-visible,
+  body.dark-theme .composer textarea:focus,
+  body.dark-theme .composer textarea:focus-visible,
+  body.dark-theme .composer-textarea:focus,
+  body.dark-theme .composer-textarea:focus-visible {
+    border: none !important;
+    outline: none !important;
+    outline-offset: 0 !important;
+    box-shadow: none !important;
+  }
+
+  body.dark-theme .composer-field textarea::placeholder,
+  body.dark-theme .composer textarea::placeholder,
+  body.dark-theme .composer-textarea::placeholder {
     color: #86868b;
   }
 

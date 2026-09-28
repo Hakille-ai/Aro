@@ -6,15 +6,17 @@
 //! 2. Live content tokens without waiting for full JSON generation or blocking turns.
 //! 3. Suppressing raw intermediate JSON framing while preserving tool-call metadata.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum StreamDetectMode {
+    #[default]
     Detecting,
     DirectText,
     JsonAction,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum JsonFieldState {
+    #[default]
     Scanning,
     InThought,
     InContent,
@@ -33,18 +35,6 @@ pub struct StreamingActionTracker {
     json_state: JsonFieldState,
     json_parse_idx: usize,
     json_escape: bool,
-}
-
-impl Default for StreamDetectMode {
-    fn default() -> Self {
-        Self::Detecting
-    }
-}
-
-impl Default for JsonFieldState {
-    fn default() -> Self {
-        Self::Scanning
-    }
 }
 
 impl StreamingActionTracker {
@@ -117,7 +107,10 @@ impl StreamingActionTracker {
                 if trimmed.is_empty() {
                     return;
                 }
-                if trimmed.starts_with('{') || trimmed.starts_with("```") || trimmed.starts_with('`') {
+                if trimmed.starts_with('{')
+                    || trimmed.starts_with("```")
+                    || trimmed.starts_with('`')
+                {
                     self.mode = StreamDetectMode::JsonAction;
                     self.process_json_stream(on_chunk);
                 } else if trimmed.len() >= 4 || trimmed.contains('\n') || trimmed.contains(' ') {
@@ -142,16 +135,16 @@ impl StreamingActionTracker {
         }
     }
 
-    fn process_json_stream(
-        &mut self,
-        on_chunk: &mut Option<&mut (dyn FnMut(String) + Send)>,
-    ) {
+    fn process_json_stream(&mut self, on_chunk: &mut Option<&mut (dyn FnMut(String) + Send)>) {
         loop {
             match self.json_state {
                 JsonFieldState::Done => break,
                 JsonFieldState::Scanning => {
                     if !self.has_streamed_thinking {
-                        if let Some(pos) = find_json_field_value_start(&self.post_think_buffer, &["\"thought\"", "\"thinking\"", "\"reasoning\""]) {
+                        if let Some(pos) = find_json_field_value_start(
+                            &self.post_think_buffer,
+                            &["\"thought\"", "\"thinking\"", "\"reasoning\""],
+                        ) {
                             Self::emit(on_chunk, "<think>");
                             self.in_think = true;
                             self.has_streamed_thinking = true;
@@ -161,8 +154,16 @@ impl StreamingActionTracker {
                         }
                     }
 
-                    let content_keys = ["\"content\"", "\"response\"", "\"text\"", "\"message\"", "\"answer\""];
-                    if let Some(pos) = find_json_field_value_start(&self.post_think_buffer, &content_keys) {
+                    let content_keys = [
+                        "\"content\"",
+                        "\"response\"",
+                        "\"text\"",
+                        "\"message\"",
+                        "\"answer\"",
+                    ];
+                    if let Some(pos) =
+                        find_json_field_value_start(&self.post_think_buffer, &content_keys)
+                    {
                         self.json_state = JsonFieldState::InContent;
                         self.json_parse_idx = pos;
                         continue;
@@ -259,10 +260,7 @@ impl StreamingActionTracker {
         }
     }
 
-    pub fn finalize(
-        &mut self,
-        on_chunk: &mut Option<&mut (dyn FnMut(String) + Send)>,
-    ) {
+    pub fn finalize(&mut self, on_chunk: &mut Option<&mut (dyn FnMut(String) + Send)>) {
         if self.in_think {
             Self::emit(on_chunk, "</think>\n");
             self.in_think = false;
@@ -291,23 +289,21 @@ fn find_json_field_value_start(buffer: &str, keys: &[&str]) -> Option<usize> {
     for key in keys {
         if let Some(key_idx) = buffer.find(key) {
             let after_key = &buffer[key_idx + key.len()..];
-            let mut chars = after_key.char_indices();
+            let chars = after_key.char_indices();
             let mut colon_seen = false;
-            while let Some((c_idx, c)) = chars.next() {
+            for (c_idx, c) in chars {
                 if !colon_seen {
                     if c == ':' {
                         colon_seen = true;
                     } else if !c.is_whitespace() {
                         break;
                     }
+                } else if c.is_whitespace() {
+                    continue;
+                } else if c == '"' {
+                    return Some(key_idx + key.len() + c_idx + 1);
                 } else {
-                    if c.is_whitespace() {
-                        continue;
-                    } else if c == '"' {
-                        return Some(key_idx + key.len() + c_idx + 1);
-                    } else {
-                        break;
-                    }
+                    break;
                 }
             }
         }
@@ -347,7 +343,10 @@ mod tests {
         tracker.push_chunk("Thinking ", &mut on_chunk);
         tracker.push_chunk("step by step", &mut on_chunk);
         tracker.push_chunk("</think>\n", &mut on_chunk);
-        tracker.push_chunk("{\"action\":\"final\",\"content\":\"The answer is 42\"}", &mut on_chunk);
+        tracker.push_chunk(
+            "{\"action\":\"final\",\"content\":\"The answer is 42\"}",
+            &mut on_chunk,
+        );
         tracker.finalize(&mut on_chunk);
 
         let full_emitted = chunks.concat();
@@ -373,7 +372,10 @@ mod tests {
 
         let emitted = chunks.concat();
         assert_eq!(emitted, "Bonjour le monde !\nTout va bien.");
-        assert_eq!(tracker.streamed_content(), "Bonjour le monde !\nTout va bien.");
+        assert_eq!(
+            tracker.streamed_content(),
+            "Bonjour le monde !\nTout va bien."
+        );
         assert!(tracker.has_streamed_content());
     }
 
@@ -398,13 +400,19 @@ mod tests {
         let mut on_chunk: Option<&mut (dyn FnMut(String) + Send)> = Some(&mut cb);
         let mut tracker = StreamingActionTracker::new();
 
-        tracker.push_chunk("{\"thought\": \"Réfléchissons un instant\", ", &mut on_chunk);
+        tracker.push_chunk(
+            "{\"thought\": \"Réfléchissons un instant\", ",
+            &mut on_chunk,
+        );
         tracker.push_chunk("\"action\": \"final\", ", &mut on_chunk);
         tracker.push_chunk("\"content\": \"Voici la réponse.\"}", &mut on_chunk);
         tracker.finalize(&mut on_chunk);
 
         let emitted = chunks.concat();
-        assert_eq!(emitted, "<think>Réfléchissons un instant</think>\nVoici la réponse.");
+        assert_eq!(
+            emitted,
+            "<think>Réfléchissons un instant</think>\nVoici la réponse."
+        );
         assert_eq!(tracker.streamed_content(), "Voici la réponse.");
     }
 }

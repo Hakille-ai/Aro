@@ -347,8 +347,16 @@ fn main() {
     println!("==========================================");
 
     if failed > 0 {
-        std::process::exit(1);
+        panic!(
+            "Adversarial containment harness failed with {} failures",
+            failed
+        );
     }
+}
+
+#[test]
+fn test_adversarial_containment_execution() {
+    main();
 }
 
 fn apply_unified_patch(original: &str, patch: &str) -> Result<String, String> {

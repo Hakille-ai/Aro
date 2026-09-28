@@ -1,9 +1,7 @@
 use std::sync::Arc;
 use tempfile::tempdir;
 
-use aro_plugins::{
-    CreatePluginAccountInput, PluginManager,
-};
+use aro_plugins::{CreatePluginAccountInput, PluginManager};
 use aro_skills::SkillRegistry;
 
 #[tokio::test]
@@ -86,7 +84,10 @@ async fn test_plugin_manager_multi_account_workflow() {
     assert!(updated_work.is_default);
 
     let re_fetched_personal = manager.get_account(&google_personal.id).unwrap().unwrap();
-    assert!(!re_fetched_personal.is_default, "Previous default must be false");
+    assert!(
+        !re_fetched_personal.is_default,
+        "Previous default must be false"
+    );
 
     // 6. Update label
     let relabeled = manager

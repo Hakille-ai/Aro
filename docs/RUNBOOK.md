@@ -176,15 +176,23 @@ A passing smoke does not validate the physical microphone, wake-word reliability
 ## 6. Required Checks
 
 ```powershell
-cargo fmt --all --check
+# Frontend & Contract suites
+npm run contracts:check
+npm run api-client:test
+npm run test:unit
+npm run test:components
+npm run check
+npm run build
+
+# Rust suites & strict linting
+npm run lint:rust
 $env:DATABASE_URL = "postgres://aro:aro@127.0.0.1:5432/aro"
 $env:ARO_REDIS_URL = "redis://127.0.0.1:6379/0"
 $env:ARO_JWT_SECRET = "dev-jwt-secret-0123456789-abcdefghijklmnopqrstuvwxyz"
 $env:ARO_SECRETS_KEY = "dev-secrets-key-0123456789-abcdefghijklmnopqrstuvwxyz"
-cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-npm run check
-npm run build
+
+# Live smoke tests (with running PostgreSQL & Redis containers)
 npm run smoke:api
 npm run smoke:redis
 ```

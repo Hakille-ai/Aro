@@ -39,9 +39,10 @@
   import Terminal from "@lucide/svelte/icons/terminal";
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import User from "@lucide/svelte/icons/user";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import VoiceOrb from "../voice/VoiceOrb.svelte";
   import NotificationCenter from "../notifications/NotificationCenter.svelte";
-  import type { Conversation, Project } from "../../lib/types";
+  import type { Conversation, Project, SubAgentInfo } from "../../lib/types";
 
   export let activeConversation: Conversation | null;
   export let activeProject: Project | null = null;
@@ -72,6 +73,11 @@
   export let soundEnabled: boolean = true;
   export let onOpenConversation: ((id: string) => void) | undefined = undefined;
   export let onOpenSettingsTab: ((tab: string) => void) | undefined = undefined;
+  export let activeSubAgent: SubAgentInfo | null = null;
+  export let onExitSubAgent: (() => void) | undefined = undefined;
+  export let activePermissionMode: "standard" | "read-only" | "developer" | "sandbox" | "custom" = "standard";
+  export let activePermissionLabel: string = "Standard";
+  export let onOpenPermissionSettings: (() => void) | undefined = undefined;
 
   let showProjectVaultPopover = false;
   $: void attachedFileCount;
@@ -80,19 +86,67 @@
 <header class="topbar">
   <div class="topbar-title">
     {#if activeConversation}
-      <span>{activeConversation.title}</span>
+      {#if activeSubAgent}
+        <div class="topbar-breadcrumb">
+          <button
+            type="button"
+            class="crumb-parent-btn"
+            title={language === "fr" ? "Retour à la conversation principale" : "Back to main conversation"}
+            on:click={onExitSubAgent}
+          >
+            <ArrowLeft size={13} />
+            <span>{activeConversation.title}</span>
+          </button>
+          <span class="crumb-sep">/</span>
+          <span class="crumb-agents-label">agents</span>
+          <span class="crumb-sep">/</span>
+          <div class="crumb-subagent-tag">
+            <div class="crumb-avatar" style="background: {activeSubAgent.avatarColor || 'linear-gradient(135deg, #0071e3 0%, #005bb5 100%)'};">
+              {#if activeSubAgent.icon === "search"}<Search size={9} />
+              {:else if activeSubAgent.icon === "terminal" || activeSubAgent.icon === "code"}<Terminal size={9} />
+              {:else if activeSubAgent.icon === "brain" || activeSubAgent.icon === "think"}<Brain size={9} />
+              {:else if activeSubAgent.icon === "cpu"}<Cpu size={9} />
+              {:else if activeSubAgent.icon && !["search", "terminal", "code", "brain", "think", "cpu", "bot"].includes(activeSubAgent.icon) && activeSubAgent.icon.length <= 4}<span style="font-size: 8px; line-height: 1;">{activeSubAgent.icon}</span>
+              {:else}<Bot size={9} />{/if}
+            </div>
+            <span class="crumb-subagent-name">{activeSubAgent.name}</span>
+            <span class="crumb-status-dot {activeSubAgent.status}"></span>
+          </div>
 
-      <!-- Topbar Personality Selector -->
-      {@const pId = conversationPersonalities[activeConversation.id] || selectedPersonalityId}
-      {@const activePers = personalities.find((personality) => personality.id === pId) || personalities[0]}
-      {@const customAgentId = conversationCustomAgents[activeConversation.id]}
-      {@const matchedCustomAgent = customAgentId ? customAgentsList.find(a => a.id === customAgentId) : null}
-      {@const activeName = matchedCustomAgent ? matchedCustomAgent.name : activePers.name}
-      {@const activeAvatarColor = matchedCustomAgent ? "linear-gradient(135deg, #af52de 0%, #7d26cd 100%)" : activePers.avatarColor}
+          <button
+            type="button"
+            class="topbar-perm-badge {activePermissionMode}"
+            title={language === "fr" ? `Permissions : ${activePermissionLabel}` : `Permissions: ${activePermissionLabel}`}
+            on:click={onOpenPermissionSettings}
+          >
+            <span class="topbar-perm-dot {activePermissionMode}"></span>
+            <span class="topbar-perm-text">{activePermissionLabel}</span>
+          </button>
+        </div>
+      {:else}
+        <span>{activeConversation.title}</span>
 
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="topbar-personality-badge" style="display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; background: {theme === 'dark' ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)'}; border: 1px solid {theme === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)'}; font-size: 11px; font-weight: 500; margin-left: 12px; cursor: pointer; position: relative;"
+        <button
+          type="button"
+          class="topbar-perm-badge {activePermissionMode}"
+          title={language === "fr" ? `Politique de sécurité active : ${activePermissionLabel}` : `Active security policy: ${activePermissionLabel}`}
+          on:click={onOpenPermissionSettings}
+        >
+          <span class="topbar-perm-dot {activePermissionMode}"></span>
+          <span class="topbar-perm-text">{activePermissionLabel}</span>
+        </button>
+
+        <!-- Topbar Personality Selector -->
+        {@const pId = conversationPersonalities[activeConversation.id] || selectedPersonalityId}
+        {@const activePers = personalities.find((personality) => personality.id === pId) || personalities[0]}
+        {@const customAgentId = conversationCustomAgents[activeConversation.id]}
+        {@const matchedCustomAgent = customAgentId ? customAgentsList.find(a => a.id === customAgentId) : null}
+        {@const activeName = matchedCustomAgent ? matchedCustomAgent.name : activePers.name}
+        {@const activeAvatarColor = matchedCustomAgent ? "linear-gradient(135deg, #af52de 0%, #7d26cd 100%)" : activePers.avatarColor}
+
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="topbar-personality-badge" style="display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; background: {theme === 'dark' ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)'}; border: 1px solid {theme === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)'}; font-size: 11px; font-weight: 500; margin-left: 12px; cursor: pointer; position: relative;"
            title={cloudWriteDisabledTitle("changer la personnalite de la conversation") ?? activeName}
            on:click={() => {
              if (cloudWriteLocked) {
@@ -344,6 +398,7 @@
           </div>
         {/if}
       </div>
+      {/if}
     {/if}
   </div>
 
@@ -425,6 +480,83 @@
     border-color: rgba(56, 189, 248, 0.3);
     color: #38bdf8;
     box-shadow: 0 0 10px rgba(56, 189, 248, 0.15);
+  }
+
+  .topbar-perm-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 22px;
+    padding: 0 8px;
+    border-radius: 9999px;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Segoe UI, Roboto, sans-serif;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    background: rgba(0, 0, 0, 0.03);
+    color: #555558;
+    cursor: pointer;
+    transition: all 0.16s ease;
+    user-select: none;
+    margin-left: 6px;
+    outline: none;
+  }
+
+  :global(.dark) .topbar-perm-badge,
+  :global(body.dark-theme) .topbar-perm-badge {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.04);
+    color: #a1a1a6;
+  }
+
+  .topbar-perm-badge:hover {
+    border-color: rgba(0, 113, 227, 0.35);
+    background: rgba(0, 113, 227, 0.08);
+    color: #0071e3;
+  }
+
+  :global(.dark) .topbar-perm-badge:hover,
+  :global(body.dark-theme) .topbar-perm-badge:hover {
+    border-color: rgba(41, 151, 255, 0.45);
+    background: rgba(41, 151, 255, 0.12);
+    color: #2997ff;
+  }
+
+  .topbar-perm-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #0071e3;
+    flex-shrink: 0;
+  }
+
+  .topbar-perm-dot.standard {
+    background: #0071e3;
+  }
+
+  .topbar-perm-dot.developer {
+    background: #af52de;
+    box-shadow: 0 0 6px rgba(175, 82, 222, 0.5);
+  }
+
+  .topbar-perm-dot.read-only {
+    background: #34c759;
+  }
+
+  .topbar-perm-dot.sandbox {
+    background: #ff9f0a;
+  }
+
+  .topbar-perm-dot.custom {
+    background: #ff2d55;
+  }
+
+  .topbar-perm-text {
+    max-width: 120px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .topbar-project-badge {
@@ -518,5 +650,118 @@
     font-size: 0.75rem;
     color: #64748b;
     font-style: italic;
+  }
+
+  .topbar-breadcrumb {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+  }
+
+  .crumb-parent-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: transparent;
+    border: none;
+    color: #86868b;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .crumb-parent-btn:hover {
+    color: #0071e3;
+    background: rgba(0, 113, 227, 0.08);
+  }
+
+  :global(.dark) .crumb-parent-btn:hover {
+    color: #2997ff;
+    background: rgba(41, 151, 255, 0.12);
+  }
+
+  .crumb-sep {
+    color: #86868b;
+    font-size: 12px;
+    opacity: 0.4;
+    user-select: none;
+  }
+
+  .crumb-agents-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #86868b;
+    letter-spacing: 0.02em;
+    user-select: none;
+  }
+
+  .crumb-subagent-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px 2px 5px;
+    border-radius: 9999px;
+    background: rgba(0, 113, 227, 0.08);
+    border: 1px solid rgba(0, 113, 227, 0.2);
+    font-size: 12px;
+    font-weight: 600;
+    color: #0071e3;
+  }
+
+  :global(.dark) .crumb-subagent-tag {
+    background: rgba(41, 151, 255, 0.12);
+    border-color: rgba(41, 151, 255, 0.3);
+    color: #2997ff;
+  }
+
+  .crumb-avatar {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #ffffff;
+    flex-shrink: 0;
+  }
+
+  .crumb-subagent-name {
+    letter-spacing: -0.01em;
+  }
+
+  .crumb-status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+
+  .crumb-status-dot.running {
+    background: #0071e3;
+    animation: crumb-pulse 1.8s infinite;
+  }
+
+  .crumb-status-dot.waiting,
+  .crumb-status-dot.needs_help {
+    background: #ff9f0a;
+    animation: crumb-pulse 1.8s infinite;
+  }
+
+  .crumb-status-dot.completed {
+    background: #34c759;
+  }
+
+  .crumb-status-dot.error,
+  .crumb-status-dot.failed {
+    background: #ff453a;
+  }
+
+  @keyframes crumb-pulse {
+    0% { transform: scale(0.95); opacity: 0.5; }
+    50% { transform: scale(1.15); opacity: 1; }
+    100% { transform: scale(0.95); opacity: 0.5; }
   }
 </style>

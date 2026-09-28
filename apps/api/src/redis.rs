@@ -444,6 +444,8 @@ pub fn classify_rate_limit(method: &Method, path: &str) -> Option<RateLimitClass
             path,
             "/auth/register"
                 | "/auth/login"
+                | "/auth/password-reset/request"
+                | "/auth/password-reset/confirm"
                 | "/auth/invitations/accept"
                 | "/auth/invitations/accept-account"
                 | "/auth/invitations/accept-existing-with-password"

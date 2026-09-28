@@ -1,7 +1,4 @@
-use aro_agent::{
-    render_composite_system_prompt,
-    CognitiveContextBuilder, EnvironmentSnapshot,
-};
+use aro_agent::{render_composite_system_prompt, CognitiveContextBuilder, EnvironmentSnapshot};
 use aro_core::{
     agent::{AgentRun, ContextSource, ToolRef},
     conversation::{AssistantMode, ChatMessage, MessageRole},
@@ -33,7 +30,14 @@ fn test_adversarial_completely_empty_inputs() {
 #[test]
 fn test_adversarial_zero_and_one_max_sources_truncation() {
     let conv_id = Uuid::new_v4();
-    let run = AgentRun::new("Truncation boundary", AssistantMode::Chat, None, None, None, None);
+    let run = AgentRun::new(
+        "Truncation boundary",
+        AssistantMode::Chat,
+        None,
+        None,
+        None,
+        None,
+    );
     let env = EnvironmentSnapshot::default();
     let msgs = vec![
         ChatMessage::new(conv_id, MessageRole::User, "Hello"),
@@ -55,7 +59,14 @@ fn test_adversarial_zero_and_one_max_sources_truncation() {
 #[test]
 fn test_adversarial_working_history_chronological_ordering_and_sliding_window() {
     let conv_id = Uuid::new_v4();
-    let run = AgentRun::new("History ordering", AssistantMode::Chat, None, None, None, None);
+    let run = AgentRun::new(
+        "History ordering",
+        AssistantMode::Chat,
+        None,
+        None,
+        None,
+        None,
+    );
     let env = EnvironmentSnapshot::default();
 
     // Create 50 messages: Turn 0 to Turn 49
@@ -63,7 +74,11 @@ fn test_adversarial_working_history_chronological_ordering_and_sliding_window() 
         .map(|i| {
             ChatMessage::new(
                 conv_id,
-                if i % 2 == 0 { MessageRole::User } else { MessageRole::Assistant },
+                if i % 2 == 0 {
+                    MessageRole::User
+                } else {
+                    MessageRole::Assistant
+                },
                 format!("Turn {:02}", i),
             )
         })
@@ -85,7 +100,14 @@ fn test_adversarial_working_history_chronological_ordering_and_sliding_window() 
 #[test]
 fn test_adversarial_enabled_vs_disabled_skills_and_tools() {
     let builder = CognitiveContextBuilder::default();
-    let run = AgentRun::new("Tools filtering", AssistantMode::Chat, None, None, None, None);
+    let run = AgentRun::new(
+        "Tools filtering",
+        AssistantMode::Chat,
+        None,
+        None,
+        None,
+        None,
+    );
     let env = EnvironmentSnapshot::default();
 
     let builtin_active = ToolRef {
@@ -144,7 +166,14 @@ fn test_adversarial_enabled_vs_disabled_skills_and_tools() {
 fn test_adversarial_massive_multi_tier_overflow_truncation() {
     let builder = CognitiveContextBuilder::with_limits(10, 8);
     let conv_id = Uuid::new_v4();
-    let run = AgentRun::new("Massive multi tier", AssistantMode::Chat, None, None, None, None);
+    let run = AgentRun::new(
+        "Massive multi tier",
+        AssistantMode::Chat,
+        None,
+        None,
+        None,
+        None,
+    );
     let env = EnvironmentSnapshot::default();
 
     // 20 messages
@@ -189,7 +218,16 @@ fn test_adversarial_massive_multi_tier_overflow_truncation() {
         })
         .collect();
 
-    let pack = builder.build(&run, &msgs, &episodes, &memories, &dyn_sources, &[], vec![], env);
+    let pack = builder.build(
+        &run,
+        &msgs,
+        &episodes,
+        &memories,
+        &dyn_sources,
+        &[],
+        vec![],
+        env,
+    );
 
     // Strict ceiling of max_sources = 10
     assert_eq!(pack.sources.len(), 10);
@@ -236,8 +274,12 @@ fn test_adversarial_composite_system_prompt_rendering() {
         "Context line",
         ModelResponseFormat::AgentActionJson,
     );
-    assert!(prompt_populated.contains("## Long-Term Semantic Knowledge (Rules, Facts & Preferences):"));
-    assert!(prompt_populated.contains("[critical_rule [PINNED]]: Rule: 🚀 Always verify empirically"));
+    assert!(
+        prompt_populated.contains("## Long-Term Semantic Knowledge (Rules, Facts & Preferences):")
+    );
+    assert!(
+        prompt_populated.contains("[critical_rule [PINNED]]: Rule: 🚀 Always verify empirically")
+    );
     assert!(prompt_populated.contains("## Chronological Episodic History (Past Milestones):"));
     assert!(prompt_populated.contains("### Episode (Turns 1-10):"));
     assert!(prompt_populated.contains("Established foundational schema."));

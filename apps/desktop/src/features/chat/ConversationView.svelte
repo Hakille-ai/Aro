@@ -46,11 +46,13 @@
   import X from "@lucide/svelte/icons/x";
   import { renderMarkdown } from "../../lib/markdown";
   import { parseMessageThinking } from "../../lib/thinking";
-  import type { AttachmentRef, ChatMessage } from "../../lib/types";
+  import type { AttachmentRef, ChatMessage, SubAgentInfo } from "../../lib/types";
+  import { extractMessageAgents } from "../../lib/types";
   import type { Folder as FolderType, Project as ProjectType } from "../../lib/types/projects-folders";
   import { initRichContent, destroyCharts } from "../../lib/richContent";
   import ConversationDestinationPicker from "../conversations/ConversationDestinationPicker.svelte";
   import AgentStepCard from "./AgentStepCard.svelte";
+  import AgentMicroPills from "./AgentMicroPills.svelte";
 
   let expandedThinkingBlocks: Record<string, boolean> = {};
   let copiedThinkingId: string | null = null;
@@ -343,6 +345,10 @@
   export let onStartEdit: (message: ChatMessage) => void;
   export let onCancelEdit: () => void;
   export let onSaveEdit: (message: ChatMessage) => void | Promise<void>;
+  export let activeSubAgent: SubAgentInfo | null = null;
+  export let onSelectSubAgent: ((agent: SubAgentInfo) => void) | undefined = undefined;
+  export let onExitSubAgent: (() => void) | undefined = undefined;
+  export let allAgentRuns: any[] = [];
 
   // Reference voice, model and runtime readiness props passed from parent
   $: void [
@@ -367,6 +373,7 @@
     voiceHandsFreeArmed,
     onSetVoiceInputMode,
     onToggleRecording,
+    onExitSubAgent,
   ];
 </script>
 
@@ -472,10 +479,27 @@
     <div class="message-stream">
       {#each messages as message}
         <article class:assistant={message.role === "assistant"} class:user={message.role === "user"} class="message">
-          <div class="avatar">{#if message.role === "assistant"}<Bot size={16} />{:else}<User size={16} />{/if}</div>
+          <div
+            class="avatar"
+            style={activeSubAgent && message.role === "assistant" ? `background: ${activeSubAgent.avatarColor || 'linear-gradient(135deg, #0071e3 0%, #005bb5 100%)'}; color: #ffffff;` : ""}
+          >
+            {#if message.role === "assistant"}
+              {#if activeSubAgent}
+                {#if activeSubAgent.icon === "search"}<Search size={16} />
+                {:else if activeSubAgent.icon === "terminal" || activeSubAgent.icon === "code"}<Terminal size={16} />
+                {:else if activeSubAgent.icon === "brain"}<Brain size={16} />
+                {:else if activeSubAgent.icon === "cpu"}<Cpu size={16} />
+                {:else}<Bot size={16} />{/if}
+              {:else}
+                <Bot size={16} />
+              {/if}
+            {:else}
+              <User size={16} />
+            {/if}
+          </div>
           <div class="bubble">
             <div class="message-meta">
-              <span class="sender-name">{message.role === "assistant" ? "ARO" : labels.youLabel}</span>
+              <span class="sender-name">{message.role === "assistant" ? (activeSubAgent ? activeSubAgent.name : "ARO") : labels.youLabel}</span>
               {#if message.role === "assistant"}<span class="ai-badge">AI</span>{/if}
               <span class="msg-time">{formatTime(message.createdAt)}</span>
             </div>
@@ -570,9 +594,9 @@
                           <Brain class="thinking-brain-icon" size={14} />
                           <span class="thinking-title">
                             {#if !parsed.isReasoningComplete}
-                              {language === "fr" ? "ARO réfléchit..." : "ARO is thinking..."}
+                              {language === "fr" ? (activeSubAgent ? `${activeSubAgent.name} réfléchit...` : "ARO réfléchit...") : (activeSubAgent ? `${activeSubAgent.name} is thinking...` : "ARO is thinking...")}
                             {:else}
-                              {language === "fr" ? "Réflexion" : "Reasoning"}
+                              {language === "fr" ? (activeSubAgent ? `Réflexion (${activeSubAgent.name})` : "Réflexion") : (activeSubAgent ? `Reasoning (${activeSubAgent.name})` : "Reasoning")}
                             {/if}
                           </span>
                           {#if !parsed.isReasoningComplete}
@@ -631,6 +655,19 @@
                 {/if}
               {/if}
               {#if message.attachments?.length}<div class="message-attachments">{#each message.attachments as attachment}<!-- svelte-ignore a11y_click_events_have_key_events --><!-- svelte-ignore a11y_no_static_element_interactions --><span class="message-attachment-chip clickable" on:click={() => onPreviewAttachment(attachment)} title="Aperçu du fichier"><FileText size={13} /><span>{attachment.displayName}</span><span>{formatFileSize(attachment.sizeBytes)}</span></span>{/each}</div>{/if}
+
+              <!-- Sub-Agent Micro-Pills -->
+              {#if !activeSubAgent}
+                {@const messageAgents = extractMessageAgents(message, allAgentRuns)}
+                {#if messageAgents && messageAgents.length > 0}
+                  <AgentMicroPills
+                    agents={messageAgents}
+                    {language}
+                    onSelectAgent={(agent) => onSelectSubAgent?.(agent)}
+                  />
+                {/if}
+              {/if}
+
               <div class="message-actions">
                 <button class="msg-action-btn" class:copied={copiedMessageId === message.id} type="button" title={labels.copyBtn} on:click={() => onCopyMessage(message.id, message.content)}><Copy size={13} /><span>{copiedMessageId === message.id ? labels.copiedBtn : labels.copyBtn}</span></button>
                 <button class="msg-action-btn" type="button" title={language === "fr" ? "Retenir" : "Remember"} on:click={() => onRememberMessage(message)}><Brain size={13} /><span>{language === "fr" ? "Retenir" : "Remember"}</span></button>
@@ -662,3 +699,5 @@
     </div>
   {/if}
 </div>
+
+

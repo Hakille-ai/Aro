@@ -166,7 +166,9 @@ pub async fn plugins_read_logo(
                 .next()
                 .unwrap_or("data:image/png")
                 .trim_start_matches("data:");
-            Ok(Json(serde_json::json!({ "mime": mime, "dataUrl": data_url })))
+            Ok(Json(
+                serde_json::json!({ "mime": mime, "dataUrl": data_url }),
+            ))
         }
         None => Ok(Json(Value::Null)),
     }

@@ -95,12 +95,23 @@ describe("browser-store", () => {
     expect(creds.length).toBe(1);
     expect(creds[0].domain).toBe("github.com");
     expect(creds[0].username).toBe("testuser");
+    // Vault migration: plaintext passwords must never persist locally.
+    expect(creds[0].password).toBe("");
 
     updateBrowserCredential(creds[0].id, { username: "updateduser" });
     expect(get(browserCredentials)[0].username).toBe("updateduser");
 
     deleteBrowserCredential(creds[0].id);
     expect(get(browserCredentials).length).toBe(0);
+  });
+
+  it("manages the vault account index without secrets", async () => {
+    const { vaultAccounts, vaultAccountAdd, vaultAccountRemove } = await import("./browser-store");
+    vaultAccountAdd("https://GitHub.com/org");
+    vaultAccountAdd("github.com");
+    expect(get(vaultAccounts)).toEqual(["github.com"]);
+    vaultAccountRemove("github.com");
+    expect(get(vaultAccounts)).toEqual([]);
   });
 
   it("toggles computer use and browser permissions safely", () => {

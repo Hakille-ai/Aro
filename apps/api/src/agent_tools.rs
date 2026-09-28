@@ -20,6 +20,7 @@
 use aro_core::{
     AgentRun, AgentStep, AgentStepKind, AgentStepStatus, LongTermMemory, PermissionProfile,
     ToolExecutionRequest, ToolExecutionResult, ToolExecutionStatus, WebAccessMode,
+    TOOL_CORE_AGENT_DELEGATE, TOOL_CORE_AGENT_SPAWN, TOOL_CORE_AGENT_STATUS,
     TOOL_CORE_CONNECTOR_CALL, TOOL_CORE_CONNECTOR_LIST, TOOL_CORE_MCP_CALL,
     TOOL_CORE_MEMORY_DELETE, TOOL_CORE_MEMORY_FORGET, TOOL_CORE_MEMORY_LIST,
     TOOL_CORE_MEMORY_RECALL, TOOL_CORE_MEMORY_SAVE, TOOL_CORE_MEMORY_SEARCH,
@@ -207,7 +208,7 @@ async fn authorize_api_tool(
         tool_ids: vec![request.tool_id.clone()],
         ..PolicyTarget::default()
     };
-    let legacy_allowed = web_policy.allow_network && !web_policy.allowed_domains.is_empty();
+    let legacy_allowed = web_policy.allow_network;
     policies.push(PolicyRule {
         id: if legacy_allowed {
             "legacy.agent-permission-profile.network-allow".to_string()
@@ -228,7 +229,7 @@ async fn authorize_api_tool(
             "The legacy agent profile grants one read-only network tool call within its domain allowlist."
                 .to_string()
         } else {
-            "The effective legacy agent profile does not grant network access with a non-empty domain allowlist."
+            "The effective legacy agent profile does not grant network access."
                 .to_string()
         },
         valid_from: Some(now),
@@ -408,28 +409,52 @@ enum WorkerToolFamily {
     Memory,
     Connector,
     SkillList,
+    Delegation,
     Blocked,
 }
 
 fn classify_worker_tool(normalized_id: &str) -> WorkerToolFamily {
     use WorkerToolFamily::*;
     match normalized_id {
-        "core.search.web" | "core.web.page.read" | "core.browser.navigate"
-        | "core.browser.action" | "core.email.send" => Network,
+        "core.search.web"
+        | "core.web.page.read"
+        | "core.browser.navigate"
+        | "core.browser.action"
+        | "core.email.send" => Network,
         // Skill scripts run python/node/shell interpreters: same bar as code.
-        "core.shell.execute" | "core.code.execute" | TOOL_CORE_SKILL_INVOKE
-        | "skill.invoke" => Shell,
-        "core.workspace.write" | "core.workspace.delete" | "core.workspace.replace_in_files"
-        | "core.document.create" | "core.artifact.create" => Write,
-        "core.workspace.read" | "core.workspace.list" | "core.workspace.grep"
-        | "core.workspace.search" | "core.workspace.git_diff" | "core.notification.send"
+        "core.shell.execute" | "core.code.execute" | TOOL_CORE_SKILL_INVOKE | "skill.invoke" => {
+            Shell
+        }
+        "core.workspace.write"
+        | "core.workspace.delete"
+        | "core.workspace.replace_in_files"
+        | "core.document.create"
+        | "core.artifact.create" => Write,
+        "core.workspace.read"
+        | "core.workspace.list"
+        | "core.workspace.grep"
+        | "core.workspace.search"
+        | "core.workspace.git_diff"
+        | "core.notification.send"
         | "core.notification.schedule" => Read,
-        TOOL_CORE_MEMORY_SAVE | TOOL_CORE_MEMORY_SEARCH | TOOL_CORE_MEMORY_RECALL
-        | TOOL_CORE_MEMORY_UPDATE | TOOL_CORE_MEMORY_FORGET | TOOL_CORE_MEMORY_LIST
+        TOOL_CORE_MEMORY_SAVE
+        | TOOL_CORE_MEMORY_SEARCH
+        | TOOL_CORE_MEMORY_RECALL
+        | TOOL_CORE_MEMORY_UPDATE
+        | TOOL_CORE_MEMORY_FORGET
+        | TOOL_CORE_MEMORY_LIST
         | TOOL_CORE_MEMORY_DELETE => Memory,
         TOOL_CORE_CONNECTOR_LIST => Connector,
         TOOL_CORE_CONNECTOR_CALL | TOOL_CORE_MCP_CALL => Network,
         TOOL_CORE_SKILL_LIST => SkillList,
+        TOOL_CORE_AGENT_DELEGATE
+        | TOOL_CORE_AGENT_SPAWN
+        | TOOL_CORE_AGENT_STATUS
+        | "agent.delegate"
+        | "agent.spawn"
+        | "agent.status"
+        | "core.agent.envelope"
+        | "agent.envelope" => Delegation,
         _ => match normalized_id {
             // Dotted/legacy aliases the normalizer passes through.
             "connector.list" | "plugin.list" => Connector,
@@ -509,15 +534,19 @@ pub fn authorize_worker_tool(
     tool_id: &str,
     input: &Value,
 ) -> Result<WebAccessPolicy, String> {
-    let profile = profile
-        .ok_or_else(|| "tool execution requires an explicit permission profile on the run".to_string())?;
+    let profile = profile.ok_or_else(|| {
+        "tool execution requires an explicit permission profile on the run".to_string()
+    })?;
     let normalized = aro_core::normalize_tool_id(tool_id.trim());
     match classify_worker_tool(normalized) {
         WorkerToolFamily::Network => {
-            if profile.allow_network && !profile.allowed_domains.is_empty() {
+            // Allowlist vide = tous domaines publics autorisés (cohérent
+            // avec WebAccessPolicy::domain_allowed). Seul allow_network=false
+            // bloque.
+            if profile.allow_network {
                 Ok(WebAccessPolicy::from_permission_profile(profile))
             } else {
-                Err("permission profile does not allow network access to any domain".to_string())
+                Err("permission profile does not allow network access".to_string())
             }
         }
         WorkerToolFamily::Shell => {
@@ -545,7 +574,8 @@ pub fn authorize_worker_tool(
         }
         WorkerToolFamily::Memory
         | WorkerToolFamily::Connector
-        | WorkerToolFamily::SkillList => Ok(WebAccessPolicy::disabled()),
+        | WorkerToolFamily::SkillList
+        | WorkerToolFamily::Delegation => Ok(WebAccessPolicy::disabled()),
         WorkerToolFamily::Blocked => Err(format!(
             "worker_unsupported_tool: '{tool_id}' cannot run on the cloud worker (desktop-only capability or unknown tool)"
         )),
@@ -581,8 +611,7 @@ pub async fn execute_worker_tool(
     let policy = match authorize_worker_tool(profile, tool_id, &input) {
         Ok(policy) => policy,
         Err(reason) => {
-            let denied =
-                ToolExecutionRequest::new(run.id, run.conversation_id, tool_id, input);
+            let denied = ToolExecutionRequest::new(run.id, run.conversation_id, tool_id, input);
             let result = blocked_tool_result(&denied, "worker_denied_tool", &reason);
             persist_worker_tool_execution(deps, auth, run, &denied, &result, sequence).await;
             return result;
@@ -590,15 +619,17 @@ pub async fn execute_worker_tool(
     };
     let request = ToolExecutionRequest::new(run.id, run.conversation_id, tool_id, input);
     let dispatch = dispatch_worker_tool(deps, auth, run, &request, &policy);
-    let result = match tokio::time::timeout(Duration::from_secs(WORKER_TOOL_TIMEOUT_SECS), dispatch)
-        .await
-    {
-        Ok(result) => result,
-        Err(_) => failed_tool_result(
-            &request,
-            format!("tool execution timed out after {}s", WORKER_TOOL_TIMEOUT_SECS),
-        ),
-    };
+    let result =
+        match tokio::time::timeout(Duration::from_secs(WORKER_TOOL_TIMEOUT_SECS), dispatch).await {
+            Ok(result) => result,
+            Err(_) => failed_tool_result(
+                &request,
+                format!(
+                    "tool execution timed out after {}s",
+                    WORKER_TOOL_TIMEOUT_SECS
+                ),
+            ),
+        };
     persist_worker_tool_execution(deps, auth, run, &request, &result, sequence).await;
     result
 }
@@ -644,7 +675,7 @@ async fn persist_worker_tool_execution(
 async fn dispatch_worker_tool(
     deps: &WorkerToolDeps,
     auth: &AuthContext,
-    _run: &AgentRun,
+    run: &AgentRun,
     request: &ToolExecutionRequest,
     policy: &WebAccessPolicy,
 ) -> ToolExecutionResult {
@@ -661,13 +692,19 @@ async fn dispatch_worker_tool(
         TOOL_CORE_CONNECTOR_LIST | "connector.list" | "plugin.list" => {
             worker_connector_list(deps, request).await
         }
-        TOOL_CORE_CONNECTOR_CALL | TOOL_CORE_MCP_CALL | "connector.call" | "plugin.call"
-        | "integration.call" | "mcp.call" => {
-            worker_connector_call(deps, request).await
-        }
+        TOOL_CORE_CONNECTOR_CALL
+        | TOOL_CORE_MCP_CALL
+        | "connector.call"
+        | "plugin.call"
+        | "integration.call"
+        | "mcp.call" => worker_connector_call(deps, request).await,
         TOOL_CORE_SKILL_LIST | "skill.list" => worker_skill_list(deps, request).await,
-        TOOL_CORE_SKILL_INVOKE | "skill.invoke" => {
-            worker_skill_invoke(deps, request).await
+        TOOL_CORE_SKILL_INVOKE | "skill.invoke" => worker_skill_invoke(deps, request).await,
+        TOOL_CORE_AGENT_DELEGATE | TOOL_CORE_AGENT_SPAWN | "agent.delegate" | "agent.spawn" => {
+            worker_agent_delegate(deps, auth, run, request).await
+        }
+        TOOL_CORE_AGENT_STATUS | "agent.status" => {
+            worker_agent_status(deps, auth, run, request).await
         }
         _ => match deps.tools.execute(request.clone(), policy).await {
             Ok(result) => result,
@@ -1050,22 +1087,19 @@ async fn worker_connector_call(
             resolved = Some((plugin.id.clone(), server.clone()));
             break;
         }
-        if plugin.id == connector_id
-            && server.is_empty()
-            && plugin.mcp_servers.len() == 1
-        {
+        if plugin.id == connector_id && server.is_empty() && plugin.mcp_servers.len() == 1 {
             resolved = Some((plugin.id.clone(), plugin.mcp_servers[0].name.clone()));
             break;
         }
-        if !connector_id.is_empty() && plugin.mcp_servers.iter().any(|s| s.name == connector_id)
-        {
+        if !connector_id.is_empty() && plugin.mcp_servers.iter().any(|s| s.name == connector_id) {
             resolved = Some((plugin.id.clone(), connector_id.clone()));
             break;
         }
         if !server.is_empty()
-            && plugin.mcp_servers.iter().any(|s| {
-                s.name == server && (connector_id.is_empty() || plugin.id == connector_id)
-            })
+            && plugin
+                .mcp_servers
+                .iter()
+                .any(|s| s.name == server && (connector_id.is_empty() || plugin.id == connector_id))
         {
             resolved = Some((plugin.id.clone(), server.clone()));
             break;
@@ -1101,7 +1135,9 @@ async fn worker_connector_call(
                 )
             }
         }
-        Err(err) => fail(format!("Connector call to {server_name}/{tool} failed: {err}")),
+        Err(err) => fail(format!(
+            "Connector call to {server_name}/{tool} failed: {err}"
+        )),
     }
 }
 
@@ -1133,8 +1169,7 @@ async fn worker_skill_invoke(
     let Some(skill) = deps.plugins.skill_registry().get(skill_id).await else {
         return fail(format!("unknown skill '{skill_id}'"));
     };
-    match aro_skills::execute_sandboxed(&skill, &args, &aro_skills::SandboxLimits::default())
-        .await
+    match aro_skills::execute_sandboxed(&skill, &args, &aro_skills::SandboxLimits::default()).await
     {
         Ok(output) => {
             if output.success {
@@ -1165,6 +1200,186 @@ async fn worker_skill_list(
         format!("Listed {} skill(s) from installed plugins", skills.len()),
         json!({ "skills": skills, "count": skills.len() }),
     )
+}
+
+async fn worker_agent_delegate(
+    deps: &WorkerToolDeps,
+    auth: &AuthContext,
+    parent_run: &AgentRun,
+    request: &ToolExecutionRequest,
+) -> ToolExecutionResult {
+    let fail = |msg: String| failed_tool_result(request, msg);
+
+    let mut goal = request
+        .input
+        .get("goal")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mode_str = request
+        .input
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("code")
+        .to_string();
+    let mut name = request
+        .input
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut role = request
+        .input
+        .get("role")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut priority = parent_run.priority.clone();
+
+    // Check if input is or contains an AgentMessageEnvelope
+    let envelope_candidate: Option<aro_core::AgentMessageEnvelope> =
+        serde_json::from_value(request.input.clone())
+            .ok()
+            .or_else(|| {
+                request
+                    .input
+                    .get("envelope")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+            });
+
+    if let Some(ref env) = envelope_candidate {
+        // Invariant: Reject self-delegation
+        if env.sender.id == env.recipient.id {
+            return fail(
+                "Self-delegation detected: sender and recipient cannot be identical".to_string(),
+            );
+        }
+        // Invariant: Reject empty or whitespace-only directive content
+        if env.payload.content.trim().is_empty() {
+            return fail("Delegation directive content cannot be empty".to_string());
+        }
+
+        goal = env.payload.content.clone();
+        name = Some(env.recipient.name.clone());
+        role = env.recipient.role.clone();
+        if let Some(ref p) = env.priority {
+            priority = p.clone();
+        }
+    } else if goal.trim().is_empty() {
+        return fail("Delegation directive content cannot be empty".to_string());
+    }
+
+    let mode = match mode_str.as_str() {
+        "chat" => aro_core::AssistantMode::Chat,
+        "think" => aro_core::AssistantMode::Think,
+        "summarize" => aro_core::AssistantMode::Summarize,
+        "quiet" => aro_core::AssistantMode::Quiet,
+        _ => aro_core::AssistantMode::Code,
+    };
+
+    let agent_name = name.unwrap_or_else(|| "Worker Assistant".to_string());
+    let agent_role = role.unwrap_or_else(|| "Specialist".to_string());
+
+    let child_run_id = Uuid::new_v4();
+    let now = Utc::now();
+    let child_run = AgentRun {
+        id: child_run_id,
+        lane_id: parent_run.lane_id,
+        conversation_id: parent_run.conversation_id,
+        goal: goal.clone(),
+        mode,
+        status: aro_core::AgentRunStatus::Queued,
+        priority,
+        model_provider_id: parent_run.model_provider_id.clone(),
+        model_id: parent_run.model_id.clone(),
+        autonomy_profile_id: parent_run.autonomy_profile_id,
+        checkpoint_summary: None,
+        last_error: None,
+        created_at: now,
+        updated_at: now,
+        heartbeat_at: None,
+        completed_at: None,
+    };
+
+    if let Err(err) = deps
+        .store
+        .upsert_agent_run(auth.user_id, auth.organization_id, &child_run)
+        .await
+    {
+        return fail(format!("failed to persist delegated agent run: {err}"));
+    }
+
+    let started_step = AgentStep::completed(
+        child_run_id,
+        1,
+        aro_core::AgentStepKind::RunStarted,
+        format!("Run queued: {}", child_run.goal),
+        json!({ "goal": child_run.goal }),
+        json!({ "status": "queued" }),
+    );
+    let _ = deps
+        .store
+        .add_agent_step(auth.user_id, auth.organization_id, &started_step)
+        .await;
+
+    let output = json!({
+        "run_id": child_run_id.to_string(),
+        "status": "queued",
+        "goal": goal,
+        "name": agent_name,
+        "role": agent_role,
+        "mode": mode_str,
+    });
+    let title = format!(
+        "Delegated agent run {child_run_id} ({agent_name}) for goal: {}",
+        &goal[..goal.len().min(50)]
+    );
+    ok_result(request, title, output)
+}
+
+async fn worker_agent_status(
+    deps: &WorkerToolDeps,
+    auth: &AuthContext,
+    _run: &AgentRun,
+    request: &ToolExecutionRequest,
+) -> ToolExecutionResult {
+    let fail = |msg: String| failed_tool_result(request, msg);
+    let run_id_str = request
+        .input
+        .get("run_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let run_id = match Uuid::parse_str(run_id_str) {
+        Ok(id) => id,
+        Err(e) => return fail(format!("invalid run_id: {e}")),
+    };
+
+    let run = match deps
+        .store
+        .get_agent_run(auth.user_id, auth.organization_id, run_id)
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return fail(format!("agent run not found: {run_id}")),
+        Err(e) => return fail(format!("database error reading agent run: {e}")),
+    };
+
+    let steps = deps
+        .store
+        .list_agent_steps(auth.user_id, auth.organization_id, run_id)
+        .await
+        .unwrap_or_default();
+    let status_str = format!("{:?}", run.status).to_lowercase();
+    let last_step = steps.last().cloned();
+
+    let output = json!({
+        "run_id": run.id.to_string(),
+        "status": status_str,
+        "goal": run.goal,
+        "steps_count": steps.len(),
+        "last_step": last_step,
+        "mode": format!("{:?}", run.mode).to_lowercase(),
+    });
+    let title = format!("Agent run {} status: {}", run.id, status_str);
+    ok_result(request, title, output)
 }
 
 #[cfg(test)]
@@ -1222,7 +1437,14 @@ mod tests {
 
     #[test]
     fn worker_network_family_requires_allowlist() {
-        let locked = profile_with(true, true, true, false, vec![], vec!["/tmp/aro-tests".to_string()]);
+        let locked = profile_with(
+            true,
+            true,
+            true,
+            false,
+            vec![],
+            vec!["/tmp/aro-tests".to_string()],
+        );
         for tool in ["core.search.web", "core.connector.call", "core.mcp.call"] {
             assert!(authorize_worker_tool(Some(&locked), tool, &json!({})).is_err());
         }
@@ -1230,17 +1452,31 @@ mod tests {
         for tool in ["core.search.web", "core.connector.call", "core.mcp.call"] {
             assert!(authorize_worker_tool(Some(&open), tool, &json!({})).is_ok());
         }
+        // Allowlist vide + allow_network=true = tous domaines publics autorisés.
+        let open_no_allowlist = profile_with(
+            true,
+            true,
+            true,
+            true,
+            vec![],
+            vec!["/tmp/aro-tests".to_string()],
+        );
+        for tool in ["core.search.web", "core.connector.call", "core.mcp.call"] {
+            assert!(authorize_worker_tool(Some(&open_no_allowlist), tool, &json!({})).is_ok());
+        }
     }
 
     #[test]
     fn worker_shell_and_write_follow_profile_flags() {
-        let read_only = profile_with(true, false, false, false, vec![], vec!["/tmp/aro-tests".to_string()]);
-        assert!(authorize_worker_tool(
-            Some(&read_only),
-            "core.shell.execute",
-            &json!({})
-        )
-        .is_err());
+        let read_only = profile_with(
+            true,
+            false,
+            false,
+            false,
+            vec![],
+            vec!["/tmp/aro-tests".to_string()],
+        );
+        assert!(authorize_worker_tool(Some(&read_only), "core.shell.execute", &json!({})).is_err());
         assert!(authorize_worker_tool(
             Some(&read_only),
             "core.workspace.write",
@@ -1270,12 +1506,7 @@ mod tests {
             &json!({ "path": "relative/file.txt" })
         )
         .is_err());
-        assert!(authorize_worker_tool(
-            Some(&open),
-            "core.workspace.read",
-            &json!({})
-        )
-        .is_err());
+        assert!(authorize_worker_tool(Some(&open), "core.workspace.read", &json!({})).is_err());
         assert!(authorize_worker_tool(
             Some(&open),
             "core.workspace.read",
@@ -1314,7 +1545,6 @@ mod tests {
         let open = open_profile();
         for tool in [
             "core.computer.use",
-            "core.agent.delegate",
             "core.context.search",
             "core.plan.create",
             "nope.unknown.tool",
@@ -1322,6 +1552,106 @@ mod tests {
             let err = authorize_worker_tool(Some(&open), tool, &json!({})).unwrap_err();
             assert!(err.contains("worker_unsupported_tool"), "{tool}: {err}");
         }
+    }
+
+    #[test]
+    fn worker_authorizes_delegation_and_status() {
+        let open = open_profile();
+        for tool in [
+            "core.agent.delegate",
+            "agent.delegate",
+            "core.agent.spawn",
+            "agent.spawn",
+            "core.agent.status",
+            "agent.status",
+        ] {
+            assert!(
+                authorize_worker_tool(Some(&open), tool, &json!({})).is_ok(),
+                "{tool}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_delegate_rejects_self_delegation_and_empty_content() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let store = aro_store::AroStore::connect(&database_url, 5)
+            .await
+            .expect("connect test store");
+        let unique = Uuid::new_v4();
+        let principal = store
+            .create_user_with_org(aro_store::NewUserWithOrg {
+                email: format!("worker-deleg-{unique}@aro.local"),
+                name: "Worker Deleg User".to_string(),
+                role_title: None,
+                avatar_color: None,
+                password_hash: "argon2-test-hash".to_string(),
+                organization_name: format!("Worker Deleg Org {unique}"),
+                organization_domain: None,
+                organization_description: None,
+            })
+            .await
+            .expect("create test principal");
+        let auth = AuthContext::for_worker(principal.user.id, principal.active_organization.id)
+            .expect("worker auth context");
+        let plugins_dir = std::env::temp_dir().join(format!("aro-worker-deleg-{unique}"));
+        let _ = std::fs::create_dir_all(&plugins_dir);
+        let deps = WorkerToolDeps {
+            store: store.clone(),
+            tools: aro_tools::ToolExecutor::try_new(aro_tools::ToolExecutorConfig::default())
+                .expect("tool executor"),
+            plugins: Arc::new(aro_plugins::PluginManager::new(
+                plugins_dir,
+                Arc::new(aro_skills::SkillRegistry::new()),
+            )),
+            vector: aro_vector::MemoryVectorService::from_env(),
+        };
+        let parent_run = AgentRun::new("parent run", AssistantMode::Code, None, None, None, None);
+
+        // 1. Self delegation envelope
+        let self_env = json!({
+            "id": Uuid::new_v4().to_string(),
+            "conversationId": Uuid::new_v4().to_string(),
+            "sender": { "id": "agent-1", "name": "Agent 1", "type": "subagent" },
+            "recipient": { "id": "agent-1", "name": "Agent 1", "type": "subagent" },
+            "messageType": "task_delegation",
+            "payload": { "content": "do something" },
+            "timestamp": Utc::now().to_rfc3339()
+        });
+        let req1 = ToolExecutionRequest::new(
+            parent_run.id,
+            parent_run.conversation_id,
+            "core.agent.delegate",
+            self_env,
+        );
+        let res1 = worker_agent_delegate(&deps, &auth, &parent_run, &req1).await;
+        assert_eq!(res1.status, ToolExecutionStatus::Failed);
+        assert!(res1.error.unwrap().contains("Self-delegation detected"));
+
+        // 2. Empty content envelope
+        let empty_env = json!({
+            "id": Uuid::new_v4().to_string(),
+            "conversationId": Uuid::new_v4().to_string(),
+            "sender": { "id": "agent-1", "name": "Agent 1", "type": "subagent" },
+            "recipient": { "id": "agent-2", "name": "Agent 2", "type": "subagent" },
+            "messageType": "task_delegation",
+            "payload": { "content": "   " },
+            "timestamp": Utc::now().to_rfc3339()
+        });
+        let req2 = ToolExecutionRequest::new(
+            parent_run.id,
+            parent_run.conversation_id,
+            "core.agent.delegate",
+            empty_env,
+        );
+        let res2 = worker_agent_delegate(&deps, &auth, &parent_run, &req2).await;
+        assert_eq!(res2.status, ToolExecutionStatus::Failed);
+        assert!(res2
+            .error
+            .unwrap()
+            .contains("Delegation directive content cannot be empty"));
     }
 
     #[test]
@@ -1342,7 +1672,10 @@ mod tests {
             "core.skill.list",
             "core.notification.send",
         ] {
-            assert!(authorize_worker_tool(Some(&readers), tool, &json!({})).is_ok(), "{tool}");
+            assert!(
+                authorize_worker_tool(Some(&readers), tool, &json!({})).is_ok(),
+                "{tool}"
+            );
         }
     }
 
@@ -1373,11 +1706,8 @@ mod tests {
             })
             .await
             .expect("create test principal");
-        let auth = AuthContext::for_worker(
-            principal.user.id,
-            principal.active_organization.id,
-        )
-        .expect("worker auth context");
+        let auth = AuthContext::for_worker(principal.user.id, principal.active_organization.id)
+            .expect("worker auth context");
         let plugins_dir = std::env::temp_dir().join(format!("aro-worker-tools-{unique}"));
         std::fs::create_dir_all(&plugins_dir).expect("plugins temp dir");
         // Disabled vector mode: the e2e proves Postgres durability + FTS
@@ -1422,10 +1752,7 @@ mod tests {
             1,
         )
         .await;
-        assert!(matches!(
-            denied.status,
-            ToolExecutionStatus::Blocked
-        ));
+        assert!(matches!(denied.status, ToolExecutionStatus::Blocked));
 
         // Save → completed with an id.
         let saved = execute_worker_tool(
@@ -1545,18 +1872,9 @@ mod tests {
 
     #[test]
     fn history_snippets_truncate_without_splitting_chars() {
-        let request = ToolExecutionRequest::new(
-            Uuid::new_v4(),
-            None,
-            "core.search.web",
-            json!({}),
-        );
+        let request = ToolExecutionRequest::new(Uuid::new_v4(), None, "core.search.web", json!({}));
         let big = "é".repeat(WORKER_HISTORY_SNIPPET_CHARS + 100);
-        let result = ok_result(
-            &request,
-            "done".to_string(),
-            json!({ "text": big }),
-        );
+        let result = ok_result(&request, "done".to_string(), json!({ "text": big }));
         let snippet = tool_result_history_snippet(&result);
         assert!(snippet.ends_with("…[truncated]"));
         assert!(snippet.chars().count() <= WORKER_HISTORY_SNIPPET_CHARS + 13);

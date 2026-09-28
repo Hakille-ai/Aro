@@ -15,9 +15,15 @@ pub const TOOL_CORE_WEB_PAGE_READ: &str = "core.web.page.read";
 // Browser and Computer Use tools
 pub const TOOL_CORE_BROWSER_NAVIGATE: &str = "core.browser.navigate";
 pub const TOOL_CORE_BROWSER_ACTION: &str = "core.browser.action";
+pub const TOOL_CORE_BROWSER_TABS: &str = "core.browser.tabs";
+pub const TOOL_CORE_BROWSER_SNAPSHOT: &str = "core.browser.snapshot";
+pub const TOOL_CORE_BROWSER_AUTOFILL: &str = "core.browser.autofill";
 pub const TOOL_CORE_COMPUTER_USE: &str = "core.computer.use";
 pub const TOOL_BROWSER_NAVIGATE: &str = "browser.navigate";
 pub const TOOL_BROWSER_ACTION: &str = "browser.action";
+pub const TOOL_BROWSER_TABS: &str = "browser.tabs";
+pub const TOOL_BROWSER_SNAPSHOT: &str = "browser.snapshot";
+pub const TOOL_BROWSER_AUTOFILL: &str = "browser.autofill";
 pub const TOOL_COMPUTER_USE: &str = "computer.use";
 pub const TOOL_CORE_VOLUME_CONTROL: &str = "core.computer.volume";
 pub const TOOL_VOLUME_CONTROL: &str = "computer.volume";
@@ -35,6 +41,10 @@ pub const TOOL_CORE_WORKSPACE_READ: &str = "core.workspace.read";
 pub const TOOL_CORE_WORKSPACE_LIST: &str = "core.workspace.list";
 pub const TOOL_CORE_WORKSPACE_GREP: &str = "core.workspace.grep";
 pub const TOOL_CORE_WORKSPACE_SEARCH: &str = "core.workspace.search";
+pub const TOOL_CORE_WORKSPACE_DELETE: &str = "core.workspace.delete";
+pub const TOOL_CORE_WORKSPACE_REPLACE_IN_FILES: &str = "core.workspace.replace_in_files";
+pub const TOOL_CORE_WORKSPACE_GIT_DIFF: &str = "core.workspace.git_diff";
+pub const TOOL_CORE_ARTIFACT_CREATE: &str = "core.artifact.create";
 // Shell
 pub const TOOL_CORE_SHELL_EXECUTE: &str = "core.shell.execute";
 // Code execution
@@ -82,12 +92,16 @@ pub fn normalize_tool_id(tool_id: &str) -> &str {
         "memory_delete" | "memory.delete" | "core.memory.delete" => TOOL_CORE_MEMORY_DELETE,
 
         // Workspace tools
-        "workspace_read" | "workspace.read" | "fs.read" | "fs.read-file" | "core.workspace.read" => {
-            TOOL_CORE_WORKSPACE_READ
-        }
-        "workspace_write" | "workspace.write" | "fs.write" | "fs.create-file" | "core.workspace.write" => {
-            TOOL_CORE_WORKSPACE_WRITE
-        }
+        "workspace_read"
+        | "workspace.read"
+        | "fs.read"
+        | "fs.read-file"
+        | "core.workspace.read" => TOOL_CORE_WORKSPACE_READ,
+        "workspace_write"
+        | "workspace.write"
+        | "fs.write"
+        | "fs.create-file"
+        | "core.workspace.write" => TOOL_CORE_WORKSPACE_WRITE,
         "workspace_list" | "workspace.list" | "fs.list" | "fs.list-dir" | "core.workspace.list" => {
             TOOL_CORE_WORKSPACE_LIST
         }
@@ -97,6 +111,18 @@ pub fn normalize_tool_id(tool_id: &str) -> &str {
         "workspace_search" | "workspace.search" | "fs.search" | "core.workspace.search" => {
             TOOL_CORE_WORKSPACE_SEARCH
         }
+        "workspace_delete"
+        | "workspace.delete"
+        | "fs.delete"
+        | "fs.remove"
+        | "core.workspace.delete" => TOOL_CORE_WORKSPACE_DELETE,
+        "workspace_replace_in_files"
+        | "workspace.replace_in_files"
+        | "core.workspace.replace_in_files" => TOOL_CORE_WORKSPACE_REPLACE_IN_FILES,
+        "workspace_git_diff" | "workspace.git_diff" | "git.diff" | "core.workspace.git_diff" => {
+            TOOL_CORE_WORKSPACE_GIT_DIFF
+        }
+        "artifact_create" | "artifact.create" | "core.artifact.create" => TOOL_CORE_ARTIFACT_CREATE,
 
         // Web tools
         "web_search" | "web.search" | "core.search.web" => TOOL_CORE_SEARCH_WEB,
@@ -106,40 +132,55 @@ pub fn normalize_tool_id(tool_id: &str) -> &str {
         "browser_navigate" | "browser.navigate" | "core.browser.navigate" => {
             TOOL_CORE_BROWSER_NAVIGATE
         }
-        "browser_action" | "browser.action" | "core.browser.action" => {
-            TOOL_CORE_BROWSER_ACTION
+        "browser_action" | "browser.action" | "core.browser.action" => TOOL_CORE_BROWSER_ACTION,
+        "browser_tabs" | "browser.tabs" | "core.browser.tabs" => TOOL_CORE_BROWSER_TABS,
+        "browser_snapshot" | "browser.snapshot" | "core.browser.snapshot" => {
+            TOOL_CORE_BROWSER_SNAPSHOT
+        }
+        "browser_autofill" | "browser.autofill" | "core.browser.autofill" => {
+            TOOL_CORE_BROWSER_AUTOFILL
         }
 
         // Computer use tools
-        "computer_use" | "computer.use" | "core.computer.use" => {
-            TOOL_CORE_COMPUTER_USE
-        }
-        "volume_control" | "volume.control" | "computer.volume" | "core.computer.volume" | "set_volume" | "get_volume" | "volume_set" | "volume_get" | "volume_up" | "volume_down" | "mute" | "unmute" => {
-            TOOL_CORE_VOLUME_CONTROL
-        }
-        "screen_capture" | "screenshot" | "take_screenshot" | "computer.screenshot" | "core.computer.screenshot" => {
-            TOOL_CORE_SCREEN_CAPTURE
-        }
-        "system_info" | "system.info" | "computer.info" | "core.computer.info" | "system_status" => {
-            TOOL_CORE_SYSTEM_INFO
-        }
-        "app_launch" | "computer.launch" | "core.computer.launch" | "system_launch" | "open_app" => {
-            TOOL_CORE_APP_LAUNCH
-        }
+        "computer_use" | "computer.use" | "core.computer.use" => TOOL_CORE_COMPUTER_USE,
+        "volume_control"
+        | "volume.control"
+        | "computer.volume"
+        | "core.computer.volume"
+        | "set_volume"
+        | "get_volume"
+        | "volume_set"
+        | "volume_get"
+        | "volume_up"
+        | "volume_down"
+        | "mute"
+        | "unmute" => TOOL_CORE_VOLUME_CONTROL,
+        "screen_capture"
+        | "screenshot"
+        | "take_screenshot"
+        | "computer.screenshot"
+        | "core.computer.screenshot" => TOOL_CORE_SCREEN_CAPTURE,
+        "system_info" | "system.info" | "computer.info" | "core.computer.info"
+        | "system_status" => TOOL_CORE_SYSTEM_INFO,
+        "app_launch"
+        | "computer.launch"
+        | "core.computer.launch"
+        | "system_launch"
+        | "open_app" => TOOL_CORE_APP_LAUNCH,
         "network_info" | "wifi_status" | "wifi" | "computer.network" | "core.computer.network" => {
             TOOL_CORE_NETWORK_INFO
         }
 
         // Notification & communication tools
-        "notification_send" | "notification.send" | "send_notification" | "core.notification.send" => {
-            TOOL_CORE_NOTIFICATION_SEND
-        }
-        "email_send" | "email.send" | "send_email" | "core.email.send" => {
-            TOOL_CORE_EMAIL_SEND
-        }
-        "notification_schedule" | "notification.schedule" | "schedule_notification" | "core.notification.schedule" => {
-            TOOL_CORE_NOTIFICATION_SCHEDULE
-        }
+        "notification_send"
+        | "notification.send"
+        | "send_notification"
+        | "core.notification.send" => TOOL_CORE_NOTIFICATION_SEND,
+        "email_send" | "email.send" | "send_email" | "core.email.send" => TOOL_CORE_EMAIL_SEND,
+        "notification_schedule"
+        | "notification.schedule"
+        | "schedule_notification"
+        | "core.notification.schedule" => TOOL_CORE_NOTIFICATION_SCHEDULE,
 
         other => other,
     }
@@ -169,7 +210,6 @@ pub fn is_notification_tool(tool_id: &str) -> bool {
         || normalized == TOOL_CORE_EMAIL_SEND
         || normalized == TOOL_CORE_NOTIFICATION_SCHEDULE
 }
-
 
 /// Checks if a tool identifier belongs to the memory family.
 pub fn is_memory_tool(tool_id: &str) -> bool {
@@ -591,10 +631,19 @@ fn validate_tool_alias(value: &str) -> AroResult<()> {
         validate_dotted_identifier(value, "tool alias", 2)
     } else {
         if value.is_empty()
-            || !value.bytes().next().is_some_and(|byte| byte.is_ascii_lowercase())
-            || !value.bytes().last().is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            || !value
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_lowercase())
+            || !value
+                .bytes()
+                .last()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
             || value.bytes().any(|byte| {
-                !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-')
+                !(byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || byte == b'_'
+                    || byte == b'-')
             })
         {
             return Err(invalid_descriptor(format!(
@@ -621,7 +670,10 @@ fn validate_dotted_identifier(value: &str, field: &str, min_segments: usize) -> 
                     .last()
                     .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
                 || segment.bytes().any(|byte| {
-                    !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                    !(byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'-'
+                        || byte == b'_')
                 })
         })
     {

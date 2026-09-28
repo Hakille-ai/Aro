@@ -146,6 +146,55 @@ impl InvitationDeliveryService {
         self.timeout_seconds
     }
 
+    pub async fn send_password_reset(
+        &self,
+        email: &str,
+        token: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), InvitationDeliveryFailure> {
+        let recipient: Mailbox = email
+            .parse()
+            .map_err(|_| InvitationDeliveryFailure::Permanent("invalid_recipient"))?;
+        if token.len() < 32
+            || !token
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() || character == '-')
+        {
+            return Err(InvitationDeliveryFailure::Permanent("invalid_reset_token"));
+        }
+        let mut reset_url = self.acceptance_base_url.clone();
+        reset_url.set_fragment(Some(
+            &url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("reset_token", token)
+                .finish(),
+        ));
+        let message = Message::builder()
+            .from(self.from.clone())
+            .to(recipient)
+            .subject("Reset your ARO password")
+            .header(ContentType::TEXT_PLAIN)
+            .body(format!(
+                "A password reset was requested for your ARO account.\n\nOpen this link: {reset_url}\n\nIf you use the desktop app, copy this one-time token into its reset form: {token}\n\nThe token expires at {}. If you did not request this, ignore this message.\n",
+                expires_at.to_rfc3339(),
+            ))
+            .map_err(|_| InvitationDeliveryFailure::Permanent("message_build_failed"))?;
+        match tokio::time::timeout(
+            Duration::from_secs(self.timeout_seconds),
+            self.mailer.send(message),
+        )
+        .await
+        {
+            Err(_) => Err(InvitationDeliveryFailure::Transient("smtp_timeout")),
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) if error.is_permanent() => Err(InvitationDeliveryFailure::Permanent(
+                "smtp_permanent_rejection",
+            )),
+            Ok(Err(_)) => Err(InvitationDeliveryFailure::Transient(
+                "smtp_transport_failure",
+            )),
+        }
+    }
+
     pub async fn send(
         &self,
         delivery: &ClaimedInvitationDelivery,

@@ -1,9 +1,12 @@
 use aro_agent::{AgentRuntime, EnvironmentSnapshot};
-use aro_core::{AgentActionType, ChatMessage, MessageRole, ModelResponseFormat};
+use aro_core::{
+    AgentActionType, AgentStepKind, ChatMessage, MessageRole, ModelResponseFormat,
+    ToolExecutionResult,
+};
 use aro_runtime::{ModelProvider, ModelRouter};
 use aro_store::{
-    AgentRunJobCompletion, AgentRunJobLeaseRenewal, AgentRunJobUsage, AgentSnapshotKeyring,
-    AroStore, TenantContext,
+    AgentRunJobCompletion, AgentRunJobLeaseRenewal, AgentRunJobRetryOutcome, AgentRunJobUsage,
+    AgentSnapshotKeyring, AroStore, TenantContext,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -175,6 +178,33 @@ async fn run_agent_job(
         } else {
             Vec::new()
         };
+        // Persisted tool results must be visible after a lease retry or explicit resume.
+        // Keep the same bounded, model-facing representation used during the live loop.
+        for step in existing_steps
+            .iter()
+            .filter(|step| matches!(step.kind, AgentStepKind::Tool))
+            .rev()
+            .take(16)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            if let Ok(result) = serde_json::from_value::<ToolExecutionResult>(step.output.clone()) {
+                let tool_name = step
+                    .input
+                    .get("toolId")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                history.push(ChatMessage::new(
+                    run.conversation_id.unwrap_or(run.id),
+                    MessageRole::Assistant,
+                    format!(
+                        "Tool `{tool_name}` result: {}",
+                        tool_result_history_snippet(&result)
+                    ),
+                ));
+            }
+        }
 
         let context_pack = runtime.build_context_pack(
             &run,
@@ -277,8 +307,18 @@ async fn run_agent_job(
                     break;
                 }
                 AgentActionType::Pause => {
-                    completed_content = action.reason.unwrap_or_else(|| "Agent paused".to_string());
-                    break;
+                    store.request_agent_run_job_pause(tenant, run_id).await?;
+                    let outcome = store
+                        .release_agent_run_job_for_retry(&lease, "paused_by_model", 1)
+                        .await?;
+                    if !matches!(outcome, AgentRunJobRetryOutcome::Paused) {
+                        tracing::warn!(
+                            ?run_id,
+                            ?outcome,
+                            "agent pause did not reach waiting state"
+                        );
+                    }
+                    return Ok(());
                 }
                 AgentActionType::Tool => {
                     tool_calls_executed += 1;
@@ -289,7 +329,10 @@ async fn run_agent_job(
                     // Real execution with the run's permission profile: the
                     // result (or explicit denial) is persisted and fed back
                     // into history so the model reasons over actual outputs.
-                    let tool_name = action.tool_id.clone().unwrap_or_else(|| "unknown".to_string());
+                    let tool_name = action
+                        .tool_id
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string());
                     let result = execute_worker_tool(
                         &worker_tools,
                         &worker_auth,
@@ -302,10 +345,7 @@ async fn run_agent_job(
                     .await;
                     next_sequence += 1;
 
-                    let failed = !matches!(
-                        result.status,
-                        aro_core::ToolExecutionStatus::Completed
-                    );
+                    let failed = !matches!(result.status, aro_core::ToolExecutionStatus::Completed);
                     if failed {
                         consecutive_tool_errors += 1;
                     } else {

@@ -305,7 +305,7 @@ export class AroApiClient {
       modelId: req.modelId || req.model || null,
       provider: req.provider || null,
       attachments: req.attachments || [],
-      webAccess: req.webAccess || "off",
+      webAccess: req.webAccess || "auto",
       searchSettings: req.searchSettings || null,
       stream,
     };

@@ -14,9 +14,7 @@
 //!    - Reopen DB and recover state from store.get_latest_episode
 //!    - Verify zero duplication and zero lost episodes or facts
 
-use aro_core::{
-    ChatMessage, Conversation, MessageRole, AssistantMode, MemoryCategory,
-};
+use aro_core::{AssistantMode, ChatMessage, Conversation, MemoryCategory, MessageRole};
 use aro_memory::SqliteMemoryStore;
 use aro_runtime::context_manager::{
     extract_configs_and_keys, extract_decisions, extract_ports, extract_urls_and_uris,
@@ -25,14 +23,21 @@ use aro_runtime::context_manager::{
 use uuid::Uuid;
 
 fn create_temp_store() -> (SqliteMemoryStore, std::path::PathBuf) {
-    let db_path = std::env::temp_dir().join(format!("aro-adv-compaction-{}.sqlite", Uuid::new_v4()));
+    let db_path =
+        std::env::temp_dir().join(format!("aro-adv-compaction-{}.sqlite", Uuid::new_v4()));
     let store = SqliteMemoryStore::new(&db_path).expect("failed to create sqlite memory store");
     (store, db_path)
 }
 
 fn create_conversation(store: &SqliteMemoryStore, conv_id: Uuid) {
-    let conv = Conversation::with_id(conv_id, "Adversarial Test Conversation", AssistantMode::Chat);
-    store.upsert_conversation(&conv).expect("must create conversation");
+    let conv = Conversation::with_id(
+        conv_id,
+        "Adversarial Test Conversation",
+        AssistantMode::Chat,
+    );
+    store
+        .upsert_conversation(&conv)
+        .expect("must create conversation");
 }
 
 fn cleanup_temp_store(path: std::path::PathBuf) {
@@ -59,37 +64,48 @@ fn test_fuzz_extraction_weird_ports_and_endpoints() {
     let configs = extract_configs_and_keys(input);
 
     // PORT=8080 is captured either in ports or configs
-    let has_8080 = ports.iter().any(|p| p.contains("8080")) || configs.iter().any(|c| c.contains("PORT=8080"));
-    assert!(has_8080, "PORT=8080 must be captured in ports or configs. Ports: {:?}, Configs: {:?}", ports, configs);
+    let has_8080 =
+        ports.iter().any(|p| p.contains("8080")) || configs.iter().any(|c| c.contains("PORT=8080"));
+    assert!(
+        has_8080,
+        "PORT=8080 must be captured in ports or configs. Ports: {:?}, Configs: {:?}",
+        ports, configs
+    );
 
     // localhost:5432 must be captured
     assert!(
         ports.iter().any(|p| p.contains("localhost:5432")),
-        "localhost:5432 must be captured in ports: {:?}", ports
+        "localhost:5432 must be captured in ports: {:?}",
+        ports
     );
 
     // 127.0.0.1:5433 must be captured
     assert!(
         ports.iter().any(|p| p.contains("127.0.0.1:5433")),
-        "127.0.0.1:5433 must be captured in ports: {:?}", ports
+        "127.0.0.1:5433 must be captured in ports: {:?}",
+        ports
     );
 
     // 0.0.0.0:9000 must be captured
     assert!(
         ports.iter().any(|p| p.contains("0.0.0.0:9000")),
-        "0.0.0.0:9000 must be captured in ports: {:?}", ports
+        "0.0.0.0:9000 must be captured in ports: {:?}",
+        ports
     );
 
     // node-1.internal:7000 must be captured
     assert!(
         ports.iter().any(|p| p.contains("node-1.internal:7000")),
-        "node-1.internal:7000 must be captured in ports: {:?}", ports
+        "node-1.internal:7000 must be captured in ports: {:?}",
+        ports
     );
 
     // http://10.0.0.1:9464/metrics must be captured in URLs preserving the endpoint and port
     assert!(
-        urls.iter().any(|u| u.contains("http://10.0.0.1:9464/metrics")),
-        "http://10.0.0.1:9464/metrics must be captured in URLs: {:?}", urls
+        urls.iter()
+            .any(|u| u.contains("http://10.0.0.1:9464/metrics")),
+        "http://10.0.0.1:9464/metrics must be captured in URLs: {:?}",
+        urls
     );
 
     // Out-of-bounds ports must not be captured as valid ports
@@ -123,14 +139,41 @@ fn test_fuzz_extraction_odd_urls() {
 
     let urls = extract_urls_and_uris(input);
 
-    assert!(urls.iter().any(|u| u.contains("https://sub.api.example.co.uk:8443")), "HTTPS with port & params");
-    assert!(urls.iter().any(|u| u.contains("ws://live-events.internal:9001/stream")), "WS with stream");
-    assert!(urls.iter().any(|u| u.contains("wss://secure-socket.example.org/ws")), "WSS socket");
-    assert!(urls.iter().any(|u| u.contains("postgresql://admin")), "Postgresql with auth");
-    assert!(urls.iter().any(|u| u.contains("redis://:secret_token")), "Redis URI");
-    assert!(urls.iter().any(|u| u.contains("mongodb://mongo-primary")), "MongoDB replica URI");
-    assert!(urls.iter().any(|u| u.contains("mysql://user:pwd")), "MySQL URI");
-    assert!(urls.iter().any(|u| u.contains("sqlite://data/app.db")), "SQLite URI");
+    assert!(
+        urls.iter()
+            .any(|u| u.contains("https://sub.api.example.co.uk:8443")),
+        "HTTPS with port & params"
+    );
+    assert!(
+        urls.iter()
+            .any(|u| u.contains("ws://live-events.internal:9001/stream")),
+        "WS with stream"
+    );
+    assert!(
+        urls.iter()
+            .any(|u| u.contains("wss://secure-socket.example.org/ws")),
+        "WSS socket"
+    );
+    assert!(
+        urls.iter().any(|u| u.contains("postgresql://admin")),
+        "Postgresql with auth"
+    );
+    assert!(
+        urls.iter().any(|u| u.contains("redis://:secret_token")),
+        "Redis URI"
+    );
+    assert!(
+        urls.iter().any(|u| u.contains("mongodb://mongo-primary")),
+        "MongoDB replica URI"
+    );
+    assert!(
+        urls.iter().any(|u| u.contains("mysql://user:pwd")),
+        "MySQL URI"
+    );
+    assert!(
+        urls.iter().any(|u| u.contains("sqlite://data/app.db")),
+        "SQLite URI"
+    );
 }
 
 // ============================================================================
@@ -152,12 +195,30 @@ fn test_fuzz_extraction_secrets_and_configs() {
 
     let configs = extract_configs_and_keys(input);
 
-    assert!(configs.iter().any(|c| c.contains("DATABASE_URL=")), "DATABASE_URL config");
-    assert!(configs.iter().any(|c| c.contains("REDIS_HOST=")), "REDIS_HOST config");
-    assert!(configs.iter().any(|c| c.contains("MAX_CONCURRENCY_LIMIT=")), "MAX_CONCURRENCY_LIMIT config");
-    assert!(configs.iter().any(|c| c.contains("sk-proj-")), "OpenAI secret key");
-    assert!(configs.iter().any(|c| c.contains("ghp_")), "GitHub access token");
-    assert!(configs.iter().any(|c| c.contains("AKIAIOSFODNN7EXAMPLE")), "AWS Access Key");
+    assert!(
+        configs.iter().any(|c| c.contains("DATABASE_URL=")),
+        "DATABASE_URL config"
+    );
+    assert!(
+        configs.iter().any(|c| c.contains("REDIS_HOST=")),
+        "REDIS_HOST config"
+    );
+    assert!(
+        configs.iter().any(|c| c.contains("MAX_CONCURRENCY_LIMIT=")),
+        "MAX_CONCURRENCY_LIMIT config"
+    );
+    assert!(
+        configs.iter().any(|c| c.contains("sk-proj-")),
+        "OpenAI secret key"
+    );
+    assert!(
+        configs.iter().any(|c| c.contains("ghp_")),
+        "GitHub access token"
+    );
+    assert!(
+        configs.iter().any(|c| c.contains("AKIAIOSFODNN7EXAMPLE")),
+        "AWS Access Key"
+    );
 }
 
 // ============================================================================
@@ -179,14 +240,39 @@ fn test_fuzz_extraction_decisions_and_rules() {
     let decisions = extract_decisions(input);
     let rules = extract_user_rules(input);
 
-    assert!(decisions.iter().any(|d| d.contains("SQLite WAL mode")), "WAL mode decision");
-    assert!(decisions.iter().any(|d| d.contains("Reciprocal Rank Fusion")), "RRF decision");
-    assert!(decisions.iter().any(|d| d.contains("Tokio")), "French decision Tokio");
+    assert!(
+        decisions.iter().any(|d| d.contains("SQLite WAL mode")),
+        "WAL mode decision"
+    );
+    assert!(
+        decisions
+            .iter()
+            .any(|d| d.contains("Reciprocal Rank Fusion")),
+        "RRF decision"
+    );
+    assert!(
+        decisions.iter().any(|d| d.contains("Tokio")),
+        "French decision Tokio"
+    );
 
-    assert!(rules.iter().any(|r| r.contains("Always validate tokens")), "Always rule");
-    assert!(rules.iter().any(|r| r.contains("Never allow plain-text")), "Never rule");
-    assert!(rules.iter().any(|r| r.contains("prefer Rust over C++")), "Preference");
-    assert!(rules.iter().any(|r| r.contains("Remember that all database")), "Remember directive");
+    assert!(
+        rules.iter().any(|r| r.contains("Always validate tokens")),
+        "Always rule"
+    );
+    assert!(
+        rules.iter().any(|r| r.contains("Never allow plain-text")),
+        "Never rule"
+    );
+    assert!(
+        rules.iter().any(|r| r.contains("prefer Rust over C++")),
+        "Preference"
+    );
+    assert!(
+        rules
+            .iter()
+            .any(|r| r.contains("Remember that all database")),
+        "Remember directive"
+    );
 }
 
 // ============================================================================
@@ -213,18 +299,30 @@ fn test_lossless_preservation_into_episode_and_long_term_memory() {
 
     // 1. Entities in Episode
     assert!(
-        extracted.entities.iter().any(|e| e.contains("9464") || e.contains("PORT=9464")),
-        "Metrics port/config must be in entities: {:?}", extracted.entities
+        extracted
+            .entities
+            .iter()
+            .any(|e| e.contains("9464") || e.contains("PORT=9464")),
+        "Metrics port/config must be in entities: {:?}",
+        extracted.entities
     );
 
     // 2. Key Decisions in Episode
     assert!(
-        extracted.key_decisions.iter().any(|d| d.contains("Reciprocal Rank Fusion")),
-        "Key decision must be in key_decisions: {:?}", extracted.key_decisions
+        extracted
+            .key_decisions
+            .iter()
+            .any(|d| d.contains("Reciprocal Rank Fusion")),
+        "Key decision must be in key_decisions: {:?}",
+        extracted.key_decisions
     );
     assert!(
-        extracted.key_decisions.iter().any(|d| d.contains("strict authorization")),
-        "Rule must be in key_decisions: {:?}", extracted.key_decisions
+        extracted
+            .key_decisions
+            .iter()
+            .any(|d| d.contains("strict authorization")),
+        "Rule must be in key_decisions: {:?}",
+        extracted.key_decisions
     );
 
     // 3. Proposed LongTermMemories
@@ -232,13 +330,17 @@ fn test_lossless_preservation_into_episode_and_long_term_memory() {
     assert!(!memories.is_empty(), "Must propose long term memories");
 
     // Decision memory: Technical category, salience computed
-    let decision_mem = memories.iter().find(|m| m.content.contains("Reciprocal Rank Fusion"));
+    let decision_mem = memories
+        .iter()
+        .find(|m| m.content.contains("Reciprocal Rank Fusion"));
     assert!(decision_mem.is_some(), "Must create memory for decision");
     let d_mem = decision_mem.unwrap();
     assert_eq!(d_mem.category, MemoryCategory::Technical.as_str());
 
     // Rule memory: System category, PINNED (exempt from decay)
-    let rule_mem = memories.iter().find(|m| m.content.contains("strict authorization"));
+    let rule_mem = memories
+        .iter()
+        .find(|m| m.content.contains("strict authorization"));
     assert!(rule_mem.is_some(), "Must create memory for rule");
     let r_mem = rule_mem.unwrap();
     assert!(r_mem.pinned, "Rules must be PINNED to prevent decay");
@@ -270,7 +372,12 @@ fn test_continuous_compactor_restart_resilience_across_turns_10_20_30() {
             let u = ChatMessage::new(
                 conv_id,
                 MessageRole::User,
-                format!("Turn {}: Decision: We decided to deploy microservice_{} on port {}.", turn, turn, 8000 + turn),
+                format!(
+                    "Turn {}: Decision: We decided to deploy microservice_{} on port {}.",
+                    turn,
+                    turn,
+                    8000 + turn
+                ),
             );
             store.add_message(&u).unwrap();
             let a = ChatMessage::new(
@@ -298,12 +405,21 @@ fn test_continuous_compactor_restart_resilience_across_turns_10_20_30() {
     {
         let messages = store.list_messages(conv_id).unwrap();
         let state = CompactionState::recover(&store, conv_id, &messages).unwrap();
-        assert_eq!(state.last_compacted_turn, 10, "Recovered last_compacted_turn must be 10");
-        assert_eq!(state.uncompacted_turns, 0, "Recovered uncompacted_turns must be 0");
+        assert_eq!(
+            state.last_compacted_turn, 10,
+            "Recovered last_compacted_turn must be 10"
+        );
+        assert_eq!(
+            state.uncompacted_turns, 0,
+            "Recovered uncompacted_turns must be 0"
+        );
 
         let compactor_restart1 = ContinuousCompactor::new(store.clone());
         let skip_check = compactor_restart1.consolidate_if_needed(conv_id).unwrap();
-        assert!(skip_check.is_none(), "Must NOT duplicate compaction after restart with 0 new turns");
+        assert!(
+            skip_check.is_none(),
+            "Must NOT duplicate compaction after restart with 0 new turns"
+        );
     }
 
     // ------------------------------------------------------------------------
@@ -314,7 +430,13 @@ fn test_continuous_compactor_restart_resilience_across_turns_10_20_30() {
             let u = ChatMessage::new(
                 conv_id,
                 MessageRole::User,
-                format!("Turn {}: Rule: Always monitor cluster_{} at endpoint node-{}.internal:{}.", turn, turn, turn, 9000 + turn),
+                format!(
+                    "Turn {}: Rule: Always monitor cluster_{} at endpoint node-{}.internal:{}.",
+                    turn,
+                    turn,
+                    turn,
+                    9000 + turn
+                ),
             );
             store.add_message(&u).unwrap();
             let a = ChatMessage::new(
@@ -342,8 +464,14 @@ fn test_continuous_compactor_restart_resilience_across_turns_10_20_30() {
     {
         let messages = store.list_messages(conv_id).unwrap();
         let state = CompactionState::recover(&store, conv_id, &messages).unwrap();
-        assert_eq!(state.last_compacted_turn, 20, "Recovered last_compacted_turn must be 20");
-        assert_eq!(state.uncompacted_turns, 0, "Recovered uncompacted_turns must be 0");
+        assert_eq!(
+            state.last_compacted_turn, 20,
+            "Recovered last_compacted_turn must be 20"
+        );
+        assert_eq!(
+            state.uncompacted_turns, 0,
+            "Recovered uncompacted_turns must be 0"
+        );
     }
 
     // ------------------------------------------------------------------------
@@ -390,7 +518,10 @@ fn test_continuous_compactor_restart_resilience_across_turns_10_20_30() {
 
         // Ensure consolidate_if_needed is idempotent and skips
         let skip_final = compactor_final.consolidate_if_needed(conv_id).unwrap();
-        assert!(skip_final.is_none(), "No compaction triggered after turn 30");
+        assert!(
+            skip_final.is_none(),
+            "No compaction triggered after turn 30"
+        );
 
         // Verify SQLite episodes: exactly 3 episodes, contiguous, no overlaps, no gaps
         let episodes = store.list_episodes(conv_id).unwrap();
@@ -406,20 +537,28 @@ fn test_continuous_compactor_restart_resilience_across_turns_10_20_30() {
         assert_eq!(episodes[2].turn_end, 30);
 
         // Verify latest episode
-        let latest = store.get_latest_episode(conv_id).unwrap().expect("Must have latest episode");
+        let latest = store
+            .get_latest_episode(conv_id)
+            .unwrap()
+            .expect("Must have latest episode");
         assert_eq!(latest.turn_start, 21);
         assert_eq!(latest.turn_end, 30);
 
         // Verify memories stored across all 3 phases
         let memories = store.list_memories().unwrap();
-        assert!(!memories.is_empty(), "Memories must be persisted across crashes");
+        assert!(
+            !memories.is_empty(),
+            "Memories must be persisted across crashes"
+        );
         // Verify we have memories from phase 1 (decisions) and phase 2 (rules)
         assert!(
             memories.iter().any(|m| m.content.contains("microservice")),
             "Phase 1 decision memories must persist"
         );
         assert!(
-            memories.iter().any(|m| m.content.contains("Always monitor")),
+            memories
+                .iter()
+                .any(|m| m.content.contains("Always monitor")),
             "Phase 2 rule memories must persist"
         );
     }
@@ -445,16 +584,15 @@ fn test_continuous_compactor_partial_residual_turns_and_force_consolidate() {
             format!("Turn {}: port {}", turn, 4000 + turn),
         );
         store.add_message(&u).unwrap();
-        let a = ChatMessage::new(
-            conv_id,
-            MessageRole::Assistant,
-            format!("Reply {}", turn),
-        );
+        let a = ChatMessage::new(conv_id, MessageRole::Assistant, format!("Reply {}", turn));
         store.add_message(&a).unwrap();
     }
 
     let compactor = ContinuousCompactor::new(store.clone());
-    let res = compactor.consolidate_if_needed(conv_id).unwrap().expect("Must compact 1..10");
+    let res = compactor
+        .consolidate_if_needed(conv_id)
+        .unwrap()
+        .expect("Must compact 1..10");
     assert_eq!(res.episode.turn_start, 1);
     assert_eq!(res.episode.turn_end, 10);
 
@@ -469,7 +607,10 @@ fn test_continuous_compactor_partial_residual_turns_and_force_consolidate() {
     assert!(auto_skip.is_none());
 
     // Force consolidate residual turns
-    let force_res = compactor.force_consolidate(conv_id).unwrap().expect("Force consolidate 11..14");
+    let force_res = compactor
+        .force_consolidate(conv_id)
+        .unwrap()
+        .expect("Force consolidate 11..14");
     assert_eq!(force_res.episode.turn_start, 11);
     assert_eq!(force_res.episode.turn_end, 14);
     assert_eq!(force_res.turns_compacted, 4);
@@ -495,17 +636,27 @@ fn test_adversarial_extraction_raw_ip_port_and_whitespace_limits() {
     // Note: extract_ports only whitelists localhost, 127.0.0.1, 0.0.0.0, and *.internal!
     // Non-whitelisted raw IPs like 10.0.0.1:9464 are not captured by extract_ports alone:
     let missed_10_ip = !raw_ports.iter().any(|p| p.contains("10.0.0.1:9464"));
-    println!("Adversarial Observation: Raw IP 10.0.0.1:9464 extracted by extract_ports? {}", !missed_10_ip);
+    println!(
+        "Adversarial Observation: Raw IP 10.0.0.1:9464 extracted by extract_ports? {}",
+        !missed_10_ip
+    );
 
     // But when framed as URL (http://10.0.0.1:9464/metrics), extract_urls_and_uris preserves it:
     let url_input = "Metrics available at http://10.0.0.1:9464/metrics.";
     let urls = extract_urls_and_uris(url_input);
-    assert!(urls.iter().any(|u| u.contains("http://10.0.0.1:9464/metrics")), "URL extractor must preserve full URL with port");
+    assert!(
+        urls.iter()
+            .any(|u| u.contains("http://10.0.0.1:9464/metrics")),
+        "URL extractor must preserve full URL with port"
+    );
 
     // Test whitespace around configs: "PORT = 8080" vs "PORT=8080"
     let spaced_config = "Set PORT = 8080 in environment.";
     let configs_spaced = extract_configs_and_keys(spaced_config);
-    println!("Adversarial Observation: Spaced config 'PORT = 8080' extracted? {}", !configs_spaced.is_empty());
+    println!(
+        "Adversarial Observation: Spaced config 'PORT = 8080' extracted? {}",
+        !configs_spaced.is_empty()
+    );
 }
 
 #[test]
@@ -516,7 +667,10 @@ fn test_adversarial_sentence_splitting_dots_and_versions() {
     assert!(!decisions.is_empty(), "Decision must be detected");
     // Check if the decision contains the full content or if it was truncated by '.'
     let full_preserved = decisions.iter().any(|d| d.contains("Raft protocol"));
-    println!("Adversarial Observation: Full sentence across dots preserved? {}", full_preserved);
+    println!(
+        "Adversarial Observation: Full sentence across dots preserved? {}",
+        full_preserved
+    );
 }
 
 #[test]
@@ -535,7 +689,10 @@ fn test_adversarial_compactor_empty_and_zero_user_turns() {
     store.add_message(&a_msg).unwrap();
 
     let res_assistant_only = compactor.consolidate_if_needed(conv_id).unwrap();
-    assert!(res_assistant_only.is_none(), "0 user turns must not trigger compaction");
+    assert!(
+        res_assistant_only.is_none(),
+        "0 user turns must not trigger compaction"
+    );
 
     cleanup_temp_store(db_path);
 }

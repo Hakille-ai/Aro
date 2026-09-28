@@ -46,6 +46,31 @@ describe("CloudAuthPage", () => {
     await fireEvent.submit(password.closest("form")!);
     expect(onSubmit).toHaveBeenCalledOnce();
   });
+
+  it("accepts a TOTP code on login", async () => {
+    render(CloudAuthPage, {
+      language: "en", mode: "login", invitationToken: "", email: "user@aro.dev",
+      password: "long-password", name: "", organizationName: "ARO", showPassword: false,
+      busy: false, error: "", onSubmit: noop, onToggleMode: noop,
+    });
+    const totp = screen.getByPlaceholderText("6-digit code if MFA is enabled");
+    await fireEvent.input(totp, { target: { value: "123456" } });
+    expect(totp).toHaveValue("123456");
+  });
+
+  it("submits the password reset form", async () => {
+    const onSubmit = vi.fn();
+    render(CloudAuthPage, {
+      language: "en", mode: "reset-password", invitationToken: "", email: "user@aro.dev",
+      password: "", name: "", organizationName: "ARO", showPassword: false,
+      busy: false, error: "", onSubmit, onToggleMode: noop,
+    });
+    await fireEvent.input(screen.getByPlaceholderText("Reset code"), { target: { value: "a".repeat(36) } });
+    await fireEvent.input(screen.getByPlaceholderText("New password (min. 10 chars)"), { target: { value: "new-long-password" } });
+    expect(screen.getByRole("button", { name: "Save password" })).toBeEnabled();
+    await fireEvent.click(screen.getByRole("button", { name: "Save password" }));
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
 });
 
 describe("MainSidebar", () => {

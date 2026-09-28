@@ -1,4 +1,4 @@
-import type { AgentStep } from "./agents-permissions-arena";
+import type { AgentStep, SubAgentInfo } from "./agents-permissions-arena";
 import type { SearchSettings } from "./settings-models-runtime";
 
 export type AssistantMode = "chat" | "think" | "code" | "summarize" | "quiet";
@@ -37,6 +37,7 @@ export interface ChatMessage {
   isGenerating?: boolean;
   steps?: AgentStep[];
   agentRunId?: string | null;
+  subAgents?: SubAgentInfo[];
 }
 
 export interface AttachmentRef {

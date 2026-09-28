@@ -202,12 +202,10 @@ impl ContextWindowManager {
         working_messages: &[ChatMessage],
     ) -> AroResult<AssembledContext> {
         let (fitted_sys, sys_tokens) = self.fit_system_prompt(system_prompt)?;
-        let (fitted_sem, sem_tokens, sem_evicted) =
-            self.fit_semantic_memories(semantic_candidates);
+        let (fitted_sem, sem_tokens, sem_evicted) = self.fit_semantic_memories(semantic_candidates);
         let (fitted_epi, epi_tokens, epi_evicted) =
             self.fit_episodic_summaries(episodic_candidates);
-        let (fitted_work, work_tokens, work_evicted) =
-            self.fit_working_messages(working_messages);
+        let (fitted_work, work_tokens, work_evicted) = self.fit_working_messages(working_messages);
 
         let total_input_tokens = sys_tokens + sem_tokens + epi_tokens + work_tokens;
         let total_tokens = total_input_tokens + self.budget.reserve_budget;
@@ -259,7 +257,10 @@ impl ContextWindowManager {
             out.push_str("\n\n## Long-Term Semantic Knowledge:\n");
             for mem in &assembled.semantic_memories {
                 let pin_badge = if mem.pinned { " [PINNED]" } else { "" };
-                out.push_str(&format!("- [{}{}]: {}\n", mem.category, pin_badge, mem.content));
+                out.push_str(&format!(
+                    "- [{}{}]: {}\n",
+                    mem.category, pin_badge, mem.content
+                ));
             }
         }
 
@@ -291,9 +292,9 @@ pub struct CompactionResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactionTriggerReason {
-    TurnIntervalReached,     // uncompacted_turns >= 10
-    TokenThresholdExceeded,  // uncompacted_tokens >= 2400
-    ExplicitFlush,           // manual consolidation request
+    TurnIntervalReached,    // uncompacted_turns >= 10
+    TokenThresholdExceeded, // uncompacted_tokens >= 2400
+    ExplicitFlush,          // manual consolidation request
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,7 +364,11 @@ impl CompactionState {
         self.evaluate_with_interval(messages, COMPACTION_TURN_INTERVAL)
     }
 
-    pub fn evaluate_with_interval(&self, messages: &[ChatMessage], interval: usize) -> CompactionDecision {
+    pub fn evaluate_with_interval(
+        &self,
+        messages: &[ChatMessage],
+        interval: usize,
+    ) -> CompactionDecision {
         if self.uncompacted_turns == 0 {
             return CompactionDecision::Skip {
                 reason: "No uncompacted turns available".to_string(),
@@ -478,10 +483,7 @@ impl ContinuousCompactor {
     }
 
     /// Force consolidation of all uncompacted turns up to current.
-    pub fn force_consolidate(
-        &self,
-        conversation_id: Uuid,
-    ) -> AroResult<Option<CompactionResult>> {
+    pub fn force_consolidate(&self, conversation_id: Uuid) -> AroResult<Option<CompactionResult>> {
         let messages = self.store.list_messages(conversation_id)?;
         if messages.is_empty() {
             return Ok(None);
@@ -544,8 +546,7 @@ impl ContinuousCompactor {
             persisted_memories.push(saved);
         }
 
-        let tokens_after =
-            estimate_tokens(&EpisodeSummary::from(&episode).format_for_prompt());
+        let tokens_after = estimate_tokens(&EpisodeSummary::from(&episode).format_for_prompt());
 
         Ok(CompactionResult {
             episode,
@@ -685,7 +686,9 @@ impl LosslessEntityExtractor {
 
             // 6. Track turns for summary narrative
             if msg.role == MessageRole::User {
-                if let (Some(u), Some(a)) = (last_user_content.take(), last_assistant_content.take()) {
+                if let (Some(u), Some(a)) =
+                    (last_user_content.take(), last_assistant_content.take())
+                {
                     turn_summaries.push(format!(
                         "[Turn {}] User: \"{}\" -> Assistant: \"{}\"",
                         current_turn_idx,
@@ -847,8 +850,17 @@ pub fn extract_urls_and_uris(input: &str) -> Vec<String> {
 
     for word in words {
         let trimmed = word.trim_matches(|c: char| {
-            c == '(' || c == ')' || c == '[' || c == ']' || c == '<' || c == '>'
-                || c == '"' || c == '\'' || c == ',' || c == ';' || c == '.'
+            c == '('
+                || c == ')'
+                || c == '['
+                || c == ']'
+                || c == '<'
+                || c == '>'
+                || c == '"'
+                || c == '\''
+                || c == ','
+                || c == ';'
+                || c == '.'
         });
 
         let lower = trimmed.to_ascii_lowercase();
@@ -876,8 +888,16 @@ pub fn extract_configs_and_keys(input: &str) -> Vec<String> {
 
     for word in words {
         let trimmed = word.trim_matches(|c: char| {
-            c == '(' || c == ')' || c == '[' || c == ']' || c == '<' || c == '>'
-                || c == '"' || c == '\'' || c == ',' || c == ';'
+            c == '('
+                || c == ')'
+                || c == '['
+                || c == ']'
+                || c == '<'
+                || c == '>'
+                || c == '"'
+                || c == '\''
+                || c == ','
+                || c == ';'
         });
 
         // Match KEY=VALUE configurations
@@ -885,7 +905,9 @@ pub fn extract_configs_and_keys(input: &str) -> Vec<String> {
             let key = &trimmed[..eq_idx];
             let val = &trimmed[eq_idx + 1..];
             if key.len() >= 3
-                && key.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
                 && !val.is_empty()
             {
                 results.push(format!("Config: {}", trimmed));

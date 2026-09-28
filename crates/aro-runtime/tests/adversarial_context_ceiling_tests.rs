@@ -14,21 +14,21 @@ use aro_core::{
     EpisodeSummary, LongTermMemory, MessageRole,
 };
 use aro_memory::SqliteMemoryStore;
-use aro_runtime::context_manager::{ContinuousCompactor, ContextWindowManager};
+use aro_runtime::context_manager::{ContextWindowManager, ContinuousCompactor};
 use uuid::Uuid;
 
 fn create_temp_store() -> (SqliteMemoryStore, std::path::PathBuf) {
-    let db_path = std::env::temp_dir().join(format!(
-        "aro-adversarial-context-{}.sqlite",
-        Uuid::new_v4()
-    ));
+    let db_path =
+        std::env::temp_dir().join(format!("aro-adversarial-context-{}.sqlite", Uuid::new_v4()));
     let store = SqliteMemoryStore::new(&db_path).expect("failed to create sqlite memory store");
     (store, db_path)
 }
 
 fn create_conversation(store: &SqliteMemoryStore, conv_id: Uuid) {
     let conv = Conversation::with_id(conv_id, "Stress Test Conv", AssistantMode::Chat);
-    store.upsert_conversation(&conv).expect("must create conversation");
+    store
+        .upsert_conversation(&conv)
+        .expect("must create conversation");
 }
 
 fn cleanup_temp_store(path: std::path::PathBuf) {
@@ -79,7 +79,9 @@ fn generate_gigantic_rust_code(structs: usize) -> String {
 }
 
 fn generate_gigantic_sql_schema(tables: usize) -> String {
-    let mut out = String::from("```sql\n-- Auto-generated gigantic SQL migration script\nBEGIN TRANSACTION;\n\n");
+    let mut out = String::from(
+        "```sql\n-- Auto-generated gigantic SQL migration script\nBEGIN TRANSACTION;\n\n",
+    );
     for i in 0..tables {
         out.push_str(&format!(
             "CREATE TABLE IF NOT EXISTS telemetry_records_v{i} (\n"
@@ -137,15 +139,34 @@ fn test_adversarial_extreme_source_code_payloads() {
     let conv_id = Uuid::new_v4();
 
     let py_code = generate_gigantic_python_code(120); // ~20,000+ chars
-    let rs_code = generate_gigantic_rust_code(100);   // ~30,000+ chars
-    let sql_code = generate_gigantic_sql_schema(100);  // ~25,000+ chars
+    let rs_code = generate_gigantic_rust_code(100); // ~30,000+ chars
+    let sql_code = generate_gigantic_sql_schema(100); // ~25,000+ chars
 
     // Candidate working messages containing extreme code blocks
     let working_messages = vec![
-        ChatMessage::new(conv_id, MessageRole::User, format!("Please review this Python code:\n{}", py_code)),
-        ChatMessage::new(conv_id, MessageRole::Assistant, format!("Here is the corresponding Rust implementation:\n{}", rs_code)),
-        ChatMessage::new(conv_id, MessageRole::User, format!("Now migrate this to SQL schema:\n{}", sql_code)),
-        ChatMessage::new(conv_id, MessageRole::Assistant, "Schema migration verified and validated.".to_string()),
+        ChatMessage::new(
+            conv_id,
+            MessageRole::User,
+            format!("Please review this Python code:\n{}", py_code),
+        ),
+        ChatMessage::new(
+            conv_id,
+            MessageRole::Assistant,
+            format!(
+                "Here is the corresponding Rust implementation:\n{}",
+                rs_code
+            ),
+        ),
+        ChatMessage::new(
+            conv_id,
+            MessageRole::User,
+            format!("Now migrate this to SQL schema:\n{}", sql_code),
+        ),
+        ChatMessage::new(
+            conv_id,
+            MessageRole::Assistant,
+            "Schema migration verified and validated.".to_string(),
+        ),
     ];
 
     // Semantic memory candidates with code snippets
@@ -168,7 +189,9 @@ fn test_adversarial_extreme_source_code_payloads() {
             conversation_id: conv_id,
             turn_start: i * 10 + 1,
             turn_end: (i + 1) * 10,
-            summary: format!("Summary {i} with code references:\n```python\nx = process_{i}()\n```"),
+            summary: format!(
+                "Summary {i} with code references:\n```python\nx = process_{i}()\n```"
+            ),
             key_decisions: vec![format!("Decision {i}: Use async I/O")],
             entities: vec![format!("service-{i}.internal:808{i}")],
             token_count: 150,
@@ -178,7 +201,12 @@ fn test_adversarial_extreme_source_code_payloads() {
 
     let sys_prompt = "You are ARO AI, a high-performance cognitive assistant.";
     let assembled = mgr
-        .assemble_context(sys_prompt, &semantic_candidates, &episodic_candidates, &working_messages)
+        .assemble_context(
+            sys_prompt,
+            &semantic_candidates,
+            &episodic_candidates,
+            &working_messages,
+        )
         .expect("assemble_context must succeed even with extreme code payloads");
 
     // Ceiling checks
@@ -212,14 +240,31 @@ fn test_adversarial_extreme_markdown_tables_and_formatting() {
     assert!(huge_table.len() > 100_000);
 
     let messages = vec![
-        ChatMessage::new(conv_id, MessageRole::User, "Show me all cluster nodes:".to_string()),
+        ChatMessage::new(
+            conv_id,
+            MessageRole::User,
+            "Show me all cluster nodes:".to_string(),
+        ),
         ChatMessage::new(conv_id, MessageRole::Assistant, huge_table),
-        ChatMessage::new(conv_id, MessageRole::User, "Can you filter the healthy nodes?".to_string()),
-        ChatMessage::new(conv_id, MessageRole::Assistant, "All nodes in us-east-1 are healthy.".to_string()),
+        ChatMessage::new(
+            conv_id,
+            MessageRole::User,
+            "Can you filter the healthy nodes?".to_string(),
+        ),
+        ChatMessage::new(
+            conv_id,
+            MessageRole::Assistant,
+            "All nodes in us-east-1 are healthy.".to_string(),
+        ),
     ];
 
     let assembled = mgr
-        .assemble_context("System prompt for telemetry node viewer.", &[], &[], &messages)
+        .assemble_context(
+            "System prompt for telemetry node viewer.",
+            &[],
+            &[],
+            &messages,
+        )
         .expect("Must handle huge markdown tables gracefully");
 
     assert!(
@@ -262,13 +307,26 @@ fn test_adversarial_deep_json_and_ast_structures() {
     json_array.push(']');
 
     let messages = vec![
-        ChatMessage::new(conv_id, MessageRole::User, format!("AST Dump:\n{}", deep_json)),
-        ChatMessage::new(conv_id, MessageRole::Assistant, format!("Node array parsed:\n{}", json_array)),
+        ChatMessage::new(
+            conv_id,
+            MessageRole::User,
+            format!("AST Dump:\n{}", deep_json),
+        ),
+        ChatMessage::new(
+            conv_id,
+            MessageRole::Assistant,
+            format!("Node array parsed:\n{}", json_array),
+        ),
         ChatMessage::new(conv_id, MessageRole::User, "Optimize the AST.".to_string()),
     ];
 
     let assembled = mgr
-        .assemble_context("System instruction for compiler optimization.", &[], &[], &messages)
+        .assemble_context(
+            "System instruction for compiler optimization.",
+            &[],
+            &[],
+            &messages,
+        )
         .expect("Must assemble context with deep JSON");
 
     assert!(assembled.token_usage.total_tokens <= 8192);
@@ -411,11 +469,15 @@ fn test_adversarial_long_turn_endurance_55_turns() {
     // Verify lossless extraction preserved critical items across turns
     let memories = store.list_memories().unwrap();
     assert!(
-        memories.iter().any(|m| m.content.contains("SQLite WAL mode")),
+        memories
+            .iter()
+            .any(|m| m.content.contains("SQLite WAL mode")),
         "Turn 7 decision must be preserved in long-term memories"
     );
     assert!(
-        memories.iter().any(|m| m.content.contains("UTF-8 encoding")),
+        memories
+            .iter()
+            .any(|m| m.content.contains("UTF-8 encoding")),
         "Turn 25 rule must be preserved in long-term memories"
     );
 
@@ -454,7 +516,10 @@ fn test_adversarial_multistep_tool_loop_50_steps_sliding_window() {
         let result_content = match step {
             // Steps 10, 20, 30, 40: Gigantic tool payload (e.g. read_file of large bundle)
             s if s % 10 == 0 => {
-                format!("Large file contents:\n{}", "binary_hex_encoded_data_".repeat(800))
+                format!(
+                    "Large file contents:\n{}",
+                    "binary_hex_encoded_data_".repeat(800)
+                )
             }
             // Steps with code
             s if s % 3 == 0 => {
@@ -519,20 +584,28 @@ fn test_adversarial_single_oversized_message_exceeding_budget() {
     let giant_user_msg = ChatMessage::new(
         conv_id,
         MessageRole::User,
-        format!("Massive log dump:\n{}", "LOG_LINE: connection failed with timeout.\n".repeat(1000)),
+        format!(
+            "Massive log dump:\n{}",
+            "LOG_LINE: connection failed with timeout.\n".repeat(1000)
+        ),
     );
     let giant_tokens = estimate_message_tokens(&giant_user_msg);
     assert!(giant_tokens > 2400, "Must exceed 2400 token working budget");
 
     // Case A: Message history containing ONLY this giant message
-    let (retained_a, tokens_a, evicted_a) = mgr.fit_working_messages(std::slice::from_ref(&giant_user_msg));
+    let (retained_a, tokens_a, evicted_a) =
+        mgr.fit_working_messages(std::slice::from_ref(&giant_user_msg));
     // The giant message cannot fit in the 2400 budget, so it is safely dropped/evicted
     assert_eq!(retained_a.len(), 0, "Oversized message must be evicted");
     assert_eq!(tokens_a, 0);
     assert_eq!(evicted_a, 1);
 
     // Case B: Giant message followed by standard small message
-    let small_msg = ChatMessage::new(conv_id, MessageRole::Assistant, "I cannot process logs of that size.".to_string());
+    let small_msg = ChatMessage::new(
+        conv_id,
+        MessageRole::Assistant,
+        "I cannot process logs of that size.".to_string(),
+    );
     let (retained_b, tokens_b, evicted_b) = mgr.fit_working_messages(&[giant_user_msg, small_msg]);
     assert_eq!(retained_b.len(), 1, "Small message must be retained");
     assert_eq!(retained_b[0].content, "I cannot process logs of that size.");
@@ -572,5 +645,8 @@ fn test_adversarial_system_prompt_budget_boundary() {
 
     // assemble_context must reject the oversized system prompt
     let assembled_err = mgr.assemble_context(&oversized_prompt, &[], &[], &[]);
-    assert!(assembled_err.is_err(), "assemble_context must reject oversized system prompt");
+    assert!(
+        assembled_err.is_err(),
+        "assemble_context must reject oversized system prompt"
+    );
 }

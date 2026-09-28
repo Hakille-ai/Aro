@@ -55,12 +55,10 @@ async fn fresh_org_denies_server_cloud_by_default() -> TestResult {
     assert!(!consent.enabled);
     assert!(consent.provider_ids.is_empty());
     assert!(store.list_org_provider_key_status(org).await?.is_empty());
-    assert!(
-        store
-            .get_org_provider_key(org, "openai", TEST_SECRETS_KEY)
-            .await?
-            .is_none()
-    );
+    assert!(store
+        .get_org_provider_key(org, "openai", TEST_SECRETS_KEY)
+        .await?
+        .is_none());
     Ok(())
 }
 
@@ -74,7 +72,13 @@ async fn consent_and_key_roundtrip_without_leaks() -> TestResult {
     let secret = "sk-test-server-cloud-key-001";
 
     let consent = store
-        .set_org_ai_cloud_consent(org, true, &["openai".to_string()], Some("EU"), owner.user.id)
+        .set_org_ai_cloud_consent(
+            org,
+            true,
+            &["openai".to_string()],
+            Some("EU"),
+            owner.user.id,
+        )
         .await?;
     assert!(consent.enabled);
     assert_eq!(consent.provider_ids, vec!["openai".to_string()]);
@@ -108,12 +112,10 @@ async fn consent_and_key_roundtrip_without_leaks() -> TestResult {
 
     // Revocation is immediate.
     assert!(store.delete_org_provider_key(org, "openai").await?);
-    assert!(
-        store
-            .get_org_provider_key(org, "openai", TEST_SECRETS_KEY)
-            .await?
-            .is_none()
-    );
+    assert!(store
+        .get_org_provider_key(org, "openai", TEST_SECRETS_KEY)
+        .await?
+        .is_none());
     assert!(!store.delete_org_provider_key(org, "openai").await?);
 
     // Disabling consent keeps keys stored but unusable by policy (callers
@@ -152,10 +154,12 @@ async fn tenants_are_isolated_and_inputs_validated() -> TestResult {
         .await?;
 
     // Beta sees nothing of alpha's cloud state.
-    assert!(!store
-        .get_org_ai_cloud_consent(beta.active_organization.id)
-        .await?
-        .enabled);
+    assert!(
+        !store
+            .get_org_ai_cloud_consent(beta.active_organization.id)
+            .await?
+            .enabled
+    );
     assert!(store
         .list_org_provider_key_status(beta.active_organization.id)
         .await?
@@ -175,7 +179,12 @@ async fn tenants_are_isolated_and_inputs_validated() -> TestResult {
         .await
         .is_err());
     assert!(store
-        .set_org_provider_key(alpha.active_organization.id, "mistral", "   ", TEST_SECRETS_KEY)
+        .set_org_provider_key(
+            alpha.active_organization.id,
+            "mistral",
+            "   ",
+            TEST_SECRETS_KEY
+        )
         .await
         .is_err());
     assert!(store

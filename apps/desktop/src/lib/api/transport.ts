@@ -4,6 +4,7 @@ import type {
   AppSettings,
   AgentContextItem,
   AgentLaneView,
+  AgentMemoryContext,
   AgentOrchestratorSnapshot,
   AgentRun,
   AgentRunPriority,
@@ -1004,6 +1005,7 @@ export async function loginCloud(request: CloudLoginRequest): Promise<CloudSessi
       await webFetch<WebAuthSession>("POST", "/auth/login", {
         email: request.email,
         password: request.password,
+        totpCode: request.totpCode,
       }, false),
     ));
   }
@@ -1013,34 +1015,20 @@ export async function loginCloud(request: CloudLoginRequest): Promise<CloudSessi
 
 export async function requestPasswordReset(email: string): Promise<{ success: boolean; message: string; devTokenUrl?: string }> {
   if (isTauri()) return invoke("auth_password_reset_request", { email });
-  if (isWeb() && webToken()) {
-    try {
-      return await webFetch<{ success: boolean; message: string; devTokenUrl?: string }>("POST", "/auth/password-reset/request", { email });
-    } catch {
-      /* fallthrough */
-    }
+  if (isWeb()) {
+    const result = await webFetch<{ status: string; message: string }>("POST", "/auth/password-reset/request", { email }, false);
+    return { success: result.status === "success", message: result.message };
   }
-  const token = `demo-reset-${Date.now()}`;
-  return {
-    success: true,
-    message: `Un e-mail de réinitialisation avec template HTML responsive a été simulé pour ${email}.`,
-    devTokenUrl: `aro://auth/reset-password?token=${token}`,
-  };
+  throw new Error("Password reset requires an ARO server");
 }
 
 export async function confirmPasswordReset(token: string, newPassword: string): Promise<{ success: boolean; message: string }> {
   if (isTauri()) return invoke("auth_password_reset_confirm", { token, newPassword });
-  if (isWeb() && webToken()) {
-    try {
-      return await webFetch<{ success: boolean; message: string }>("POST", "/auth/password-reset/confirm", { token, newPassword });
-    } catch {
-      /* fallthrough */
-    }
+  if (isWeb()) {
+    const result = await webFetch<{ status: string; message: string }>("POST", "/auth/password-reset/confirm", { token, newPassword }, false);
+    return { success: result.status === "success", message: result.message };
   }
-  return {
-    success: true,
-    message: "Votre mot de passe a été mis à jour avec succès !",
-  };
+  throw new Error("Password reset requires an ARO server");
 }
 
 export async function sendDesktopNotification(title: string, body: string, conversationId?: string): Promise<void> {
@@ -1060,14 +1048,15 @@ export async function acceptCloudInvitation(
   token: string,
   email: string,
   password: string,
+  totpCode?: string,
 ): Promise<CloudSessionView> {
-  if (isTauri()) return invoke("cloud_invitation_accept", { token, email, password });
+  if (isTauri()) return invoke("cloud_invitation_accept", { token, email, password, totpCode });
   if (isWeb()) {
     return withWebSessionMutation(async () => applyWebAuthSession(
       await webFetch<WebAuthSession>(
         "POST",
         "/auth/invitations/accept-account",
-        { token, email, password },
+        { token, email, password, totpCode },
         false,
       ),
     ));
@@ -2267,7 +2256,7 @@ export async function sendMessageStream(
         modelId: request.modelId || null,
         provider: request.provider || null,
         attachments: request.attachments || [],
-        webAccess: request.webAccess || "off",
+        webAccess: request.webAccess || "auto",
         searchSettings: request.searchSettings || null,
         // Client epais : prompt systeme deja compile par le harnais
         // desktop (personnalite + souvenirs + skills + permissions).
@@ -2581,6 +2570,141 @@ export async function searchAgentContext(
     } catch { /* fallthrough */ }
   }
   return [];
+}
+
+export async function getAgentMemory(
+  agentId: string,
+  conversationId: string,
+): Promise<AgentMemoryContext | null> {
+  if (isTauri()) {
+    return invoke<AgentMemoryContext>("agent_get_memory", { agentId, conversationId });
+  }
+  if (isWeb() && webToken()) {
+    try {
+      return await webFetch<AgentMemoryContext>(
+        "GET",
+        `/agent/memory/${encodeURIComponent(conversationId)}/${encodeURIComponent(agentId)}`,
+      );
+    } catch {
+      // fallthrough to local fallback
+    }
+  }
+  const key = `${conversationId}:${agentId}`;
+  if (typeof localStorage !== "undefined") {
+    try {
+      const stored = localStorage.getItem(`aro:agent-memory:${key}`);
+      if (stored) {
+        return JSON.parse(stored) as AgentMemoryContext;
+      }
+    } catch {
+      // fallthrough
+    }
+  }
+  return {
+    agentId,
+    agentName: "Sous-Agent",
+    role: "worker",
+    conversationId,
+    scratchpad: "",
+    findings: [],
+    ledger: [],
+    artifacts: [],
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export async function saveAgentMemory(memory: AgentMemoryContext): Promise<void> {
+  if (isTauri()) {
+    return invoke<void>("agent_save_memory", { memory });
+  }
+  if (isWeb() && webToken()) {
+    try {
+      await webFetch<void>(
+        "PUT",
+        `/agent/memory/${encodeURIComponent(memory.conversationId)}/${encodeURIComponent(memory.agentId)}`,
+        memory,
+      );
+      return;
+    } catch {
+      // fallthrough to local fallback
+    }
+  }
+  const key = `${memory.conversationId}:${memory.agentId}`;
+  if (typeof localStorage !== "undefined") {
+    try {
+      localStorage.setItem(`aro:agent-memory:${key}`, JSON.stringify(memory));
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export async function dispatchAgentDirective(
+  agentId: string,
+  directive: string,
+  conversationId: string,
+): Promise<AgentRunView> {
+  if (isTauri()) {
+    return invoke<AgentRunView>("agent_dispatch_directive", {
+      agentId,
+      directive,
+      conversationId,
+    });
+  }
+  if (isWeb() && webToken()) {
+    try {
+      return await webFetch<AgentRunView>("POST", "/agent/directive", {
+        agentId,
+        directive,
+        conversationId,
+      });
+    } catch {
+      // fallthrough to fallback
+    }
+  }
+  const now = new Date().toISOString();
+  const runId = `mock-run-${Date.now()}`;
+  const run: AgentRun = {
+    id: runId,
+    laneId: "demo-lane",
+    conversationId,
+    goal: directive,
+    mode: "code",
+    status: "running",
+    priority: "normal",
+    modelProviderId: null,
+    modelId: null,
+    autonomyProfileId: null,
+    checkpointSummary: `Execution started for directive: ${directive}`,
+    lastError: null,
+    createdAt: now,
+    updatedAt: now,
+    heartbeatAt: now,
+    completedAt: null,
+  };
+  const view: AgentRunView = {
+    run,
+    steps: [
+      {
+        id: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `step-${Date.now()}`,
+        runId,
+        sequence: 1,
+        kind: "run-started",
+        status: "completed",
+        title: "Directive reçue",
+        input: { directive },
+        output: { status: "running" },
+        error: null,
+        startedAt: now,
+        finishedAt: now,
+      },
+    ],
+    artifacts: [],
+    contextPack: null,
+  };
+  demoAgentRuns = [run, ...demoAgentRuns.filter((r) => r.id !== runId)];
+  demoAgentRunViews[runId] = view;
+  return view;
 }
 
 export async function listPermissionProfiles(): Promise<PermissionProfile[]> {

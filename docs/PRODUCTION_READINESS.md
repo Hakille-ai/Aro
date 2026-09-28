@@ -15,7 +15,7 @@ ARO must not be presented as generally available until every item in this docume
 
 ## Release blockers still in progress
 
-- Identity: password reset, session/device management endpoints, MFA/SSO where required, and immediate access-token revocation where policy requires it. Refresh tokens now rotate inside durable families with a non-extendable absolute expiry; reuse atomically revokes the family, and the worker retains then purges whole lineages without destroying predecessor evidence. Invitations no longer reserve unknown identities or expose bearer tokens to tenant admins; configure an audited server-side delivery worker before enabling them. Invite acceptance marks the recipient address verified.
+- Identity: validate configured password-reset SMTP delivery end to end, add session/device management, MFA recovery codes and SSO where required, and immediate access-token revocation where policy requires it. TOTP is now checked before password-based login or invitation acceptance issues a session. Refresh tokens rotate inside durable families with a non-extendable absolute expiry; reuse atomically revokes the family. Invitations require an audited server-side delivery worker before enabling them.
 - Authorization: resource ownership and sharing policy, enforced ACLs, database RLS, and permission regression tests.
 - Agent execution: durable job queue, leases, idempotency, cancellation, retries, DLQ, explicit tool approval, egress proxy, and execution audit trail.
 - Files: antivirus/quarantine, extraction/indexing workers, tenant quotas, retention/deletion jobs, and multi-replica upload/download tests.

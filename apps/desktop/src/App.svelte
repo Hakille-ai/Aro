@@ -437,6 +437,7 @@
     sendMessageStream,
     sendArenaStream,
     startAgentRun,
+    dispatchAgentDirective,
     synthesizeSpeech,
     detectWakeWord,
     transcribeAudio,
@@ -475,6 +476,7 @@
     AgentOrchestratorSnapshot,
     AgentRun,
     AgentStep,
+    SubAgentInfo,
     AgentRunPriority,
     AgentRunView,
     AppSettings,
@@ -692,6 +694,20 @@
     samplesForDuration,
   } from "./lib/voice";
   import type { VoiceCaptureChunkMessage, VoiceCaptureSession } from "./lib/voice";
+  import {
+    getAgentMemoryContext,
+    saveAgentMemoryContext,
+    loadAgentMemoryFromBackend,
+    updateAgentScratchpad,
+    recordAgentFinding,
+    recordAgentArtifact,
+    dispatchInterAgentMessage,
+    getInterAgentMessages,
+    validateToolAgainstPermission,
+    buildAgentExecutionPromptContext,
+    createAgentEnvelope,
+    compilePermissionDirective,
+  } from "./lib/agent-protocol";
 
   type AttachedFile = {
     id: string;
@@ -775,6 +791,8 @@
   let cloudInvitationToken = "";
   let cloudAuthEmail = "";
   let cloudAuthPassword = "";
+  let cloudAuthTotpCode = "";
+  let cloudAuthResetToken = "";
   let cloudAuthName = "";
   let cloudAuthOrgName = "ARO Workspace";
   let cloudAuthError = "";
@@ -901,6 +919,129 @@
   let agentLanes: AgentLaneView[] = [];
   let orchestratorSnapshot: AgentOrchestratorSnapshot | null = null;
   let selectedAgentRunView: AgentRunView | null = null;
+  let activeSubAgent: SubAgentInfo | null = null;
+  let subAgentMessagesMap: Record<string, ChatMessage[]> = {};
+  let previousActiveConversationId: string | null = null;
+  $: if (activeConversation?.id !== previousActiveConversationId) {
+    previousActiveConversationId = activeConversation?.id ?? null;
+    activeSubAgent = null;
+    // Preserve sub-agent messages across conversation switches
+  }
+
+  function getInitialSubAgentMessages(agent: SubAgentInfo, lang: "fr" | "en", convId?: string): ChatMessage[] {
+    const userMsg: ChatMessage = {
+      id: `sa-${agent.id}-task`,
+      conversationId: convId ?? "",
+      role: "user",
+      content: agent.goal || (lang === "fr" ? `Mission assignée à ${agent.name} : exécution autonome.` : `Mission assigned to ${agent.name}: autonomous execution.`),
+      createdAt: agent.createdAt || new Date().toISOString(),
+    };
+    const thoughtPart = agent.currentThought ? `<think>\n${agent.currentThought}\n</think>\n\n` : "";
+    let statusPart = "";
+    if (agent.status === "completed") {
+      statusPart = lang === "fr" ? `**${agent.name}** a terminé sa mission avec succès.` : `**${agent.name}** has successfully completed its mission.`;
+    } else if (agent.status === "error" || agent.status === "failed") {
+      statusPart = lang === "fr" ? `**${agent.name}** a rencontré une erreur : ${agent.error || "Échec de l'exécution"}.` : `**${agent.name}** encountered an error: ${agent.error || "Execution failed"}.`;
+    } else if (agent.status === "needs_help" || agent.status === "waiting") {
+      statusPart = lang === "fr" ? `**${agent.name}** a besoin de directives pour continuer.` : `**${agent.name}** needs directives to continue.`;
+    } else {
+      statusPart = lang === "fr" ? `**${agent.name}** est en cours d'exécution de sa mission...` : `**${agent.name}** is executing its mission...`;
+    }
+    const memory = getAgentMemoryContext(convId ?? "", agent.id, agent.name, agent.role);
+    if (memory.findings.length > 0) {
+      statusPart += lang === "fr" ? "\n\n**Faits découverts :**\n" : "\n\n**Discovered findings:**\n";
+      statusPart += memory.findings.map((f, i) => `${i + 1}. ${f.summary}`).join("\n");
+    }
+
+    const asstMsg: ChatMessage = {
+      id: `sa-${agent.id}-assistant`,
+      conversationId: convId ?? "",
+      role: "assistant",
+      steps: agent.steps || [],
+      content: thoughtPart + statusPart,
+      isGenerating: agent.status === "running",
+      createdAt: agent.createdAt || new Date().toISOString(),
+    };
+    const result: ChatMessage[] = [userMsg, asstMsg];
+    for (const envelope of memory.ledger) {
+      if (envelope.sender.id === "user" || envelope.sender.type === "user") {
+        result.push({
+          id: envelope.id,
+          conversationId: convId ?? "",
+          role: "user",
+          content: envelope.payload.content,
+          createdAt: envelope.timestamp,
+        });
+      } else if (envelope.sender.id === agent.id) {
+        result.push({
+          id: envelope.id,
+          conversationId: convId ?? "",
+          role: "assistant",
+          content: envelope.payload.content,
+          createdAt: envelope.timestamp,
+        });
+      }
+    }
+    return result;
+  }
+
+  $: displayedMessages = activeSubAgent
+    ? (subAgentMessagesMap[activeSubAgent.id] || getInitialSubAgentMessages(activeSubAgent, currentLanguage, activeConversation?.id))
+    : messages;
+
+  $: if (activeSubAgent && agentRuns.length > 0) {
+    const matchingRun = agentRuns.find((r) => r.id === activeSubAgent?.id);
+    if (matchingRun) {
+      activeSubAgent = {
+        ...activeSubAgent,
+        status: matchingRun.status === "failed" ? "error" : matchingRun.status === "waiting" ? "needs_help" : (matchingRun.status as SubAgentInfo["status"]),
+        stepCount: selectedAgentRunView?.run.id === matchingRun.id
+          ? selectedAgentRunView.steps.length
+          : activeSubAgent.stepCount,
+      };
+    }
+  }
+  let loadedSubAgentMemoryKey = "";
+  $: if (activeSubAgent && activeConversation?.id) {
+    const memoryKey = `${activeConversation.id}:${activeSubAgent.id}`;
+    if (loadedSubAgentMemoryKey !== memoryKey) {
+      loadedSubAgentMemoryKey = memoryKey;
+      void loadAgentMemoryFromBackend(
+        activeConversation.id,
+        activeSubAgent.id,
+        activeSubAgent.name,
+        activeSubAgent.role,
+      ).then(() => {
+        if (activeSubAgent && activeConversation?.id) {
+          const initialMessages = getInitialSubAgentMessages(activeSubAgent, currentLanguage, activeConversation.id);
+          if (!subAgentMessagesMap[activeSubAgent.id]) {
+            subAgentMessagesMap = {
+              ...subAgentMessagesMap,
+              [activeSubAgent.id]: initialMessages,
+            };
+          }
+        }
+      }).catch((err) => {
+        console.warn("Failed to load persistent sub-agent memory:", err);
+      });
+    }
+  }
+
+  async function selectSubAgentThread(agent: SubAgentInfo) {
+    activeSubAgent = agent;
+    if (!activeConversation?.id) return;
+    try {
+      await loadAgentMemoryFromBackend(activeConversation.id, agent.id, agent.name, agent.role);
+      const initialMessages = getInitialSubAgentMessages(agent, currentLanguage, activeConversation.id);
+      subAgentMessagesMap = {
+        ...subAgentMessagesMap,
+        [agent.id]: initialMessages,
+      };
+    } catch (err) {
+      console.warn("Failed to load persistent sub-agent memory:", err);
+    }
+  }
+
   let agentRunsBusy = false;
   let agentActionBusy: string | null = null;
   let stepsByMessageId: Record<string, AgentStep[]> = {};
@@ -1424,6 +1565,10 @@
     await ensurePresetPermissionProfile(preset);
   }
 
+  function getActivePermissionProfile(): PermissionProfile | null {
+    return permissionProfiles.find((profile) => profile.id === activePermissionProfileId) ?? null;
+  }
+
   function handleSelectPermissionProfile(profileId: string) {
     selectPermissionProfile(profileId);
     activePermissionPreset = "custom";
@@ -1432,14 +1577,31 @@
     }
   }
 
-  async function ensurePresetPermissionProfile(preset: "standard" | "read-only" | "developer" | "sandbox"): Promise<string | null> {
-    const presetNames: Record<string, string> = {
+  function getEffectiveWebAccess(): WebAccessMode {
+    if (activePermissionPreset === "sandbox" || activePermissionPreset === "read-only") {
+      return "off";
+    }
+    if (activePermissionPreset === "custom") {
+      const profile = getActivePermissionProfile();
+      if (profile && !profile.allowNetwork) {
+        return "off";
+      }
+    } else if (!permNetworkAccess) {
+      return "off";
+    }
+    return webAccess;
+  }
+
+  async function ensurePresetPermissionProfile(preset: PermissionPresetMode): Promise<string | null> {
+    if (preset === "custom") return null;
+    const presetNames: Record<Exclude<PermissionPresetMode, "custom">, string> = {
       "standard": currentLanguage === "fr" ? "Profil Standard" : "Standard Profile",
       "read-only": currentLanguage === "fr" ? "Profil Lecture seule" : "Read-Only Profile",
       "developer": currentLanguage === "fr" ? "Profil Autonome (Dev)" : "Autonomous Profile (Dev)",
       "sandbox": currentLanguage === "fr" ? "Profil Isolé (Sandbox)" : "Sandbox Profile",
     };
     const targetName = presetNames[preset];
+    if (!targetName) return null;
     const matched = permissionProfiles.find((p) => p.name === targetName);
     if (matched) {
       activePermissionProfileId = matched.id;
@@ -3518,6 +3680,29 @@
       maxTokens: targetBudget,
     });
 
+    const activeProfile = getActivePermissionProfile();
+    const permDirective = compilePermissionDirective(
+      activePermissionPreset,
+      activeProfile,
+      currentLanguage
+    );
+
+    let agentContextBlock = "";
+    if (activeSubAgent && activeConversation?.id) {
+      agentContextBlock = "\n\n" + buildAgentExecutionPromptContext(activeConversation.id, activeSubAgent.id, currentLanguage);
+    }
+
+    const protocolDirective = currentLanguage === "fr"
+      ? "\n\n[PROTOCOLE DE COOPÉRATION ET DÉLÉGATION MULTI-AGENTS ARO]\n" +
+        "Vous opérez au sein d'une architecture agentique d'avant-garde. En cas de sous-tâches complexes, déléguez avec des objectifs explicites, préservez la mémoire de travail (scratchpad) et respectez strictement les frontières de permissions."
+      : "\n\n[ARO MULTI-AGENT COOPERATION & DELEGATION PROTOCOL]\n" +
+        "You operate within an advanced multi-agent architecture. For complex tasks, delegate with explicit objectives, preserve cognitive scratchpad memory, and strictly adhere to active permission boundaries.";
+
+    const fullPrompt = basePrompt + permDirective + agentContextBlock + protocolDirective;
+    return clampPromptToTokenBudget(fullPrompt, targetBudget);
+  }
+
+  function _unusedDeadBranch() {
     let permDirective = "";
     if (activePermissionPreset === "read-only") {
       permDirective = currentLanguage === "fr"
@@ -3537,8 +3722,8 @@
         : "\n\n[AUTONOMY & PERMISSION POLICY: STANDARD]\nBalanced standard mode. Reading and editing project files are permitted. System command execution and destructive actions require explicit user confirmation.";
     }
 
-    const fullPrompt = basePrompt + permDirective;
-    return clampPromptToTokenBudget(fullPrompt, targetBudget);
+    void permDirective;
+    return;
   }
 
   function saveMemories() {
@@ -5549,6 +5734,14 @@
         cloudAuthMode = "invitation";
         showCloudAuthPanel = true;
         window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+      } else {
+        const resetToken = fragment.get("reset_token")?.trim() ?? "";
+        if (resetToken.length >= 32) {
+          cloudAuthResetToken = resetToken;
+          cloudAuthMode = "reset-password";
+          showCloudAuthPanel = true;
+          window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+        }
       }
     }
 
@@ -5781,6 +5974,7 @@
                 status: step.status,
                 stepTitle: step.title,
                 content: step.output?.content || step.output?.text,
+                tabId: step.output?.tabId || step.output?.tab_id,
               },
             })
           );
@@ -6597,17 +6791,29 @@
         cloudAuthBusy = false;
         return;
       }
+      if (cloudAuthMode === "reset-password") {
+        await confirmPasswordReset(cloudAuthResetToken.trim(), cloudAuthPassword);
+        cloudAuthResetToken = "";
+        cloudAuthPassword = "";
+        cloudAuthMode = "login";
+        cloudAuthSuccessMessage = currentLanguage === "fr"
+          ? "Mot de passe mis à jour. Connectez-vous à nouveau."
+          : "Password updated. Sign in again.";
+        return;
+      }
       if (cloudAuthMode === "invitation") {
         cloudSession = await acceptCloudInvitation(
           cloudInvitationToken,
           cloudAuthEmail.trim(),
           cloudAuthPassword,
+          cloudAuthTotpCode.trim() || undefined,
         );
         cloudInvitationToken = "";
       } else if (cloudAuthMode === "login") {
         cloudSession = await loginCloud({
           email: cloudAuthEmail.trim(),
           password: cloudAuthPassword,
+          totpCode: cloudAuthTotpCode.trim() || undefined,
         });
       } else {
         cloudSession = await registerCloud({
@@ -6622,6 +6828,7 @@
       showCloudAuthPanel = false;
       leaveSettingsView();
       cloudAuthPassword = "";
+      cloudAuthTotpCode = "";
       clearOrganizationScopedState();
       await loadBootstrap();
     } catch (error) {
@@ -7651,6 +7858,9 @@
         }
       }
 
+      const currentPreset = activePermissionPreset;
+      const resolvedPresetProfileId = currentPreset === "custom" ? null : await ensurePresetPermissionProfile(currentPreset);
+
       const view = await startAgentRun({
         conversationId: targetConversation.id,
         goal,
@@ -7658,7 +7868,7 @@
         systemPrompt,
         modelId,
         provider,
-        autonomyProfileId: customPermissionId || activePermissionProfileId || null,
+        autonomyProfileId: customPermissionId || activePermissionProfileId || resolvedPresetProfileId || null,
         maxSteps: null,
       });
       selectedAgentRunView = view;
@@ -7786,6 +7996,7 @@
 
   async function openConversation(conversation: Conversation) {
     stopSpeaking();
+    activeSubAgent = null;
     pendingProjectId = null;
     pendingFolderId = null;
     closeMobileDrawers();
@@ -7808,6 +8019,7 @@
   async function startConversation() {
     if (!ensureCloudWriteAllowed("demarrer une nouvelle conversation")) return;
     stopSpeaking();
+    activeSubAgent = null;
     errorMessage = "";
     showConversationMenu = false;
     activeConversation = null;
@@ -8151,6 +8363,139 @@
       await submitArena();
       return;
     }
+
+    if (activeSubAgent) {
+      const isForced = typeof forcedContent === "string";
+      const content = (isForced ? forcedContent : input).trim();
+      if (!content) return;
+      input = "";
+      attachedFiles = [];
+      await resizeComposer();
+
+      const userMsgId = crypto.randomUUID();
+
+      const now = new Date().toISOString();
+
+      const userMsg: ChatMessage = {
+        id: userMsgId,
+        conversationId: activeConversation?.id ?? "",
+        role: "user",
+        content,
+        createdAt: now,
+      };
+
+      const envelope = createAgentEnvelope({
+        conversationId: activeConversation?.id ?? "",
+        sender: { id: "user", name: "Utilisateur", type: "user" },
+        recipient: {
+          id: activeSubAgent.id,
+          name: activeSubAgent.name,
+          role: activeSubAgent.role,
+          type: "subagent",
+        },
+        messageType: "clarification_response",
+        content,
+        permissionProfileId: activePermissionProfileId || null,
+      });
+      dispatchInterAgentMessage(envelope);
+      updateAgentScratchpad(
+        activeConversation?.id ?? "",
+        activeSubAgent.id,
+        content
+      );
+
+      const currentThread = subAgentMessagesMap[activeSubAgent.id] ||
+        getInitialSubAgentMessages(activeSubAgent, currentLanguage, activeConversation?.id);
+      const tempAsstMsgId = `sa-${activeSubAgent.id}-asst-${Date.now()}`;
+      const pendingAsstMsg: ChatMessage = {
+        id: tempAsstMsgId,
+        conversationId: activeConversation?.id ?? "",
+        role: "assistant",
+        content: currentLanguage === "fr"
+          ? `**${activeSubAgent.name}** a reçu la directive. Démarrage de l'exécution...`
+          : `**${activeSubAgent.name}** received the directive. Starting execution...`,
+        isGenerating: true,
+        createdAt: now,
+      };
+
+      subAgentMessagesMap = {
+        ...subAgentMessagesMap,
+        [activeSubAgent.id]: [...currentThread, userMsg, pendingAsstMsg],
+      };
+
+      try {
+        const runView = await dispatchAgentDirective(
+          activeSubAgent.id,
+          content,
+          activeConversation?.id ?? "",
+        );
+
+        if (runView?.run) {
+          agentRuns = [runView.run, ...agentRuns.filter((r) => r.id !== runView.run.id)];
+          activeSubAgent = {
+            ...activeSubAgent,
+            status: runView.run.status === "failed" ? "error" : (runView.run.status as SubAgentInfo["status"]),
+            stepCount: runView.steps?.length ?? activeSubAgent.stepCount,
+          };
+        }
+
+        const completedAsstMsg: ChatMessage = {
+          id: `sa-run-${runView.run.id}`,
+          conversationId: activeConversation?.id ?? "",
+          role: "assistant",
+          steps: runView.steps || [],
+          content: currentLanguage === "fr"
+            ? `**${activeSubAgent.name}** exécute la directive : "${content}".`
+            : `**${activeSubAgent.name}** is executing directive: "${content}".`,
+          isGenerating: runView.run.status === "running",
+          createdAt: new Date().toISOString(),
+        };
+
+        subAgentMessagesMap = {
+          ...subAgentMessagesMap,
+          [activeSubAgent.id]: [...currentThread, userMsg, completedAsstMsg],
+        };
+      } catch (err) {
+        console.error("Directive dispatch failed:", err);
+        const errorMsg: ChatMessage = {
+          id: `sa-${activeSubAgent.id}-err-${Date.now()}`,
+          conversationId: activeConversation?.id ?? "",
+          role: "assistant",
+          content: currentLanguage === "fr"
+            ? `Erreur lors de l'envoi de la directive à **${activeSubAgent.name}** : ${normalizeError(err)}`
+            : `Error dispatching directive to **${activeSubAgent.name}**: ${normalizeError(err)}`,
+          isGenerating: false,
+          createdAt: new Date().toISOString(),
+        };
+        subAgentMessagesMap = {
+          ...subAgentMessagesMap,
+          [activeSubAgent.id]: [...currentThread, userMsg, errorMsg],
+        };
+      }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+      window.dispatchEvent(
+        new CustomEvent("aro:agent-directive", {
+          detail: { agentId: activeSubAgent.id, directive: content, envelope },
+        })
+      );
+      return;
+    }
     const isForced = typeof forcedContent === "string";
     const content = (isForced ? forcedContent : input).trim();
     const filesToSend = isForced ? [] : attachedFiles;
@@ -8256,7 +8601,7 @@
         modelId: modelId,
         provider: provider,
         attachments: attachmentRefs,
-        webAccess,
+        webAccess: getEffectiveWebAccess(),
         searchSettings: settings?.search ?? null,
       }, assistantMsgId);
       const endTime = performance.now();
@@ -9832,6 +10177,8 @@
     invitationToken={cloudInvitationToken}
     bind:email={cloudAuthEmail}
     bind:password={cloudAuthPassword}
+    bind:totpCode={cloudAuthTotpCode}
+    bind:resetToken={cloudAuthResetToken}
     bind:name={cloudAuthName}
     bind:organizationName={cloudAuthOrgName}
     bind:showPassword
@@ -9842,6 +10189,7 @@
     onSubmit={submitCloudAuth}
     onToggleMode={toggleCloudAuthMode}
     onForgotPassword={handleForgotPassword}
+    onResetPassword={() => (cloudAuthMode = "reset-password")}
   />
 {:else}
 <main
@@ -10483,11 +10831,16 @@
 <ConversationTopbar
       {activeConversation}
       {activeProject}
+      {activeSubAgent}
+      onExitSubAgent={() => (activeSubAgent = null)}
       {conversationPersonalities}
       {selectedPersonalityId}
       personalities={allPersonalities}
       conversationCustomAgents={conversationCustomAgents}
       customAgentsList={customAgentsList}
+      activePermissionMode={activePermissionPreset}
+      {activePermissionLabel}
+      onOpenPermissionSettings={() => openSettings("permissions")}
       theme={currentTheme}
       language={currentLanguage}
       labels={t}
@@ -10531,8 +10884,12 @@
 <ConversationView
       bind:conversationContainer
       bind:messagesEnd
+      {activeSubAgent}
+      allAgentRuns={agentRuns}
+      onSelectSubAgent={selectSubAgentThread}
+      onExitSubAgent={() => (activeSubAgent = null)}
       {loading}
-      {messages}
+      messages={displayedMessages}
       labels={t}
       language={currentLanguage}
       theme={currentTheme}
@@ -10631,7 +10988,7 @@
       </div>
     {/if}
 
-<Composer
+    <Composer
       labels={t}
       language={currentLanguage}
       bind:errorMessage
@@ -10641,7 +10998,8 @@
       {attachedFiles}
       {cloudWriteLocked}
       {cloudAuthenticated}
-      messagesCount={messages.length}
+      messagesCount={displayedMessages.length}
+      {activeSubAgent}
       {webAccess}
       {voiceModeOptions}
       {voiceInputMode}

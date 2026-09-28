@@ -1,139 +1,177 @@
-# TEST READY: ARO AI Workspace Key Features E2E Test Suite
+# TEST READY: ARO Autonomous Multi-Agent & Tooling Opaque-Box E2E Test Suite
 
-**Status**: READY (counts re-verified 2026-09-06)
-**Date**: 2026-09-04T17:55:00Z
-**Author**: `teamwork_preview_test_writer_e2e_1`
-**Target File**: `apps/desktop/src/test/e2e-workspace-features.svelte.test.ts`
+**Status**: READY  
+**Date**: 2026-09-24T10:56:00Z  
+**Author**: `teamwork_preview_test_writer_e2e`  
+**Target Suite**: `tests/e2e/`  
+**Execution Command**: `npm run test:e2e:opaque` (or `npx vitest run tests/e2e`)  
+**Pass Rate**: **100% (127 / 127 tests passed)**
 
 ---
 
 ## 1. Executive Summary
 
-The comprehensive, requirement-driven, opaque-box test suite for the ARO AI Workspace Key Features (Milestones M1–M5) is fully written, validated, and passing at 100%.
+The comprehensive, requirement-driven, opaque-box E2E test suite for the ARO Architecture (Autonomous Multi-Agent Collaboration, Advanced Tooling, Security Sandboxing, and Observability) is fully implemented, verified, and passing at 100%.
 
-- **Test Suite**: `apps/desktop/src/test/e2e-workspace-features.svelte.test.ts` (1,804 lines measured)
-- **Total Test Cases in Suite**: **170 tests** (all passing)
-- **Component Test Suite Status**: **10 files passed, 227 tests passed (100%)** (re-measured 2026-09-06; hardening suites + `Composer.mentions` included)
-- **Unit Test Suite Status**: **22 files passed, 207 tests passed (100%)** (re-measured 2026-09-07, including mention-model.test.ts and confirm.test.ts)
-- **Typecheck Status**: `svelte-check` reports **0 errors, 35 warnings** (unused exports only, re-measured 2026-09-06)
+- **Test Suite Location**: `tests/e2e/`
+- **Total Test Cases**: **127 tests** (0 failed, 127 passed)
+- **Suite Execution Time**: ~750ms
+- **Independent Test Harness**: Clean opaque-box helpers in `tests/e2e/helpers/` verifying system contracts without coupling to private internal implementation details.
 
 ---
 
 ## 2. Feature Inventory Coverage Matrix (Tiers 1–4)
 
-| # | Feature | Requirement Source | Tier 1 (Happy Path) | Tier 2 (Boundaries) | Tier 3 (Cross-Feature) | Tier 4 (Workflows) | Status |
-|---|---------|-------------------|:-------------------:|:-------------------:|:----------------------:|:------------------:|:------:|
-| 1 | **F1.1** Visual Diff Split & Unified with Syntax Highlighting | ORIGINAL_REQUEST §R1 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 2 | **F1.2** Direct Diff Actions (Apply, Reject, Copy) | ORIGINAL_REQUEST §R1 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 3 | **F1.3** Disk Writing & Workspace Tree Update | ORIGINAL_REQUEST §R1, AC2 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 4 | **F1.4** Artifacts Card List in RightPanel Outputs | ORIGINAL_REQUEST §R1, AC1 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 5 | **F1.5** Chat Diff Blocks Preview & Inspection | ORIGINAL_REQUEST §R1 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 6 | **F2.1** Extended TaskStep Schema (status & error) | ORIGINAL_REQUEST §R2 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 7 | **F2.2** Dynamic Plan Checklist with 4-state Indicators | ORIGINAL_REQUEST §R2, AC3 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 8 | **F2.3** Manual Task Addition & Status Cycling | ORIGINAL_REQUEST §R2, AC3 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 9 | **F2.4** AI Roadmap Generation Trigger | ORIGINAL_REQUEST §R2 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 10 | **F2.5** Real-time Plan Sync (`aro:plans-updated`) | ORIGINAL_REQUEST §R2 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 11 | **F3.1** Multi-Agent Lanes Display (No Empty Screen) | ORIGINAL_REQUEST §R3, AC4 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 12 | **F3.2** Synchronized Live Activity Counters | ORIGINAL_REQUEST §R3 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 13 | **F3.3** AgentLiveLogViewer in Subagents Tab | ORIGINAL_REQUEST §R3 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 14 | **F4.1** Pure Mention Model Logic | ORIGINAL_REQUEST §R4 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 15 | **F4.2** Composer @ Mention Popover UI & Keys | ORIGINAL_REQUEST §R4 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| 16 | **F4.3** Workspace File Indexing & Context Injection | ORIGINAL_REQUEST §R4 | 5 / 5 | 5 / 5 | ✓ | ✓ | **PASSED** |
-| **Total** | **All 16 Features** | | **80 tests** | **80 tests** | **6 tests** | **4 tests** | **170 / 170 (100%)** |
-
-> **M4 & M5 Status: SHIPPED & VERIFIED**. Shipped code in `features/chat/mention-model.ts`, `Composer.svelte` (@ popover UI with keyboard navigation & a11y compliance), and `App.svelte` (workspace indexing, prop propagation, context injection in `submitMessage`). All test suites import and test the actual shipped code directly.
+| # | Feature | Requirement | Tier 1 (Coverage) | Tier 2 (Boundaries) | Tier 3 (Interactions) | Tier 4 (Workload) | Status |
+|---|---------|-------------|:-----------------:|:-------------------:|:---------------------:|:-----------------:|:------:|
+| 1 | Cognitive Memory Persistence Schema | R1 | 5 / 5 | 5 / 5 | Combo 1, 2, 5 | Scenario 1, 3, 5 | **PASSED** |
+| 2 | Sub-Agent Asynchronous Execution Loop | R1 | 5 / 5 | 5 / 5 | Combo 1, 3, 4, 6 | Scenario 1, 5 | **PASSED** |
+| 3 | Cloud Worker Delegation Handling | R1 | 5 / 5 | 5 / 5 | Combo 5, 6 | Scenario 5 | **PASSED** |
+| 4 | Persistent Cognitive Memory IPC & API | R1 | 5 / 5 | 5 / 5 | Combo 2 | Scenario 3, 5 | **PASSED** |
+| 5 | Kernel-Grade Tool Authorization Guard | R2 | 5 / 5 | 5 / 5 | Combo 3, 7, 8, 9 | Scenario 1, 2, 4, 6 | **PASSED** |
+| 6 | Strict Workspace Path Confinement | R2 | 5 / 5 | 5 / 5 | Combo 7 | Scenario 1, 2, 6 | **PASSED** |
+| 7 | Code & Shell Execution Sandboxing | R2 | 5 / 5 | 5 / 5 | Combo 8 | Scenario 2, 4, 6 | **PASSED** |
+| 8 | Tool Registry Catalogue Parity | R2 | 5 / 5 | 5 / 5 | Combo 9 | Scenario 2, 6 | **PASSED** |
+| 9 | Svelte Typecheck Integrity | R3/R4 | 5 / 5 | 5 / 5 | Combo 10 | — | **PASSED** |
+| 10 | Persistent Sub-Agent UI Thread | R3 | 5 / 5 | 5 / 5 | Combo 4, 10, 11 | Scenario 1, 3, 5 | **PASSED** |
+| 11 | Observability & Breadcrumbs | R3 | 5 / 5 | 5 / 5 | Combo 11 | Scenario 1, 2 | **PASSED** |
+| **Total** | **All 11 Features** | | **55 tests** | **55 tests** | **11 tests** | **6 tests** | **127 / 127 (100%)** |
 
 ---
 
 ## 3. Detailed Tier Breakdown
 
-### Tier 1: Feature Coverage (Isolated Happy Paths) — 80 Tests
-- **F1.1**: Renders unified diff rows, computes line diff preserving sequence, generates split diff rows with aligned columns, parses unified git diff patches, renders line numbers and +/- signs.
-- **F1.2**: Triggers onAccept callback, triggers onReject callback, writes code to navigator clipboard, supports language localization (FR/EN), updates visual state from pending to applied.
-- **F1.3**: Dispatches `aro:workspace-tree-refresh`, normalizes relative workspace paths, handles parent directory creation, calculates byte count and change deltas, updates tree counts.
-- **F1.4**: Renders empty state when no artifacts, displays artifact title and file path, renders delta pills (+N -M), exposes quick preview/apply action buttons, selects artifact for detail view.
-- **F1.5**: Detects `diff` fences in markdown, extracts `filepath` attributes from fence headers, triggers inspect button to side panel, copies code from chat, applies syntax highlighting.
-- **F2.1**: Supports 4 statuses (`pending`, `in_progress`, `completed`, `error`), preserves error message strings, backward compatibility for `completed: true` -> `completed`, backward compatibility for `completed: false` -> `pending`, validates ID and content invariants.
-- **F2.2**: Renders empty box for pending, active indicator badge for in_progress, checked box with strikethrough for completed, red error badge with tooltip for error, calculates progress ring stroke offset.
-- **F2.3**: Adds task via text input, cycles status (`pending` -> `in_progress` -> `completed` -> `error` -> `pending`), edits task text, deletes task, updates plan status to completed.
-- **F2.4**: Renders AI roadmap trigger in empty state, dispatches structured prompt to assistant, displays busy spinner state, populates plan checklist on generation, disables button while generating.
-- **F2.5**: Registers window listener for `aro:plans-updated`, reloads plans on event reception, filters to active conversation ID, preserves selected plan across reload, cleans up listener on unmount.
-- **F3.1**: Synthesizes default virtual lane for unassigned runs preventing empty screen, renders lane cards with priority pill, toggles collapse/expand, triggers pause/resume actions, renders individual runs with duration.
-- **F3.2**: Aggregates active running counter, aggregates queued counter, aggregates done counter, synchronizes with orchestrator snapshot when conversation runs are empty, updates dynamically on status transition.
-- **F3.3**: Renders live terminal viewer in subagents tab, maps agent thoughts/tools/errors to LogEntries, filters by severity (all/tool/error/info), searches query in real time, triggers onClear callback.
-- **F4.1**: Detects `@query` at line start, detects `@query` after whitespace/newline, ranks exact match before prefix/substring matches, applies mention replacement with trailing space, extracts all `@paths`.
-- **F4.2**: Displays popover on `@` trigger, navigates suggestions via `ArrowDown` with cyclic wrap, navigates via `ArrowUp` with cyclic wrap, confirms selection on `Enter`/`Tab`, dismisses popover on `Escape`.
-- **F4.3**: Flattens workspace tree to relative paths, extracts extension and directory flag, injects referenced files as `local-reference` attachments, deduplicates multiple mentions, preserves inline `@path` tokens.
+### Tier 1: Feature Coverage (Isolated Requirement Contracts) — 55 Tests
+- **Target File**: `tests/e2e/tier1-feature-coverage.test.ts`
+- **F1 (Cognitive Memory)**:
+  - T1.1.1: Default empty memory context schema with `AgentMemoryContext` invariants.
+  - T1.1.2: Updating scratchpad preserves text and updates timestamp.
+  - T1.1.3: Recording structured findings with category ("discovery", "fact", "constraint", "decision") and source tool.
+  - T1.1.4: Recording output artifact references with kind and URI.
+  - T1.1.5: Strict conversation isolation between different sessions.
+- **F2 (Sub-Agent Execution Loop)**:
+  - T1.2.1: Lifecycle progression from `queued` to `running` to `completed`.
+  - T1.2.2: Multi-step asynchronous execution beyond step 2 without freezing.
+  - T1.2.3: Dynamic updates to `currentThought` and `currentTool`.
+  - T1.2.4: Tool failure handling, transition to `failed`, and error escalation.
+  - T1.2.5: Parallel execution across multiple sub-agents in independent lanes.
+- **F3 (Cloud Worker Delegation)**:
+  - T1.3.1: Task delegation envelope creation (`task_delegation`).
+  - T1.3.2: Task progress envelope with structured progress data (`task_progress`).
+  - T1.3.3: Task result delivery with artifacts (`task_result`).
+  - T1.3.4: Peer collaboration routing between sub-agents (`peer_collaboration`).
+  - T1.3.5: Clarification request and response workflow with correlation IDs.
+- **F4 (Memory IPC & Sync)**:
+  - T1.4.1: `agent_get_memory` retrieves persistent memory with high fidelity.
+  - T1.4.2: `agent_save_memory` persists external modifications.
+  - T1.4.3: `agent_dispatch_directive` queues execution run and updates ledger.
+  - T1.4.4: Memory persistence across cache invalidation / simulated app restart.
+  - T1.4.5: `clearConversation` cleanly purges conversation memory and ledger.
+- **F5 (Tool Authorization Guard)**:
+  - T1.5.1: Standard preset allows read/write, flags shell for confirmation.
+  - T1.5.2: Read-Only preset allows read, strictly blocks write and shell.
+  - T1.5.3: Sandbox preset strictly blocks filesystem, shell, and network.
+  - T1.5.4: Developer preset grants full access across read, write, shell, network.
+  - T1.5.5: Custom profile enforces granular per-category permissions.
+- **F6 (Workspace Confinement)**:
+  - T1.6.1: Resolves valid relative paths inside workspace root.
+  - T1.6.2: Blocks parent directory traversal attacks (`../`).
+  - T1.6.3: Blocks Windows-style backslash traversal (`..\..\`).
+  - T1.6.4: Fails closed when workspace root path is missing or empty.
+  - T1.6.5: Blocks absolute paths escaping designated workspace root.
+- **F7 (Shell & Code Sandboxing)**:
+  - T1.7.1: Environment scrubbing strips sensitive API keys, secrets, tokens.
+  - T1.7.2: Preserves essential operating system environment variables.
+  - T1.7.3: Enforces execution timeout limits on runaway commands.
+  - T1.7.4: Clamps excessive stdout/stderr output buffers with truncation warnings.
+  - T1.7.5: Captures non-zero exit codes and stderr without crashing host process.
+- **F8 (Tool Registry Parity)**:
+  - T1.8.1: Parity of core workspace tools (`workspace.read`, `workspace.write`, `workspace.delete`, `workspace.replace_in_files`, `workspace.git_diff`, `workspace.list_dir`).
+  - T1.8.2: Parity of artifact tools (`artifact.create`, `artifact.update`, `artifact.list`).
+  - T1.8.3: Parity of execution tools (`core.code.execute`, `core.shell.execute`).
+  - T1.8.4: Schema validation for required tool parameters.
+  - T1.8.5: Duplicate tool registration rejection.
+- **F9 (Svelte Typecheck Integrity)**:
+  - T1.9.1: TaskStep validation and boolean normalization.
+  - T1.9.2: Plan progress calculation and percentage math.
+  - T1.9.3: Status cycling across all 4 valid task statuses.
+  - T1.9.4: AgentRun and AgentLaneView schema compliance.
+  - T1.9.5: AgentMessageEnvelope formatting preserving actions.
+- **F10 (Persistent Sub-Agent UI Thread)**:
+  - T1.10.1: Extracting sub-agents from message steps (`extractMessageAgents`).
+  - T1.10.2: Associating sub-agent runs with parent message identifiers.
+  - T1.10.3: Dynamic mapping of failed and waiting runs.
+  - T1.10.4: Formatted memory context prompt injection.
+  - T1.10.5: Compiling permission directives for model prompt injection.
+- **F11 (Observability & Breadcrumbs)**:
+  - T1.11.1: Synthesizing agent lanes preventing empty screens.
+  - T1.11.2: Calculating live activity counters.
+  - T1.11.3: Snapshot fallback for initial conversation state.
+  - T1.11.4: Dynamic Composer placeholder based on active sub-agent.
+  - T1.11.5: Hierarchical breadcrumbs and inspection card formatting.
 
-### Tier 2: Boundary and Corner Cases (Adversarial Verification) — 80 Tests
-- Diff between empty strings, identical files, complete file replacements, 1,000+ line diff stress, unicode/emojis/tabs.
-- Actions on empty file paths, idempotent rejections, clipboard permission rejections, rapid double-click debounce, 0-change no-ops.
-- Path traversal rejection (`../../`), slash normalization (`\` -> `/`), accented and space paths, deeply nested directories (7 levels), zero-byte files.
-- 120+ artifacts list, missing metadata fallbacks, unknown file extensions, negative/NaN deltas, duplicate artifact IDs.
-- Unclosed diff blocks, empty fence blocks, nested code fences, malformed `@@` headers, HTML/XSS tag sanitization.
-- Invalid status string normalization, null error fields, 5,000-char error messages, empty ID generation, empty task text.
-- 0-task plans, 120-task plans, 1,000-char task text, division-by-zero avoidance on 0 tasks, 100% error task plans.
-- Whitespace-only task inputs, duplicate step texts, rapid status cycling bursts, deleting last task, script injection in task text.
-- Concurrent AI roadmap debounce, network offline recovery, empty AI response preservation, missing conversation ID guard, language toggle mid-flight.
-- Debounced rapid bursts of `aro:plans-updated`, foreign conversation filtering, null event payload guard, IPC reload failure safety, detail view preservation.
-- Empty laneId fallback, undefined status defaulting to queued, invalid priority fallback, missing startedAt timestamp (`--`), 60+ runs in single lane.
-- Negative counter clamping to 0, null snapshot fallback, 170,000 extreme counter counts, direct queued-to-failed skip, duplicate run ID deduplication.
-- 10,000 log entries stress test, ANSI escape sequence sanitization, regex metacharacter search query escaping, undefined step fields, multiline stack traces and JSON objects.
-- Email address rejection (`user@example.com`), cursor placed between multiple mentions, dotted/dashed paths, Windows backslash mention paths, `@` at end of 10,000-char text.
-- Empty workspace entries list, 500-char query returning 0 matches, navigation on empty suggestions, rapid keydown flooding, partially scrolled popover clicks.
-- Deep 10+ nested folder levels, 0-byte files, extensionless files (`Dockerfile`, `Makefile`), 20 distinct mentions in one prompt, non-existent ghost files.
+### Tier 2: Boundary & Corner Cases (Adversarial Verification) — 55 Tests
+- **Target File**: `tests/e2e/tier2-boundary-corner.test.ts`
+- **F1**: Empty/whitespace scratchpads, 100,000-character massive scratchpad, unicode/emoji findings, empty finding rejection, epoch 0 and distant future timestamps.
+- **F2**: 0-step runs, maxSteps cap enforcement, instant cancellation handling, null thoughts/tools, high step-count stress test.
+- **F3**: Self-delegation detection and rejection, empty payload validation, 150+ suggested actions, 10-level nested parent message chain, broadcast message delivery.
+- **F4**: Non-existent conversation query fallback, empty ID rejection, concurrent saves, corrupt storage recovery, missing IPC argument handling.
+- **F5**: Tool name whitespace/casing normalization, empty tool rejection, explicit denied list override, full lockdown profile, missing custom profile guard.
+- **F6**: Null byte injection (`\0`), URL-encoded traversal (`%2e%2e%2f`), Windows drive hopping (`D:\`), redundant relative dot normalization, root-targeting resolution.
+- **F7**: 1,000+ env keys scrubbed under 50ms, compound secret substring stripping, 500-byte output buffer clamp, negative timeout rejection, empty command execution handling.
+- **F8**: Tool name format validation, missing description rejection, unknown tool query safety, explicit override flag, 50 consecutive tool registrations.
+- **F9**: Empty task text rejection, 0-task plan percentage calculation (0% NaN guard), 100% error plan calculation, 10,000-character error truncation, invalid status normalization.
+- **F10**: Empty message steps handling, 20 duplicate step deduplication, unicode/HTML emoji sanitization in thoughts, missing startedAt timestamp fallback, 20 distinct sub-agents in single conversation.
+- **F11**: Null conversationId lane synthesis, negative snapshot counter clamping, 100,000 massive run counts, empty title breadcrumb fallback, breadcrumb generation without tool name.
 
-### Tier 3: Cross-Feature Combinations — 6 Tests
-1. **Combo 1**: Diff Apply + Plan Task Completion Sync (applying diff marks roadmap step completed and recalculates progress).
-2. **Combo 2**: @ Mention in Composer + Artifact Creation (referencing file injects context and generates actionable artifact card).
-3. **Combo 3**: AI Roadmap Trigger + Subagent Execution + Live Log Streaming (roadmap click starts agent run with live step logs).
-4. **Combo 4**: Multi-Agent Lane Status Change + Synchronized Banner Counters (pausing lane updates running and waiting counters).
-5. **Combo 5**: Real-Time `aro:plans-updated` + Circular Progress Ring Sync (external plan sync recalculates ring percentage).
-6. **Combo 6**: Diff Split/Unified Toggle + Direct Copy + Disk Write Simulation (split review -> unified -> copy -> disk write).
+### Tier 3: Cross-Feature Combinations — 11 Tests
+- **Target File**: `tests/e2e/tier3-cross-feature.test.ts`
+- **Combo 1 (F1 + F2)**: Async sub-agent loop updates scratchpad and accumulates findings in cognitive memory.
+- **Combo 2 (F1 + F4)**: Memory saved via IPC survives cache eviction and reloads with 100% data fidelity.
+- **Combo 3 (F2 + F5)**: Sub-agent in Read-Only mode attempting file write is blocked by authorization guard and dispatches error escalation envelope.
+- **Combo 4 (F2 + F10)**: Asynchronous sub-agent state transitions reflect in extracted message agents and UI thread model.
+- **Combo 5 (F3 + F1)**: Inbound delegation envelope automatically appends to sub-agent's cognitive memory ledger.
+- **Combo 6 (F3 + F2)**: Delegation envelope triggers sub-agent run queueing, async execution, and result delivery.
+- **Combo 7 (F5 + F6)**: Tool permitted by Standard preset is blocked when workspace path confinement is breached.
+- **Combo 8 (F5 + F7)**: Developer preset authorizes shell execution, executed under scrubbed environment.
+- **Combo 9 (F5 + F8)**: Tool Authorization Guard validates against catalogue tools and blocks uncatalogued tools.
+- **Combo 10 (F9 + F10)**: Validated TaskStep status transitions synchronize with sub-agent execution state in UI thread.
+- **Combo 11 (F10 + F11)**: Selecting active sub-agent updates Composer dynamic placeholder and hierarchical breadcrumb path.
 
-### Tier 4: Real-World Application Scenarios — 4 Tests
-1. **Scenario 1**: End-to-End Feature Development Lifecycle (`Roadmap -> Plan -> Diff -> Apply -> Done`).
-2. **Scenario 2**: Multi-Agent Debugging & Log Inspection Workflow (`Concurrent runs -> Lanes -> Error log inspection -> Completion`).
-3. **Scenario 3**: Targeted Context Injection & Code Refactoring via @ Mentions (`@src/App.svelte mention -> Attachment injection -> Diff review`).
-4. **Scenario 4**: Error Recovery & Plan Status Cycling under Tool Failure (`Tool failure -> Error status -> Log inspection -> Status cycling to completed`).
+### Tier 4: Real-World Application Scenarios — 6 Tests
+- **Target File**: `tests/e2e/tier4-application-scenarios.test.ts`
+- **Scenario 1 (Autonomous Multi-Agent Code Audit - High)**: Orchestrator delegates security audit; auditor operates in Read-Only mode under path confinement, reads source files, documents findings, produces report artifact, reflects in breadcrumbs and inspection card, and returns result envelope.
+- **Scenario 2 (Read-Only Sandbox Exploration - Medium)**: Sandbox agent attempts write, shell, network, and local filesystem tools; all are intercepted and rejected closed by guard while safe context querying succeeds; inspection logs aggregate security events.
+- **Scenario 3 (State Recovery Across Restart - High)**: Multi-agent conversation with Backend and Frontend Leads accumulates scratchpads, findings, artifacts, and peer messages; simulated complete app restart with memory wipe; IPC rehydrates 100% of state with zero data loss.
+- **Scenario 4 (Sandboxed Code Execution with Secret Scrubbing - Medium)**: Developer agent runs tests; contaminated environment with API keys, tokens, and DB URLs is scrubbed before process execution; process completes cleanly without secret leakage.
+- **Scenario 5 (Complex Collaborative Task with Artifact Handover - High)**: Orchestrator delegates architecture to Architect Agent; Architect generates specification artifact; hands over to Implementation Agent via peer collaboration; Implementation Agent executes code steps, produces code artifact, and delivers final result to Orchestrator.
+- **Scenario 6 (Full Permission Escalation Prevention - High)**: Adversarial agent attempts 6 distinct privilege escalation vectors (shell under Read-Only, directory traversal to system files, null byte bypass, uncatalogued shadow tools, unauthorized deletion, and env secret exfiltration); all vectors are neutralized.
 
 ---
 
-## 4. Verification Commands & Outputs
+## 4. Verification Output
 
 ```powershell
-# 1. Component & E2E Test Suite
-npm --workspace @aro/desktop run test:components
-# Result (2026-09-06): 10 test files passed, 227 tests passed (100% success)
+> npm run test:e2e:opaque
 
-# 2. Unit Test Suite
-npm --workspace @aro/desktop run test:unit
-# Result (2026-09-07): 22 test files passed, 207 tests passed (100% success)
+> aro@0.1.0 test:e2e:opaque
+> vitest run tests/e2e
 
-# 3. TypeScript & Svelte Type Checking
-npm --workspace @aro/desktop run check
-# Result (2026-09-06): 0 errors, 0 warnings
+ RUN  v4.1.11 C:/Users/Stagiaire/Documents/Amadou PGC/Prs/Aro
 
-# 4. Rust workspace (incl. all targets: bins, libs, tests)
-cargo check --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings   # clean
-cargo test -p aro-api            # 38 passed (incl. RFC 6238 TOTP vectors)
-cargo test -p aro-memory --lib   # 9 passed
-cargo test -p aro-runtime --lib  # 15 passed
-cargo test -p aro-tools          # 16 passed (incl. traversal + shell-guard tests)
-cargo test -p aro-desktop        # 30 passed
-cargo test -p aro-core -p aro-skills
+ ✓ tests/e2e/tier3-cross-feature.test.ts (11 tests) 77ms
+ ✓ tests/e2e/tier4-application-scenarios.test.ts (6 tests) 107ms
+ ✓ tests/e2e/tier2-boundary-corner.test.ts (55 tests) 140ms
+ ✓ tests/e2e/tier1-feature-coverage.test.ts (55 tests) 184ms
 
-# 5. Playwright e2e (needs vite :1420 running)
-npm --workspace @aro/desktop run test:e2e
-# Result (2026-09-06): 4 passed (auth shell incl. visual snapshots,
-# snapshots regenerated on this machine via test:visual:update)
+ Test Files  4 passed (4)
+      Tests  127 passed (127)
+   Start at  12:55:53
+   Duration  765ms
 ```
 
 ---
 
-## 6. Verification Gate Status
+## 5. Verification Gate Status
 
-The test suite is **fully operational, independent, self-contained**, and ready to continuously guard regressions as workers iterate on subsequent milestones.
-
-> **Gate scope**: All milestones M1–M5 are complete. Full test suite execution: 0 svelte-check errors, 100% unit tests (21 files, 200 passed), 100% component tests (10 files, 227 passed), cargo check and tests (workspace) 100% passing. Hardening suites (`*.adversarial.test.ts`, `challenger-m2-*`, `RightPanel.adversarial.svelte.test.ts`) are included in the counts and all passing.
+The Opaque-Box E2E Test Suite is **READY**, independent, self-contained, and enforces all architectural, security, and multi-agent contracts defined in `ORIGINAL_REQUEST.md`, `PROJECT.md`, and `TEST_INFRA.md`.

@@ -26,19 +26,18 @@
     "test:unit": "npm --workspace @aro/desktop run test:unit",
     "test:components": "npm --workspace @aro/desktop run test:components",
     "test:e2e": "npm --workspace @aro/desktop run test:e2e",
+    "test:e2e:opaque": "vitest run tests/e2e",
     "test:visual:update": "npm --workspace @aro/desktop run test:visual:update",
     "test:frontend": "npm --workspace @aro/desktop run test:frontend",
     "lint:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",
     "test:rust": "cargo test --workspace",
     "smoke:api": "powershell -ExecutionPolicy Bypass -File scripts/smoke-api.ps1",
     "smoke:redis": "powershell -ExecutionPolicy Bypass -File scripts/smoke-redis.ps1",
-    "doctor": "powershell -ExecutionPolicy Bypass -File scripts/doctor.ps1"
+    "doctor": "powershell -ExecutionPolicy Bypass -File scripts/doctor.ps1",
+    "browser:sidecar": "node scripts/fetch-browser-sidecar.mjs"
   },
   "engines": {
     "node": ">=24",
     "npm": ">=11"
-  },
-  "overrides": {
-    "react": "19.2.3"
   }
 }

@@ -1178,10 +1178,8 @@ impl ModelProvider for OllamaProvider {
     }
 
     fn max_tokens(&self) -> u32 {
-        let profile = aro_core::resolve_model_profile(
-            &self.settings.model_id,
-            &ModelProviderKind::Ollama,
-        );
+        let profile =
+            aro_core::resolve_model_profile(&self.settings.model_id, &ModelProviderKind::Ollama);
         if self.settings.max_tokens >= 512 {
             self.settings.max_tokens.max(profile.max_output_tokens)
         } else {
@@ -1394,10 +1392,8 @@ impl ModelProvider for LlamaCppProvider {
     }
 
     fn max_tokens(&self) -> u32 {
-        let profile = aro_core::resolve_model_profile(
-            &self.settings.model_id,
-            &ModelProviderKind::LlamaCpp,
-        );
+        let profile =
+            aro_core::resolve_model_profile(&self.settings.model_id, &ModelProviderKind::LlamaCpp);
         if self.settings.max_tokens >= 512 {
             self.settings.max_tokens.max(profile.max_output_tokens)
         } else {
@@ -1523,7 +1519,10 @@ async fn parse_anthropic_sse(
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
             let block_type = value.get("type").and_then(|value| value.as_str());
             if block_type == Some("content_block_delta") {
-                if let Some(thinking) = value.pointer("/delta/thinking").and_then(|value| value.as_str()) {
+                if let Some(thinking) = value
+                    .pointer("/delta/thinking")
+                    .and_then(|value| value.as_str())
+                {
                     if !thinking.is_empty() {
                         if !in_thinking {
                             in_thinking = true;

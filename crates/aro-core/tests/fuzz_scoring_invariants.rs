@@ -1,13 +1,11 @@
 use aro_core::conversation::{ChatMessage, MessageRole};
 use aro_core::memory::{
-    compute_initial_salience, compute_memory_utility, compute_recency_decay,
-    Episode, EpisodeSummary, MemoryCategory, WorkingMemoryBuffer, EBBINGHAUS_HALF_LIFE_HOURS,
+    compute_initial_salience, compute_memory_utility, compute_recency_decay, Episode,
+    EpisodeSummary, MemoryCategory, WorkingMemoryBuffer, EBBINGHAUS_HALF_LIFE_HOURS,
 };
 
 use chrono::{Duration, TimeZone, Utc};
 use uuid::Uuid;
-
-
 
 // ============================================================================
 // 1. Initial Salience Fuzzing & Invariants
@@ -43,7 +41,11 @@ fn test_fuzz_salience_empty_and_whitespace_variations() {
                 );
 
                 if pinned {
-                    assert!(score >= 0.85, "Pinned empty input must be at least 0.85, got {}", score);
+                    assert!(
+                        score >= 0.85,
+                        "Pinned empty input must be at least 0.85, got {}",
+                        score
+                    );
                 }
             }
         }
@@ -87,21 +89,35 @@ fn test_fuzz_salience_gigantic_text() {
 
     assert!(!score_unpinned.is_nan());
     // 0.35 (base) + 0.10 (technical) + 0.15 (rule: 'always') + 0.15 (cmd: 'remember') + 0.05 (2 entities out of 10 words) = 0.80
-    assert!((score_unpinned - 0.80).abs() < 1e-5, "Expected 0.80 for unpinned technical text, got {}", score_unpinned);
+    assert!(
+        (score_unpinned - 0.80).abs() < 1e-5,
+        "Expected 0.80 for unpinned technical text, got {}",
+        score_unpinned
+    );
 
     let score_pinned = compute_initial_salience(&gigantic, true, MemoryCategory::Technical);
-    assert_eq!(score_pinned, 1.0, "Pinned gigantic text with boosts must clamp to 1.0");
+    assert_eq!(
+        score_pinned, 1.0,
+        "Pinned gigantic text with boosts must clamp to 1.0"
+    );
 
-    assert!(duration.as_millis() < 2000, "Gigantic text salience must complete within 2s, took {:?}", duration);
+    assert!(
+        duration.as_millis() < 2000,
+        "Gigantic text salience must complete within 2s, took {:?}",
+        duration
+    );
 }
-
 
 #[test]
 fn test_fuzz_salience_extreme_entity_densities() {
     // 0% entity density (all lowercase plain words)
     let zero_density = "the quick brown fox jumps over the lazy dog repeatedly without stop";
     let score_zero = compute_initial_salience(zero_density, false, MemoryCategory::Personal);
-    assert!((score_zero - 0.40).abs() < 1e-5, "Expected 0.40, got {}", score_zero);
+    assert!(
+        (score_zero - 0.40).abs() < 1e-5,
+        "Expected 0.40, got {}",
+        score_zero
+    );
 
     // 100% entity density via backticks
     let mut backtick_entities = Vec::new();
@@ -109,35 +125,70 @@ fn test_fuzz_salience_extreme_entity_densities() {
         backtick_entities.push(format!("`Entity_{}`", i));
     }
     let full_density_backticks = backtick_entities.join(" ");
-    let score_backticks = compute_initial_salience(&full_density_backticks, false, MemoryCategory::Personal);
-    assert!((score_backticks - 0.55).abs() < 1e-5, "Expected 0.55, got {}", score_backticks);
+    let score_backticks =
+        compute_initial_salience(&full_density_backticks, false, MemoryCategory::Personal);
+    assert!(
+        (score_backticks - 0.55).abs() < 1e-5,
+        "Expected 0.55, got {}",
+        score_backticks
+    );
 
     // 100% entity density via Capitalized words
     let capitalized_words = "Alpha Beta Gamma Delta Epsilon Zeta Eta Theta Iota Kappa Lambda";
     let score_cap = compute_initial_salience(capitalized_words, false, MemoryCategory::Personal);
-    assert!((score_cap - 0.55).abs() < 1e-5, "Expected 0.55, got {}", score_cap);
+    assert!(
+        (score_cap - 0.55).abs() < 1e-5,
+        "Expected 0.55, got {}",
+        score_cap
+    );
 
     // 100% entity density via underscores
     let underscore_words = "foo_bar baz_qux system_init data_point thread_pool cache_l1";
     let score_und = compute_initial_salience(underscore_words, false, MemoryCategory::Personal);
-    assert!((score_und - 0.55).abs() < 1e-5, "Expected 0.55, got {}", score_und);
+    assert!(
+        (score_und - 0.55).abs() < 1e-5,
+        "Expected 0.55, got {}",
+        score_und
+    );
 }
 
 #[test]
 fn test_fuzz_salience_keyword_matrices() {
     let rule_keywords = [
-        "always", "never", "must", "shall", "rule", "constraint",
-        "forbidden", "mandatory", "require", "strictement", "toujours",
-        "jamais", "interdit", "obligatoire", "règle", "regle",
+        "always",
+        "never",
+        "must",
+        "shall",
+        "rule",
+        "constraint",
+        "forbidden",
+        "mandatory",
+        "require",
+        "strictement",
+        "toujours",
+        "jamais",
+        "interdit",
+        "obligatoire",
+        "règle",
+        "regle",
     ];
 
     let command_keywords = [
-        "remember", "don't forget", "do not forget", "keep in mind",
-        "note that", "important", "retiens", "souviens-toi", "n'oublie pas",
-        "mémorise", "memorise",
+        "remember",
+        "don't forget",
+        "do not forget",
+        "keep in mind",
+        "note that",
+        "important",
+        "retiens",
+        "souviens-toi",
+        "n'oublie pas",
+        "mémorise",
+        "memorise",
     ];
 
-    let base_score = compute_initial_salience("plain sentence here", false, MemoryCategory::Personal);
+    let base_score =
+        compute_initial_salience("plain sentence here", false, MemoryCategory::Personal);
     assert!((base_score - 0.40).abs() < 1e-5);
 
     for rk in rule_keywords {
@@ -240,10 +291,21 @@ fn test_fuzz_decay_extreme_past_dates() {
     for offset in past_offsets {
         let last_used = t0 - offset;
         let decay = compute_recency_decay(last_used, t0, false);
-        assert!(!decay.is_nan(), "Decay must not be NaN for extreme past dates");
+        assert!(
+            !decay.is_nan(),
+            "Decay must not be NaN for extreme past dates"
+        );
         assert!(!decay.is_infinite(), "Decay must not be Infinite");
-        assert!((0.0..=1.0).contains(&decay), "Decay must stay in [0.0, 1.0], got {}", decay);
-        assert!(decay < 1e-4, "Decay after 1+ years should be virtually 0.0, got {}", decay);
+        assert!(
+            (0.0..=1.0).contains(&decay),
+            "Decay must stay in [0.0, 1.0], got {}",
+            decay
+        );
+        assert!(
+            decay < 1e-4,
+            "Decay after 1+ years should be virtually 0.0, got {}",
+            decay
+        );
     }
 }
 
@@ -253,21 +315,36 @@ fn test_fuzz_decay_leap_years() {
     let mar_01_2024 = Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
 
     let leap_seconds = (mar_01_2024 - feb_28_2024).num_seconds();
-    assert_eq!(leap_seconds, 48 * 3600, "Leap year Feb 28 to Mar 1 must be 48 hours");
+    assert_eq!(
+        leap_seconds,
+        48 * 3600,
+        "Leap year Feb 28 to Mar 1 must be 48 hours"
+    );
 
     let decay_leap = compute_recency_decay(feb_28_2024, mar_01_2024, false);
     let expected_leap = (-std::f64::consts::LN_2 * 48.0 / EBBINGHAUS_HALF_LIFE_HOURS).exp() as f32;
-    assert!((decay_leap - expected_leap).abs() < 1e-5, "Leap year decay mismatch");
+    assert!(
+        (decay_leap - expected_leap).abs() < 1e-5,
+        "Leap year decay mismatch"
+    );
 
     let feb_28_2023 = Utc.with_ymd_and_hms(2023, 2, 28, 0, 0, 0).unwrap();
     let mar_01_2023 = Utc.with_ymd_and_hms(2023, 3, 1, 0, 0, 0).unwrap();
 
     let non_leap_seconds = (mar_01_2023 - feb_28_2023).num_seconds();
-    assert_eq!(non_leap_seconds, 24 * 3600, "Non-leap year Feb 28 to Mar 1 must be 24 hours");
+    assert_eq!(
+        non_leap_seconds,
+        24 * 3600,
+        "Non-leap year Feb 28 to Mar 1 must be 24 hours"
+    );
 
     let decay_non_leap = compute_recency_decay(feb_28_2023, mar_01_2023, false);
-    let expected_non_leap = (-std::f64::consts::LN_2 * 24.0 / EBBINGHAUS_HALF_LIFE_HOURS).exp() as f32;
-    assert!((decay_non_leap - expected_non_leap).abs() < 1e-5, "Non-leap year decay mismatch");
+    let expected_non_leap =
+        (-std::f64::consts::LN_2 * 24.0 / EBBINGHAUS_HALF_LIFE_HOURS).exp() as f32;
+    assert!(
+        (decay_non_leap - expected_non_leap).abs() < 1e-5,
+        "Non-leap year decay mismatch"
+    );
 }
 
 #[test]
@@ -282,7 +359,11 @@ fn test_fuzz_decay_pinned_immunity_all_scenarios() {
     ];
 
     for d in dates {
-        assert_eq!(compute_recency_decay(d, now, true), 1.0, "Pinned memory must ALWAYS return 1.0");
+        assert_eq!(
+            compute_recency_decay(d, now, true),
+            1.0,
+            "Pinned memory must ALWAYS return 1.0"
+        );
     }
 }
 
@@ -316,7 +397,10 @@ fn test_fuzz_utility_monotonicity_and_strict_invariants() {
                 for i in 0..hybrids.len() - 1 {
                     let u1 = compute_memory_utility(hybrids[i], s, r, c);
                     let u2 = compute_memory_utility(hybrids[i + 1], s, r, c);
-                    assert!(u2 > u1, "Utility must be strictly monotonic in hybrid_score");
+                    assert!(
+                        u2 > u1,
+                        "Utility must be strictly monotonic in hybrid_score"
+                    );
                 }
             }
         }
@@ -328,7 +412,10 @@ fn test_fuzz_utility_monotonicity_and_strict_invariants() {
                 for i in 0..recalls.len() - 1 {
                     let u1 = compute_memory_utility(h, s, r, recalls[i]);
                     let u2 = compute_memory_utility(h, s, r, recalls[i + 1]);
-                    assert!(u2 > u1, "Utility must be strictly monotonic in recall_count");
+                    assert!(
+                        u2 > u1,
+                        "Utility must be strictly monotonic in recall_count"
+                    );
                 }
             }
         }
@@ -341,11 +428,18 @@ fn test_fuzz_utility_boundary_conditions() {
     assert_eq!(u_zero, 0.0, "All-zero inputs must yield 0.0 utility");
 
     let u_zero_recall = compute_memory_utility(1.0, 1.0, 1.0, 0);
-    assert!((u_zero_recall - 0.85).abs() < 1e-5, "Expected 0.85, got {}", u_zero_recall);
+    assert!(
+        (u_zero_recall - 0.85).abs() < 1e-5,
+        "Expected 0.85, got {}",
+        u_zero_recall
+    );
 
     let u_neg_hybrid = compute_memory_utility(-5.0, 0.5, 0.5, 0);
     let u_zero_hybrid = compute_memory_utility(0.0, 0.5, 0.5, 0);
-    assert_eq!(u_neg_hybrid, u_zero_hybrid, "Negative hybrid_score should clamp to 0.0");
+    assert_eq!(
+        u_neg_hybrid, u_zero_hybrid,
+        "Negative hybrid_score should clamp to 0.0"
+    );
 
     let u_max_recall = compute_memory_utility(1.0, 1.0, 1.0, u32::MAX);
     assert!(!u_max_recall.is_nan());
@@ -367,11 +461,7 @@ fn test_fuzz_working_memory_buffer_fifo_eviction() {
     let mut buffer = WorkingMemoryBuffer::with_limits(conv_id, 8, 2400);
 
     for i in 1..=50 {
-        let mut msg = ChatMessage::new(
-            conv_id,
-            MessageRole::User,
-            format!("Turn {}", i),
-        );
+        let mut msg = ChatMessage::new(conv_id, MessageRole::User, format!("Turn {}", i));
         msg.token_estimate = Some(20);
         buffer.push_message(msg);
 
@@ -433,12 +523,23 @@ fn test_fuzz_working_memory_session_variables_and_scratchpad() {
     assert_eq!(buffer.max_turns, 8);
     assert_eq!(buffer.max_tokens, 2400);
 
-    buffer.session_variables.insert("active_file".to_string(), "crates/aro-core/src/memory.rs".to_string());
-    buffer.session_variables.insert("user_mode".to_string(), "expert".to_string());
+    buffer.session_variables.insert(
+        "active_file".to_string(),
+        "crates/aro-core/src/memory.rs".to_string(),
+    );
+    buffer
+        .session_variables
+        .insert("user_mode".to_string(), "expert".to_string());
     buffer.scratchpad = Some("Refactoring in progress...".to_string());
 
-    assert_eq!(buffer.session_variables.get("active_file").unwrap(), "crates/aro-core/src/memory.rs");
-    assert_eq!(buffer.scratchpad.as_deref(), Some("Refactoring in progress..."));
+    assert_eq!(
+        buffer.session_variables.get("active_file").unwrap(),
+        "crates/aro-core/src/memory.rs"
+    );
+    assert_eq!(
+        buffer.scratchpad.as_deref(),
+        Some("Refactoring in progress...")
+    );
 }
 
 // ============================================================================
@@ -457,10 +558,15 @@ fn test_adversarial_salience_extreme_punctuation_and_casing() {
     let uppercase_rules = "ALWAYS NEVER MUST SHALL FORBIDDEN MANDATORY";
     let score_upper = compute_initial_salience(uppercase_rules, false, MemoryCategory::Personal);
     // Base 0.35 + Personal 0.05 + Rule 0.15 + Density 0.15 = 0.70
-    assert!((score_upper - 0.70).abs() < 1e-5, "Expected 0.70 for uppercase rule keywords, got {}", score_upper);
+    assert!(
+        (score_upper - 0.70).abs() < 1e-5,
+        "Expected 0.70 for uppercase rule keywords, got {}",
+        score_upper
+    );
 
     // French accented rule and command keywords
-    let french_text = "Règle stricte: souviens-toi de ne jamais oublier d'appliquer cette contrainte";
+    let french_text =
+        "Règle stricte: souviens-toi de ne jamais oublier d'appliquer cette contrainte";
     let score_french = compute_initial_salience(french_text, false, MemoryCategory::Preference);
     assert!(score_french >= 0.85);
 }
@@ -482,7 +588,10 @@ fn test_adversarial_decay_ancient_history_and_subseconds() {
     // Sub-second elapsed: 500ms
     let half_sec_ago = now - Duration::milliseconds(500);
     let decay_subsecond = compute_recency_decay(half_sec_ago, now, false);
-    assert_eq!(decay_subsecond, 1.0, "Sub-second elapsed time must round to 1.0 (elapsed_seconds <= 0)");
+    assert_eq!(
+        decay_subsecond, 1.0,
+        "Sub-second elapsed time must round to 1.0 (elapsed_seconds <= 0)"
+    );
 }
 
 #[test]
@@ -514,8 +623,15 @@ fn test_adversarial_episode_span_and_contains() {
 
     // Inverted turn range (turn_end < turn_start)
     let ep_inverted = Episode::new(conv_id, 20, 10, "Summary", vec![], vec![], 50);
-    assert_eq!(ep_inverted.turn_span(), 0, "Inverted episode must return 0 span");
-    assert!(!ep_inverted.contains_turn(15), "Inverted episode must contain no turns");
+    assert_eq!(
+        ep_inverted.turn_span(),
+        0,
+        "Inverted episode must return 0 span"
+    );
+    assert!(
+        !ep_inverted.contains_turn(15),
+        "Inverted episode must contain no turns"
+    );
     let summary_inverted = EpisodeSummary::from(&ep_inverted);
     assert_eq!(summary_inverted.turn_start, 20);
     assert_eq!(summary_inverted.turn_end, 10);

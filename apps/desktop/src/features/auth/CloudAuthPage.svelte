@@ -16,6 +16,8 @@
   export let invitationToken: string;
   export let email: string;
   export let password: string;
+  export let totpCode: string = "";
+  export let resetToken: string = "";
   export let name: string;
   export let organizationName: string;
   export let showPassword: boolean;
@@ -26,6 +28,7 @@
   export let onSubmit: () => void | Promise<void>;
   export let onToggleMode: () => void;
   export let onForgotPassword: () => void = () => {};
+  export let onResetPassword: () => void = () => {};
 </script>
 
 <main class="cloud-auth-page">
@@ -60,6 +63,10 @@
             <button class="password-toggle-btn" type="button" on:click={() => (showPassword = !showPassword)}>
               {#if showPassword}<EyeOff size={16} />{:else}<Eye size={16} />{/if}
             </button>
+          </div>
+          <div class="input-wrapper">
+            <Lock size={16} class="input-icon-left" />
+            <input class="cloud-auth-input" bind:value={totpCode} placeholder={language === "fr" ? "Code à 6 chiffres si MFA activé" : "6-digit code if MFA is enabled"} inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" maxlength="6" />
           </div>
         </div>
 
@@ -136,10 +143,38 @@
         </button>
 
         <div class="auth-switch-link">
+          <button type="button" class="link-btn" on:click={onResetPassword}>
+            {language === "fr" ? "J’ai un code de réinitialisation" : "I have a reset code"}
+          </button>
           <button type="button" class="link-btn" on:click={onToggleMode}>
             {language === "fr" ? "← Retour à la connexion" : "← Back to sign in"}
           </button>
         </div>
+      </form>
+    {:else if mode === "reset-password"}
+      <form class="cloud-auth-panel glassmorphic-panel" on:submit|preventDefault={onSubmit} transition:fade={{ duration: 200 }}>
+        <div class="auth-header-section">
+          <h1>{language === "fr" ? "Nouveau mot de passe" : "New password"}</h1>
+          <p>{language === "fr" ? "Saisissez le code reçu par e-mail et votre nouveau mot de passe." : "Enter the code from your email and your new password."}</p>
+        </div>
+        <div class="auth-inputs-group">
+          <div class="input-wrapper">
+            <Lock size={16} class="input-icon-left" />
+            <input class="cloud-auth-input" bind:value={resetToken} placeholder={language === "fr" ? "Code de réinitialisation" : "Reset code"} autocomplete="one-time-code" required />
+          </div>
+          <div class="input-wrapper password-wrapper">
+            <Lock size={16} class="input-icon-left" />
+            <input class="cloud-auth-input password-input" bind:value={password} placeholder={language === "fr" ? "Nouveau mot de passe (min. 10 caractères)" : "New password (min. 10 chars)"} type={showPassword ? "text" : "password"} autocomplete="new-password" required />
+            <button class="password-toggle-btn" type="button" on:click={() => (showPassword = !showPassword)}>
+              {#if showPassword}<EyeOff size={16} />{:else}<Eye size={16} />{/if}
+            </button>
+          </div>
+        </div>
+        {#if error}<div class="cloud-auth-error-banner"><Info size={14} /><span>{error}</span></div>{/if}
+        <button class="cloud-auth-btn-primary" type="submit" disabled={busy || resetToken.trim().length < 32 || password.length < 10}>
+          {language === "fr" ? "Enregistrer le mot de passe" : "Save password"}
+        </button>
+        <div class="auth-switch-link"><button type="button" class="link-btn" on:click={onToggleMode}>{language === "fr" ? "Retour à la connexion" : "Back to sign in"}</button></div>
       </form>
     {:else}
       <form class="cloud-auth-panel glassmorphic-panel" on:submit|preventDefault={onSubmit} transition:fade={{ duration: 200 }}>

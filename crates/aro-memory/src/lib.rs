@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aro_core::{
-    AgentArtifact, AgentContextItem, AgentLane, AgentLaneStatus, AgentLaneView, AgentRun,
-    AgentRunPriority, AgentRunStatus, AgentStep, AgentStepKind, AgentStepStatus, AroError,
-    AroResult, AssistantMode, ChatMessage, ContextSource, Conversation, Episode, Folder,
-    LongTermMemory, MemoryEntry, MessageRole, NotificationFilter, NotificationItem,
-    NotificationKind, NotificationPriority, NotificationSource, NotificationStatus,
-    PermissionProfile, Plan, Project, MEMORY_STATUS_APPROVED,
+    AgentArtifact, AgentArtifactRef, AgentContextItem, AgentLane, AgentLaneStatus, AgentLaneView,
+    AgentMemoryContext, AgentMemoryFinding, AgentMessageEnvelope, AgentMessagePayload,
+    AgentMessageType, AgentParticipant, AgentRun, AgentRunPriority, AgentRunStatus, AgentStep,
+    AgentStepKind, AgentStepStatus, AroError, AroResult, AssistantMode, ChatMessage, ContextSource,
+    Conversation, Episode, Folder, LongTermMemory, MemoryEntry, MessageRole, NotificationFilter,
+    NotificationItem, NotificationKind, NotificationPriority, NotificationSource,
+    NotificationStatus, PermissionProfile, Plan, Project, MEMORY_STATUS_APPROVED,
 };
 
 use chrono::{DateTime, Utc};
@@ -280,6 +281,88 @@ impl SqliteMemoryStore {
               INSERT INTO episodes_fts (id, conversation_id, summary, key_decisions, entities)
               VALUES (new.id, new.conversation_id, new.summary, new.key_decisions, new.entities);
             END;
+
+            CREATE TABLE IF NOT EXISTS agent_memories (
+              id TEXT PRIMARY KEY,
+              conversation_id TEXT NOT NULL,
+              agent_id TEXT NOT NULL,
+              agent_name TEXT NOT NULL,
+              role TEXT NOT NULL,
+              scratchpad TEXT NOT NULL DEFAULT '',
+              artifacts_json TEXT NOT NULL DEFAULT '[]',
+              permission_profile_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(conversation_id, agent_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_memories_conv_agent
+              ON agent_memories(conversation_id, agent_id);
+
+            CREATE INDEX IF NOT EXISTS idx_agent_memories_conversation
+              ON agent_memories(conversation_id);
+
+            CREATE INDEX IF NOT EXISTS idx_agent_memories_updated
+              ON agent_memories(updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS agent_findings (
+              id TEXT PRIMARY KEY,
+              conversation_id TEXT NOT NULL,
+              agent_id TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              category TEXT,
+              source_tool TEXT,
+              timestamp TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_findings_conv_agent_time
+              ON agent_findings(conversation_id, agent_id, timestamp ASC);
+
+            CREATE INDEX IF NOT EXISTS idx_agent_findings_conversation
+              ON agent_findings(conversation_id);
+
+            CREATE INDEX IF NOT EXISTS idx_agent_findings_category
+              ON agent_findings(category)
+              WHERE category IS NOT NULL;
+
+            CREATE TABLE IF NOT EXISTS agent_message_envelopes (
+              id TEXT PRIMARY KEY,
+              conversation_id TEXT NOT NULL,
+              parent_message_id TEXT,
+              correlation_id TEXT,
+              sender_id TEXT NOT NULL,
+              sender_name TEXT NOT NULL,
+              sender_role TEXT,
+              sender_kind TEXT NOT NULL,
+              sender_json TEXT NOT NULL,
+              recipient_id TEXT NOT NULL,
+              recipient_name TEXT NOT NULL,
+              recipient_role TEXT,
+              recipient_kind TEXT NOT NULL,
+              recipient_json TEXT NOT NULL,
+              message_type TEXT NOT NULL,
+              content TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              permission_profile_id TEXT,
+              priority TEXT,
+              timestamp TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_envelopes_conv_time
+              ON agent_message_envelopes(conversation_id, timestamp ASC);
+
+            CREATE INDEX IF NOT EXISTS idx_agent_envelopes_conv_sender
+              ON agent_message_envelopes(conversation_id, sender_id);
+
+            CREATE INDEX IF NOT EXISTS idx_agent_envelopes_conv_recipient
+              ON agent_message_envelopes(conversation_id, recipient_id);
+
+            CREATE INDEX IF NOT EXISTS idx_agent_envelopes_conv_msgtype
+              ON agent_message_envelopes(conversation_id, message_type);
+
+            CREATE INDEX IF NOT EXISTS idx_agent_envelopes_correlation
+              ON agent_message_envelopes(correlation_id)
+              WHERE correlation_id IS NOT NULL;
             "#,
         )
         .map_err(|err| AroError::Memory(err.to_string()))?;
@@ -908,12 +991,30 @@ impl SqliteMemoryStore {
     }
 
     pub fn delete_conversation(&self, conversation_id: Uuid) -> AroResult<()> {
-        let conn = self.connect()?;
-        conn.execute(
-            "DELETE FROM conversations WHERE id = ?1",
-            params![conversation_id.to_string()],
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        let conv_str = conversation_id.to_string();
+        tx.execute(
+            "DELETE FROM agent_findings WHERE conversation_id = ?1",
+            params![conv_str],
         )
         .map_err(|err| AroError::Memory(err.to_string()))?;
+        tx.execute(
+            "DELETE FROM agent_message_envelopes WHERE conversation_id = ?1",
+            params![conv_str],
+        )
+        .map_err(|err| AroError::Memory(err.to_string()))?;
+        tx.execute(
+            "DELETE FROM agent_memories WHERE conversation_id = ?1",
+            params![conv_str],
+        )
+        .map_err(|err| AroError::Memory(err.to_string()))?;
+        tx.execute("DELETE FROM conversations WHERE id = ?1", params![conv_str])
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        tx.commit()
+            .map_err(|err| AroError::Memory(err.to_string()))?;
         Ok(())
     }
 
@@ -998,11 +1099,13 @@ impl SqliteMemoryStore {
             DELETE FROM conversations;
             DELETE FROM episodes;
             DELETE FROM episodes_fts;
+            DELETE FROM agent_memories;
+            DELETE FROM agent_findings;
+            DELETE FROM agent_message_envelopes;
             "#,
         )
         .map_err(|err| AroError::Memory(err.to_string()))?;
-        tx.commit()
-            .map_err(|err| AroError::Memory(err.to_string()))
+        tx.commit().map_err(|err| AroError::Memory(err.to_string()))
     }
 
     pub fn add_memory(&self, memory: &MemoryEntry) -> AroResult<()> {
@@ -1385,7 +1488,8 @@ impl SqliteMemoryStore {
         )
         .map_err(|err| AroError::Memory(err.to_string()))?;
 
-        tx.commit().map_err(|err| AroError::Memory(err.to_string()))?;
+        tx.commit()
+            .map_err(|err| AroError::Memory(err.to_string()))?;
         Ok(())
     }
 
@@ -2086,6 +2190,55 @@ impl SqliteMemoryStore {
         Ok(())
     }
 
+    pub fn get_permission_profile(&self, id: Uuid) -> AroResult<Option<PermissionProfile>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare("SELECT profile_json FROM agent_permission_profiles WHERE id = ?1 LIMIT 1")
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        let mut rows = stmt
+            .query(params![id.to_string()])
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|err| AroError::Memory(err.to_string()))?
+        {
+            let json_str: String = row
+                .get(0)
+                .map_err(|err| AroError::Memory(err.to_string()))?;
+            let profile: PermissionProfile =
+                serde_json::from_str(&json_str).map_err(|err| AroError::Memory(err.to_string()))?;
+            Ok(Some(profile))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_permission_profile_by_name(
+        &self,
+        name: &str,
+    ) -> AroResult<Option<PermissionProfile>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare("SELECT profile_json FROM agent_permission_profiles WHERE name = ?1 LIMIT 1")
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        let mut rows = stmt
+            .query(params![name])
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|err| AroError::Memory(err.to_string()))?
+        {
+            let json_str: String = row
+                .get(0)
+                .map_err(|err| AroError::Memory(err.to_string()))?;
+            let profile: PermissionProfile =
+                serde_json::from_str(&json_str).map_err(|err| AroError::Memory(err.to_string()))?;
+            Ok(Some(profile))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn create_plan(&self, plan: &Plan) -> AroResult<()> {
         let conn = self.connect()?;
         conn.execute(
@@ -2274,10 +2427,7 @@ impl SqliteMemoryStore {
             .map_err(|err| AroError::Memory(err.to_string()))
     }
 
-    pub fn get_unread_notification_count(
-        &self,
-        organization_id: Option<Uuid>,
-    ) -> AroResult<u64> {
+    pub fn get_unread_notification_count(&self, organization_id: Option<Uuid>) -> AroResult<u64> {
         let conn = self.connect()?;
         let count: i64 = if let Some(org_id) = organization_id {
             conn.query_row(
@@ -2308,10 +2458,7 @@ impl SqliteMemoryStore {
         Ok(affected > 0)
     }
 
-    pub fn mark_all_notifications_as_read(
-        &self,
-        organization_id: Option<Uuid>,
-    ) -> AroResult<u64> {
+    pub fn mark_all_notifications_as_read(&self, organization_id: Option<Uuid>) -> AroResult<u64> {
         let conn = self.connect()?;
         let now = Utc::now().to_rfc3339();
         let affected = if let Some(org_id) = organization_id {
@@ -2337,10 +2484,7 @@ impl SqliteMemoryStore {
         Ok(affected > 0)
     }
 
-    pub fn clear_all_notifications(
-        &self,
-        organization_id: Option<Uuid>,
-    ) -> AroResult<u64> {
+    pub fn clear_all_notifications(&self, organization_id: Option<Uuid>) -> AroResult<u64> {
         let conn = self.connect()?;
         let affected = if let Some(org_id) = organization_id {
             conn.execute(
@@ -2348,13 +2492,749 @@ impl SqliteMemoryStore {
                 params![org_id.to_string()],
             )
         } else {
-            conn.execute("DELETE FROM notifications WHERE organization_id IS NULL", [])
+            conn.execute(
+                "DELETE FROM notifications WHERE organization_id IS NULL",
+                [],
+            )
         }
         .map_err(|err| AroError::Memory(err.to_string()))?;
         Ok(affected as u64)
     }
-}
 
+    pub fn get_agent_memory(
+        &self,
+        conversation_id: &str,
+        agent_id: &str,
+    ) -> AroResult<Option<AgentMemoryContext>> {
+        let conn = self.connect()?;
+
+        // 1. Fetch base memory context
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT agent_name, role, scratchpad, artifacts_json, permission_profile_id, updated_at
+                FROM agent_memories
+                WHERE conversation_id = ?1 AND agent_id = ?2
+                "#,
+            )
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        let base_row = stmt
+            .query_row(params![conversation_id, agent_id], |row| {
+                let agent_name: String = row.get(0)?;
+                let role: String = row.get(1)?;
+                let scratchpad: String = row.get(2)?;
+                let artifacts_raw: String = row.get(3)?;
+                let permission_profile_id: Option<String> = row.get(4)?;
+                let updated_at_str: String = row.get(5)?;
+                Ok((
+                    agent_name,
+                    role,
+                    scratchpad,
+                    artifacts_raw,
+                    permission_profile_id,
+                    updated_at_str,
+                ))
+            })
+            .optional()
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        let (agent_name, role, scratchpad, artifacts_raw, permission_profile_id, updated_at_str) =
+            match base_row {
+                Some(row) => row,
+                None => return Ok(None),
+            };
+
+        let artifacts: Vec<AgentArtifactRef> =
+            serde_json::from_str(&artifacts_raw).unwrap_or_default();
+        let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+
+        // 2. Fetch findings
+        let mut finding_stmt = conn
+            .prepare(
+                r#"
+                SELECT id, summary, category, source_tool, timestamp
+                FROM agent_findings
+                WHERE conversation_id = ?1 AND agent_id = ?2
+                ORDER BY timestamp ASC
+                "#,
+            )
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        let finding_rows = finding_stmt
+            .query_map(params![conversation_id, agent_id], |row| {
+                let id: String = row.get(0)?;
+                let summary: String = row.get(1)?;
+                let category: Option<String> = row.get(2)?;
+                let source_tool: Option<String> = row.get(3)?;
+                let ts_str: String = row.get(4)?;
+                let ts = DateTime::parse_from_rfc3339(&ts_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                Ok(AgentMemoryFinding {
+                    id,
+                    summary,
+                    category,
+                    source_tool,
+                    timestamp: ts,
+                })
+            })
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        let findings = finding_rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        // 3. Fetch ledger (messages where agent is sender, recipient, or recipient is broadcast)
+        let mut ledger_stmt = conn
+            .prepare(
+                r#"
+                SELECT id, parent_message_id, correlation_id, sender_json, recipient_json,
+                       message_type, payload_json, permission_profile_id, priority, timestamp
+                FROM agent_message_envelopes
+                WHERE conversation_id = ?1 AND (sender_id = ?2 OR recipient_id = ?2 OR recipient_kind = 'broadcast')
+                ORDER BY timestamp ASC
+                "#,
+            )
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        let ledger_rows = ledger_stmt
+            .query_map(params![conversation_id, agent_id], |row| {
+                let id: String = row.get(0)?;
+                let parent_message_id: Option<String> = row.get(1)?;
+                let correlation_id: Option<String> = row.get(2)?;
+                let sender_json: String = row.get(3)?;
+                let recipient_json: String = row.get(4)?;
+                let msg_type_str: String = row.get(5)?;
+                let payload_json: String = row.get(6)?;
+                let perm_id: Option<String> = row.get(7)?;
+                let priority_str: Option<String> = row.get(8)?;
+                let ts_str: String = row.get(9)?;
+
+                let sender: AgentParticipant = serde_json::from_str(&sender_json).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                let recipient: AgentParticipant =
+                    serde_json::from_str(&recipient_json).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+                let message_type: AgentMessageType = serde_json::from_value(
+                    serde_json::Value::String(msg_type_str),
+                )
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                let payload: AgentMessagePayload =
+                    serde_json::from_str(&payload_json).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+                let priority: Option<AgentRunPriority> = priority_str
+                    .and_then(|p| serde_json::from_value(serde_json::Value::String(p)).ok());
+                let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                Ok(AgentMessageEnvelope {
+                    id,
+                    conversation_id: conversation_id.to_string(),
+                    parent_message_id,
+                    correlation_id,
+                    sender,
+                    recipient,
+                    message_type,
+                    payload,
+                    permission_profile_id: perm_id,
+                    priority,
+                    timestamp,
+                })
+            })
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        let ledger = ledger_rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        Ok(Some(AgentMemoryContext {
+            agent_id: agent_id.to_string(),
+            agent_name,
+            role,
+            conversation_id: conversation_id.to_string(),
+            scratchpad,
+            findings,
+            ledger,
+            artifacts,
+            permission_profile_id,
+            updated_at,
+        }))
+    }
+
+    pub fn get_or_create_agent_memory(
+        &self,
+        conversation_id: &str,
+        agent_id: &str,
+        default_name: &str,
+        default_role: &str,
+    ) -> AroResult<AgentMemoryContext> {
+        if let Some(existing) = self.get_agent_memory(conversation_id, agent_id)? {
+            return Ok(existing);
+        }
+        let initial =
+            AgentMemoryContext::new(conversation_id, agent_id, default_name, default_role);
+        self.save_agent_memory(&initial)?;
+        Ok(initial)
+    }
+
+    pub fn save_agent_memory(&self, memory: &AgentMemoryContext) -> AroResult<()> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        let memory_id = format!("{}:{}", memory.conversation_id, memory.agent_id);
+        let artifacts_json = serde_json::to_string(&memory.artifacts)
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        let updated_at = memory.updated_at.to_rfc3339();
+
+        // 1. Upsert agent_memories
+        tx.execute(
+            r#"
+            INSERT INTO agent_memories
+              (id, conversation_id, agent_id, agent_name, role, scratchpad,
+               artifacts_json, permission_profile_id, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(conversation_id, agent_id) DO UPDATE SET
+              agent_name = excluded.agent_name,
+              role = excluded.role,
+              scratchpad = excluded.scratchpad,
+              artifacts_json = excluded.artifacts_json,
+              permission_profile_id = excluded.permission_profile_id,
+              updated_at = excluded.updated_at
+            "#,
+            params![
+                memory_id,
+                memory.conversation_id,
+                memory.agent_id,
+                memory.agent_name,
+                memory.role,
+                memory.scratchpad,
+                artifacts_json,
+                memory.permission_profile_id,
+                updated_at,
+                updated_at,
+            ],
+        )
+        .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        // 2. Upsert findings
+        for finding in &memory.findings {
+            let finding_id = if finding.id.trim().is_empty() {
+                Uuid::new_v4().to_string()
+            } else {
+                finding.id.clone()
+            };
+            tx.execute(
+                r#"
+                INSERT INTO agent_findings
+                  (id, conversation_id, agent_id, summary, category, source_tool, timestamp)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(id) DO UPDATE SET
+                  summary = excluded.summary,
+                  category = excluded.category,
+                  source_tool = excluded.source_tool,
+                  timestamp = excluded.timestamp
+                "#,
+                params![
+                    finding_id,
+                    memory.conversation_id,
+                    memory.agent_id,
+                    finding.summary,
+                    finding.category,
+                    finding.source_tool,
+                    finding.timestamp.to_rfc3339(),
+                ],
+            )
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        }
+
+        // 3. Upsert ledger envelopes
+        for env in &memory.ledger {
+            let env_id = if env.id.trim().is_empty() {
+                Uuid::new_v4().to_string()
+            } else {
+                env.id.clone()
+            };
+            let sender_json = serde_json::to_string(&env.sender)
+                .map_err(|err| AroError::Memory(err.to_string()))?;
+            let recipient_json = serde_json::to_string(&env.recipient)
+                .map_err(|err| AroError::Memory(err.to_string()))?;
+            let msg_type_val = serde_json::to_value(&env.message_type)
+                .map_err(|err| AroError::Memory(err.to_string()))?;
+            let msg_type_str = msg_type_val.as_str().unwrap_or("task_delegation");
+            let payload_json = serde_json::to_string(&env.payload)
+                .map_err(|err| AroError::Memory(err.to_string()))?;
+            let sender_kind_str = format!("{:?}", env.sender.kind).to_lowercase();
+            let recipient_kind_str = format!("{:?}", env.recipient.kind).to_lowercase();
+            let priority_str = env
+                .priority
+                .as_ref()
+                .and_then(|p| serde_json::to_value(p).ok())
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
+
+            tx.execute(
+                r#"
+                INSERT INTO agent_message_envelopes
+                  (id, conversation_id, parent_message_id, correlation_id,
+                   sender_id, sender_name, sender_role, sender_kind, sender_json,
+                   recipient_id, recipient_name, recipient_role, recipient_kind, recipient_json,
+                   message_type, content, payload_json, permission_profile_id, priority, timestamp)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                ON CONFLICT(id) DO UPDATE SET
+                  content = excluded.content,
+                  payload_json = excluded.payload_json,
+                  permission_profile_id = excluded.permission_profile_id,
+                  priority = excluded.priority,
+                  timestamp = excluded.timestamp
+                "#,
+                params![
+                    env_id,
+                    env.conversation_id,
+                    env.parent_message_id,
+                    env.correlation_id,
+                    env.sender.id,
+                    env.sender.name,
+                    env.sender.role,
+                    sender_kind_str,
+                    sender_json,
+                    env.recipient.id,
+                    env.recipient.name,
+                    env.recipient.role,
+                    recipient_kind_str,
+                    recipient_json,
+                    msg_type_str,
+                    env.payload.content,
+                    payload_json,
+                    env.permission_profile_id,
+                    priority_str,
+                    env.timestamp.to_rfc3339(),
+                ],
+            )
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        }
+
+        tx.commit().map_err(|err| AroError::Memory(err.to_string()))
+    }
+
+    pub fn update_agent_scratchpad(
+        &self,
+        conversation_id: &str,
+        agent_id: &str,
+        scratchpad: &str,
+    ) -> AroResult<()> {
+        let conn = self.connect()?;
+        let memory_id = format!("{}:{}", conversation_id, agent_id);
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            r#"
+            INSERT INTO agent_memories
+              (id, conversation_id, agent_id, agent_name, role, scratchpad, artifacts_json, permission_profile_id, created_at, updated_at)
+            VALUES (?1, ?2, ?3, 'Worker', 'worker', ?4, '[]', NULL, ?5, ?5)
+            ON CONFLICT(conversation_id, agent_id) DO UPDATE SET
+              scratchpad = excluded.scratchpad,
+              updated_at = excluded.updated_at
+            "#,
+            params![memory_id, conversation_id, agent_id, scratchpad, now],
+        )
+        .map_err(|err| AroError::Memory(err.to_string()))?;
+        Ok(())
+    }
+
+    pub fn record_agent_finding(
+        &self,
+        conversation_id: &str,
+        agent_id: &str,
+        finding: &AgentMemoryFinding,
+    ) -> AroResult<()> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        let finding_id = if finding.id.trim().is_empty() {
+            Uuid::new_v4().to_string()
+        } else {
+            finding.id.clone()
+        };
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            r#"
+            INSERT INTO agent_findings
+              (id, conversation_id, agent_id, summary, category, source_tool, timestamp)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(id) DO UPDATE SET
+              summary = excluded.summary,
+              category = excluded.category,
+              source_tool = excluded.source_tool,
+              timestamp = excluded.timestamp
+            "#,
+            params![
+                finding_id,
+                conversation_id,
+                agent_id,
+                finding.summary,
+                finding.category,
+                finding.source_tool,
+                finding.timestamp.to_rfc3339(),
+            ],
+        )
+        .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        let _ = tx.execute(
+            "UPDATE agent_memories SET updated_at = ?1 WHERE conversation_id = ?2 AND agent_id = ?3",
+            params![now, conversation_id, agent_id],
+        );
+
+        tx.commit().map_err(|err| AroError::Memory(err.to_string()))
+    }
+
+    pub fn record_agent_envelope(&self, env: &AgentMessageEnvelope) -> AroResult<()> {
+        let conn = self.connect()?;
+        let env_id = if env.id.trim().is_empty() {
+            Uuid::new_v4().to_string()
+        } else {
+            env.id.clone()
+        };
+        let sender_json =
+            serde_json::to_string(&env.sender).map_err(|err| AroError::Memory(err.to_string()))?;
+        let recipient_json = serde_json::to_string(&env.recipient)
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        let msg_type_val = serde_json::to_value(&env.message_type)
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        let msg_type_str = msg_type_val.as_str().unwrap_or("task_delegation");
+        let payload_json =
+            serde_json::to_string(&env.payload).map_err(|err| AroError::Memory(err.to_string()))?;
+        let sender_kind_str = format!("{:?}", env.sender.kind).to_lowercase();
+        let recipient_kind_str = format!("{:?}", env.recipient.kind).to_lowercase();
+        let priority_str = env
+            .priority
+            .as_ref()
+            .and_then(|p| serde_json::to_value(p).ok())
+            .and_then(|v| v.as_str().map(|s| s.to_string()));
+
+        conn.execute(
+            r#"
+            INSERT INTO agent_message_envelopes
+              (id, conversation_id, parent_message_id, correlation_id,
+               sender_id, sender_name, sender_role, sender_kind, sender_json,
+               recipient_id, recipient_name, recipient_role, recipient_kind, recipient_json,
+               message_type, content, payload_json, permission_profile_id, priority, timestamp)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+            ON CONFLICT(id) DO UPDATE SET
+              content = excluded.content,
+              payload_json = excluded.payload_json,
+              permission_profile_id = excluded.permission_profile_id,
+              priority = excluded.priority,
+              timestamp = excluded.timestamp
+            "#,
+            params![
+                env_id,
+                env.conversation_id,
+                env.parent_message_id,
+                env.correlation_id,
+                env.sender.id,
+                env.sender.name,
+                env.sender.role,
+                sender_kind_str,
+                sender_json,
+                env.recipient.id,
+                env.recipient.name,
+                env.recipient.role,
+                recipient_kind_str,
+                recipient_json,
+                msg_type_str,
+                env.payload.content,
+                payload_json,
+                env.permission_profile_id,
+                priority_str,
+                env.timestamp.to_rfc3339(),
+            ],
+        )
+        .map_err(|err| AroError::Memory(err.to_string()))?;
+        Ok(())
+    }
+
+    pub fn list_agent_envelopes(
+        &self,
+        conversation_id: &str,
+        filter_agent_id: Option<&str>,
+        filter_msg_type: Option<&AgentMessageType>,
+    ) -> AroResult<Vec<AgentMessageEnvelope>> {
+        let conn = self.connect()?;
+        let mut query = String::from(
+            r#"
+            SELECT id, parent_message_id, correlation_id, sender_json, recipient_json,
+                   message_type, payload_json, permission_profile_id, priority, timestamp
+            FROM agent_message_envelopes
+            WHERE conversation_id = ?1
+            "#,
+        );
+
+        let mut params: Vec<String> = vec![conversation_id.to_string()];
+
+        if let Some(aid) = filter_agent_id {
+            params.push(aid.to_string());
+            let param_idx = params.len();
+            query.push_str(&format!(
+                " AND (sender_id = ?{idx} OR recipient_id = ?{idx} OR recipient_kind = 'broadcast')",
+                idx = param_idx
+            ));
+        }
+
+        if let Some(mtype) = filter_msg_type {
+            let mtype_val =
+                serde_json::to_value(mtype).map_err(|err| AroError::Memory(err.to_string()))?;
+            let mtype_str = mtype_val.as_str().unwrap_or("task_delegation").to_string();
+            params.push(mtype_str);
+            let param_idx = params.len();
+            query.push_str(&format!(" AND message_type = ?{}", param_idx));
+        }
+
+        query.push_str(" ORDER BY timestamp ASC");
+
+        let mut stmt = conn
+            .prepare(&query)
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        let rusqlite_params = rusqlite::params_from_iter(params.iter());
+
+        let rows = stmt
+            .query_map(rusqlite_params, |row| {
+                let id: String = row.get(0)?;
+                let parent_message_id: Option<String> = row.get(1)?;
+                let correlation_id: Option<String> = row.get(2)?;
+                let sender_json: String = row.get(3)?;
+                let recipient_json: String = row.get(4)?;
+                let msg_type_str: String = row.get(5)?;
+                let payload_json: String = row.get(6)?;
+                let perm_id: Option<String> = row.get(7)?;
+                let priority_str: Option<String> = row.get(8)?;
+                let ts_str: String = row.get(9)?;
+
+                let sender: AgentParticipant = serde_json::from_str(&sender_json).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                let recipient: AgentParticipant =
+                    serde_json::from_str(&recipient_json).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+                let message_type: AgentMessageType = serde_json::from_value(
+                    serde_json::Value::String(msg_type_str),
+                )
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                let payload: AgentMessagePayload =
+                    serde_json::from_str(&payload_json).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
+                let priority: Option<AgentRunPriority> = priority_str
+                    .and_then(|p| serde_json::from_value(serde_json::Value::String(p)).ok());
+                let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                Ok(AgentMessageEnvelope {
+                    id,
+                    conversation_id: conversation_id.to_string(),
+                    parent_message_id,
+                    correlation_id,
+                    sender,
+                    recipient,
+                    message_type,
+                    payload,
+                    permission_profile_id: perm_id,
+                    priority,
+                    timestamp,
+                })
+            })
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| AroError::Memory(err.to_string()))
+    }
+
+    pub fn list_agent_findings(
+        &self,
+        conversation_id: &str,
+        agent_id: Option<&str>,
+    ) -> AroResult<Vec<AgentMemoryFinding>> {
+        let conn = self.connect()?;
+        if let Some(aid) = agent_id {
+            let mut stmt = conn
+                .prepare(
+                    r#"
+                    SELECT id, summary, category, source_tool, timestamp
+                    FROM agent_findings
+                    WHERE conversation_id = ?1 AND agent_id = ?2
+                    ORDER BY timestamp ASC
+                    "#,
+                )
+                .map_err(|err| AroError::Memory(err.to_string()))?;
+
+            let rows = stmt
+                .query_map(params![conversation_id, aid], |row| {
+                    let id: String = row.get(0)?;
+                    let summary: String = row.get(1)?;
+                    let category: Option<String> = row.get(2)?;
+                    let source_tool: Option<String> = row.get(3)?;
+                    let ts_str: String = row.get(4)?;
+                    let ts = DateTime::parse_from_rfc3339(&ts_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now());
+                    Ok(AgentMemoryFinding {
+                        id,
+                        summary,
+                        category,
+                        source_tool,
+                        timestamp: ts,
+                    })
+                })
+                .map_err(|err| AroError::Memory(err.to_string()))?;
+
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|err| AroError::Memory(err.to_string()))
+        } else {
+            let mut stmt = conn
+                .prepare(
+                    r#"
+                    SELECT id, summary, category, source_tool, timestamp
+                    FROM agent_findings
+                    WHERE conversation_id = ?1
+                    ORDER BY timestamp ASC
+                    "#,
+                )
+                .map_err(|err| AroError::Memory(err.to_string()))?;
+
+            let rows = stmt
+                .query_map(params![conversation_id], |row| {
+                    let id: String = row.get(0)?;
+                    let summary: String = row.get(1)?;
+                    let category: Option<String> = row.get(2)?;
+                    let source_tool: Option<String> = row.get(3)?;
+                    let ts_str: String = row.get(4)?;
+                    let ts = DateTime::parse_from_rfc3339(&ts_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now());
+                    Ok(AgentMemoryFinding {
+                        id,
+                        summary,
+                        category,
+                        source_tool,
+                        timestamp: ts,
+                    })
+                })
+                .map_err(|err| AroError::Memory(err.to_string()))?;
+
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|err| AroError::Memory(err.to_string()))
+        }
+    }
+
+    pub fn clear_agent_memory(
+        &self,
+        conversation_id: &str,
+        agent_id: Option<&str>,
+    ) -> AroResult<()> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+
+        if let Some(aid) = agent_id {
+            tx.execute(
+                "DELETE FROM agent_findings WHERE conversation_id = ?1 AND agent_id = ?2",
+                params![conversation_id, aid],
+            )
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+            tx.execute(
+                "DELETE FROM agent_message_envelopes WHERE conversation_id = ?1 AND (sender_id = ?2 OR recipient_id = ?2)",
+                params![conversation_id, aid],
+            )
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+            tx.execute(
+                "DELETE FROM agent_memories WHERE conversation_id = ?1 AND agent_id = ?2",
+                params![conversation_id, aid],
+            )
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        } else {
+            tx.execute(
+                "DELETE FROM agent_findings WHERE conversation_id = ?1",
+                params![conversation_id],
+            )
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+            tx.execute(
+                "DELETE FROM agent_message_envelopes WHERE conversation_id = ?1",
+                params![conversation_id],
+            )
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+            tx.execute(
+                "DELETE FROM agent_memories WHERE conversation_id = ?1",
+                params![conversation_id],
+            )
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        }
+
+        tx.commit().map_err(|err| AroError::Memory(err.to_string()))
+    }
+
+    pub fn inspect_cognitive_database_tables(&self) -> AroResult<(usize, usize, usize)> {
+        let conn = self.connect()?;
+        let mem_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_memories", [], |r| r.get(0))
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        let find_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_findings", [], |r| r.get(0))
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        let env_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_message_envelopes", [], |r| {
+                r.get(0)
+            })
+            .map_err(|err| AroError::Memory(err.to_string()))?;
+        Ok((mem_count as usize, find_count as usize, env_count as usize))
+    }
+}
 
 fn map_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<Plan> {
     let id_str: String = row.get(0)?;
@@ -2455,7 +3335,6 @@ fn map_notification(row: &rusqlite::Row<'_>) -> rusqlite::Result<NotificationIte
         read_at,
     })
 }
-
 
 fn parse_datetime(value: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&value)
@@ -2681,8 +3560,7 @@ fn map_episode(row: &rusqlite::Row<'_>) -> rusqlite::Result<Episode> {
     let summary: String = row.get(4)?;
 
     let key_decisions_json: String = row.get(5)?;
-    let key_decisions: Vec<String> =
-        serde_json::from_str(&key_decisions_json).unwrap_or_default();
+    let key_decisions: Vec<String> = serde_json::from_str(&key_decisions_json).unwrap_or_default();
 
     let entities_json: String = row.get(6)?;
     let entities: Vec<String> = serde_json::from_str(&entities_json).unwrap_or_default();
@@ -2965,7 +3843,10 @@ mod tests {
         store.upsert_memory(&mem3).expect("upsert 3");
 
         // Test get_memory
-        let fetched1 = store.get_memory(mem1.id).expect("get_memory").expect("exists");
+        let fetched1 = store
+            .get_memory(mem1.id)
+            .expect("get_memory")
+            .expect("exists");
         assert_eq!(fetched1.content, "Memory One");
         assert_eq!(fetched1.recall_count, 0);
 
@@ -2984,9 +3865,7 @@ mod tests {
         assert_eq!(ordered[2].id, mem2.id);
 
         // Test touch_memories_used increments recall_count atomically
-        store
-            .touch_memories_used(&[mem1.id])
-            .expect("touch 1st");
+        store.touch_memories_used(&[mem1.id]).expect("touch 1st");
         store
             .touch_memories_used(&[mem1.id, mem3.id])
             .expect("touch 2nd");
@@ -3119,7 +3998,10 @@ mod tests {
         store.delete_agent_run(run.id).expect("delete run");
         assert_eq!(store.list_agent_runs().expect("runs").len(), 0);
         assert_eq!(store.list_agent_steps(run.id).expect("steps").len(), 0);
-        assert_eq!(store.list_agent_artifacts(run.id).expect("artifacts").len(), 0);
+        assert_eq!(
+            store.list_agent_artifacts(run.id).expect("artifacts").len(),
+            0
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -3385,7 +4267,8 @@ mod tests {
 
     #[test]
     fn stores_and_orders_episodes() {
-        let path = std::env::temp_dir().join(format!("aro-episode-order-test-{}.sqlite", Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("aro-episode-order-test-{}.sqlite", Uuid::new_v4()));
         let store = SqliteMemoryStore::new(&path).expect("store");
 
         let conv = store
@@ -3434,7 +4317,10 @@ mod tests {
         assert_eq!(listed[0].turn_start, 1);
         assert_eq!(listed[0].turn_end, 10);
         assert_eq!(listed[0].summary, "First episode covering turn 1 to 10");
-        assert_eq!(listed[0].key_decisions, vec!["Setup project layout".to_string()]);
+        assert_eq!(
+            listed[0].key_decisions,
+            vec!["Setup project layout".to_string()]
+        );
         assert_eq!(listed[0].entities, vec!["Cargo.toml".to_string()]);
 
         assert_eq!(listed[1].turn_start, 11);
@@ -3453,7 +4339,9 @@ mod tests {
         assert_eq!(latest.summary, "Latest episode covering turn 21 to 30");
 
         // get_latest_episode for non-existent conversation returns None
-        let non_existent = store.get_latest_episode(Uuid::new_v4()).expect("non existent");
+        let non_existent = store
+            .get_latest_episode(Uuid::new_v4())
+            .expect("non existent");
         assert!(non_existent.is_none());
 
         // Update episode 1 and verify update idempotency
@@ -3463,8 +4351,15 @@ mod tests {
         store.store_episode(&updated_ep1).expect("update ep1");
 
         let listed_after_update = store.list_episodes(conv.id).expect("list after update");
-        assert_eq!(listed_after_update.len(), 3, "Upsert must not duplicate records");
-        assert_eq!(listed_after_update[0].summary, "Updated first episode summary");
+        assert_eq!(
+            listed_after_update.len(),
+            3,
+            "Upsert must not duplicate records"
+        );
+        assert_eq!(
+            listed_after_update[0].summary,
+            "Updated first episode summary"
+        );
         assert_eq!(listed_after_update[0].token_count, 1250);
 
         let _ = std::fs::remove_file(path);
@@ -3472,7 +4367,8 @@ mod tests {
 
     #[test]
     fn searches_episodes_via_fts5_across_all_fields() {
-        let path = std::env::temp_dir().join(format!("aro-episode-fts-test-{}.sqlite", Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("aro-episode-fts-test-{}.sqlite", Uuid::new_v4()));
         let store = SqliteMemoryStore::new(&path).expect("store");
 
         let conv_a = store
@@ -3531,27 +4427,37 @@ mod tests {
         store.store_episode(&ep_b).expect("store ep_b");
 
         // 1. Search by summary keyword
-        let found_summary = store.search_episodes(conv_a.id, "WebSocket", 5).expect("search summary");
+        let found_summary = store
+            .search_episodes(conv_a.id, "WebSocket", 5)
+            .expect("search summary");
         assert_eq!(found_summary.len(), 1);
         assert_eq!(found_summary[0].id, ep1.id);
 
         // 2. Search by key_decisions keyword
-        let found_decision = store.search_episodes(conv_a.id, "concurrency", 5).expect("search decision");
+        let found_decision = store
+            .search_episodes(conv_a.id, "concurrency", 5)
+            .expect("search decision");
         assert_eq!(found_decision.len(), 1);
         assert_eq!(found_decision[0].id, ep2.id);
 
         // 3. Search by entities keyword
-        let found_entity = store.search_episodes(conv_a.id, "KeyringSecretStore", 5).expect("search entity");
+        let found_entity = store
+            .search_episodes(conv_a.id, "KeyringSecretStore", 5)
+            .expect("search entity");
         assert_eq!(found_entity.len(), 1);
         assert_eq!(found_entity[0].id, ep3.id);
 
         // 4. Conversation isolation: searching in conv_b returns only conv_b's episode
-        let found_b = store.search_episodes(conv_b.id, "WebSocket", 5).expect("search b");
+        let found_b = store
+            .search_episodes(conv_b.id, "WebSocket", 5)
+            .expect("search b");
         assert_eq!(found_b.len(), 1);
         assert_eq!(found_b[0].id, ep_b.id);
 
         // 5. Empty query returns empty Vec
-        let empty_search = store.search_episodes(conv_a.id, "", 5).expect("empty search");
+        let empty_search = store
+            .search_episodes(conv_a.id, "", 5)
+            .expect("empty search");
         assert!(empty_search.is_empty());
 
         // 6. Limit enforcement
@@ -3565,7 +4471,9 @@ mod tests {
             800,
         );
         store.store_episode(&ep4).expect("store ep4");
-        let limited = store.search_episodes(conv_a.id, "WebSocket", 1).expect("limit 1");
+        let limited = store
+            .search_episodes(conv_a.id, "WebSocket", 1)
+            .expect("limit 1");
         assert_eq!(limited.len(), 1);
 
         let _ = std::fs::remove_file(path);
@@ -3573,7 +4481,10 @@ mod tests {
 
     #[test]
     fn transaction_rolls_back_on_failure() {
-        let path = std::env::temp_dir().join(format!("aro-episode-rollback-test-{}.sqlite", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "aro-episode-rollback-test-{}.sqlite",
+            Uuid::new_v4()
+        ));
         let store = SqliteMemoryStore::new(&path).expect("store");
 
         let conv = store
@@ -3592,7 +4503,10 @@ mod tests {
             100,
         );
         let result = store.store_episode(&invalid_ep);
-        assert!(result.is_err(), "Store episode with invalid foreign key must fail");
+        assert!(
+            result.is_err(),
+            "Store episode with invalid foreign key must fail"
+        );
 
         // Verify nothing was stored in episodes table
         let listed = store.list_episodes(non_existent_conv).expect("list");
@@ -3629,14 +4543,20 @@ mod tests {
 
         // Verify episodes_fts has no ghost entry
         let search_res = store.search_episodes(conv.id, "Mid-tx", 5).expect("search");
-        assert!(search_res.is_empty(), "FTS5 table must not contain rolled-back data");
+        assert!(
+            search_res.is_empty(),
+            "FTS5 table must not contain rolled-back data"
+        );
 
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn wal_concurrency_multiple_readers() {
-        let path = std::env::temp_dir().join(format!("aro-wal-concurrency-test-{}.sqlite", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "aro-wal-concurrency-test-{}.sqlite",
+            Uuid::new_v4()
+        ));
         let store = SqliteMemoryStore::new(&path).expect("store");
 
         let conv = store
@@ -3716,7 +4636,10 @@ mod tests {
         assert_eq!(final_episodes.len(), iterations + 1);
 
         // Verify latest episode has the highest turn
-        let latest = store.get_latest_episode(conv.id).expect("final latest").unwrap();
+        let latest = store
+            .get_latest_episode(conv.id)
+            .expect("final latest")
+            .unwrap();
         assert_eq!(latest.turn_start, (iterations * 10) + 1);
 
         let _ = std::fs::remove_file(path);
@@ -3724,9 +4647,9 @@ mod tests {
 
     #[test]
     fn test_notification_sqlite_lifecycle() {
-        let db_path = std::env::temp_dir().join(format!("aro-notif-test-{}.sqlite", Uuid::new_v4()));
+        let db_path =
+            std::env::temp_dir().join(format!("aro-notif-test-{}.sqlite", Uuid::new_v4()));
         let store = SqliteMemoryStore::new(&db_path).expect("create store");
-
 
         let org_id = Uuid::new_v4();
 
@@ -3781,7 +4704,9 @@ mod tests {
         assert_eq!(list_agent[0].title, "Agent Finished");
 
         // 5. Mark 1 as read
-        assert!(store.mark_notification_as_read(&notif1.id).expect("mark read"));
+        assert!(store
+            .mark_notification_as_read(&notif1.id)
+            .expect("mark read"));
         let unread_after = store
             .get_unread_notification_count(Some(org_id))
             .expect("count after 1 read");
@@ -3817,7 +4742,8 @@ mod tests {
 
     #[test]
     fn test_notification_personal_vs_org_scoping() {
-        let db_path = std::env::temp_dir().join(format!("test_notif_scoping_{}.sqlite", Uuid::new_v4()));
+        let db_path =
+            std::env::temp_dir().join(format!("test_notif_scoping_{}.sqlite", Uuid::new_v4()));
         let store = SqliteMemoryStore::new(&db_path).expect("store init");
         let org_id = Uuid::new_v4();
 
@@ -3829,7 +4755,9 @@ mod tests {
             NotificationSource::System,
         );
         personal_notif.organization_id = None;
-        store.create_notification(&personal_notif).expect("create personal");
+        store
+            .create_notification(&personal_notif)
+            .expect("create personal");
 
         // 2. Org notification (organization_id is Some)
         let mut org_notif = NotificationItem::new(
@@ -3842,8 +4770,12 @@ mod tests {
         store.create_notification(&org_notif).expect("create org");
 
         // 3. Counts must be strictly isolated
-        let personal_count = store.get_unread_notification_count(None).expect("personal unread");
-        let org_count = store.get_unread_notification_count(Some(org_id)).expect("org unread");
+        let personal_count = store
+            .get_unread_notification_count(None)
+            .expect("personal unread");
+        let org_count = store
+            .get_unread_notification_count(Some(org_id))
+            .expect("org unread");
         assert_eq!(personal_count, 1);
         assert_eq!(org_count, 1);
 
@@ -3860,12 +4792,62 @@ mod tests {
         // 5. Clearing personal must not delete organization notification
         let cleared_personal = store.clear_all_notifications(None).expect("clear personal");
         assert_eq!(cleared_personal, 1);
-        assert_eq!(store.get_unread_notification_count(None).expect("personal empty"), 0);
-        assert_eq!(store.get_unread_notification_count(Some(org_id)).expect("org still intact"), 1);
+        assert_eq!(
+            store
+                .get_unread_notification_count(None)
+                .expect("personal empty"),
+            0
+        );
+        assert_eq!(
+            store
+                .get_unread_notification_count(Some(org_id))
+                .expect("org still intact"),
+            1
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn test_permission_profile_getters() {
+        let db_path = std::env::temp_dir().join(format!("aro-perm-test-{}.db", Uuid::new_v4()));
+        let store = SqliteMemoryStore::new(&db_path).expect("open store");
+
+        let mut profile = PermissionProfile::trusted_workspace("C:\\test");
+        profile.name = "ReadOnly-Tester".to_string();
+        profile.allow_read = true;
+        profile.allow_write = false;
+
+        store
+            .upsert_permission_profile(&profile)
+            .expect("upsert profile");
+
+        let fetched_by_id = store
+            .get_permission_profile(profile.id)
+            .expect("fetch by id");
+        assert!(fetched_by_id.is_some());
+        let fetched = fetched_by_id.unwrap();
+        assert_eq!(fetched.id, profile.id);
+        assert_eq!(fetched.name, "ReadOnly-Tester");
+        assert!(fetched.allow_read);
+        assert!(!fetched.allow_write);
+
+        let fetched_by_name = store
+            .get_permission_profile_by_name("ReadOnly-Tester")
+            .expect("fetch by name");
+        assert!(fetched_by_name.is_some());
+        assert_eq!(fetched_by_name.unwrap().id, profile.id);
+
+        let non_existent = store
+            .get_permission_profile(Uuid::new_v4())
+            .expect("fetch missing");
+        assert!(non_existent.is_none());
+
+        let non_existent_name = store
+            .get_permission_profile_by_name("Missing")
+            .expect("fetch missing name");
+        assert!(non_existent_name.is_none());
 
         let _ = std::fs::remove_file(db_path);
     }
 }
-
-
-

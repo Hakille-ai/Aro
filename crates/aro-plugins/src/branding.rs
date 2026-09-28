@@ -102,7 +102,10 @@ pub fn build_branding_extension(
         if !is_valid_logo_emoji(emoji) {
             return Err(anyhow!("Invalid logo emoji"));
         }
-        map.insert("logo".to_string(), serde_json::Value::String(emoji.to_string()));
+        map.insert(
+            "logo".to_string(),
+            serde_json::Value::String(emoji.to_string()),
+        );
     }
     if let Some(file) = logo_file {
         if !is_allowed_logo_file_name(file) {
@@ -349,7 +352,8 @@ mod tests {
 
     #[test]
     fn rejects_unknown_logo_formats() {
-        let err = parse_logo_data_url("data:image/gif;base64,R0lGODdhAQABAIAAAP8AAAAA").unwrap_err();
+        let err =
+            parse_logo_data_url("data:image/gif;base64,R0lGODdhAQABAIAAAP8AAAAA").unwrap_err();
         assert!(err.to_string().contains("Unsupported"));
     }
 
@@ -368,15 +372,13 @@ mod tests {
     fn accepts_minimal_png_and_svg() {
         // 1x1 transparent PNG.
         let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
-        let decoded =
-            parse_logo_data_url(&format!("data:image/png;base64,{png_b64}")).unwrap();
+        let decoded = parse_logo_data_url(&format!("data:image/png;base64,{png_b64}")).unwrap();
         assert_eq!(decoded.extension, "png");
         assert_eq!(decoded.mime, "image/png");
 
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#0A84FF"/></svg>"##;
         let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, svg);
-        let decoded =
-            parse_logo_data_url(&format!("data:image/svg+xml;base64,{b64}")).unwrap();
+        let decoded = parse_logo_data_url(&format!("data:image/svg+xml;base64,{b64}")).unwrap();
         assert_eq!(decoded.extension, "svg");
     }
 
@@ -388,8 +390,7 @@ mod tests {
             r#"<svg xmlns="http://www.w3.org/2000/svg"><a href="javascript:alert(1)">x</a></svg>"#,
         ] {
             let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, payload);
-            let err =
-                parse_logo_data_url(&format!("data:image/svg+xml;base64,{b64}")).unwrap_err();
+            let err = parse_logo_data_url(&format!("data:image/svg+xml;base64,{b64}")).unwrap_err();
             let msg = err.to_string();
             assert!(
                 msg.contains("forbidden") || msg.contains("event handlers"),
@@ -408,7 +409,9 @@ mod tests {
 
     #[test]
     fn branding_extension_roundtrip() {
-        let ext = build_branding_extension(Some("🚀"), None, Some("#0A84FF")).unwrap().unwrap();
+        let ext = build_branding_extension(Some("🚀"), None, Some("#0A84FF"))
+            .unwrap()
+            .unwrap();
         let mut map = HashMap::new();
         map.insert(ARO_BRANDING_EXTENSION.to_string(), ext);
         let resolved = branding_from_extensions(&map);
@@ -420,7 +423,10 @@ mod tests {
     #[test]
     fn invalid_branding_values_are_ignored_not_fatal() {
         let mut inner = serde_json::Map::new();
-        inner.insert("logo".to_string(), serde_json::Value::String("x".repeat(100)));
+        inner.insert(
+            "logo".to_string(),
+            serde_json::Value::String("x".repeat(100)),
+        );
         inner.insert(
             "brandColor".to_string(),
             serde_json::Value::String("not-a-color".to_string()),

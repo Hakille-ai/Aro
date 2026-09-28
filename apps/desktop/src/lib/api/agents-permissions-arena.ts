@@ -1,5 +1,7 @@
 export {
   cancelAgentRun,
+  dispatchAgentDirective,
+  getAgentMemory,
   getAgentOrchestratorSnapshot,
   getAgentRun,
   listAgentLanes,
@@ -9,6 +11,7 @@ export {
   pauseAgentRun,
   resumeAgentLane,
   resumeAgentRun,
+  saveAgentMemory,
   searchAgentContext,
   sendArenaStream,
   setAgentLanePriority,

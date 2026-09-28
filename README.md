@@ -23,18 +23,33 @@ The core is not described as OSI open source: PolyForm restricts commercial use.
 
 ## Workspace
 
-```text
-apps/desktop        Tauri 2 + Svelte desktop app
-apps/api            Axum API for PostgreSQL cloud persistence
-crates/aro-core     Shared domain types and contracts
-crates/aro-memory   Legacy/local memory helpers
-crates/aro-store    PostgreSQL persistence and migrations
-crates/aro-runtime  Local LLM orchestration
-crates/aro-voice    Local STT/TTS adapters
-docs/               Product, architecture, security, and model setup
-scripts/            Developer setup and checks
-vendor/voice        Local voice runtimes and models, ignored by Git
-```
+`	ext
+apps/desktop            Tauri 2 + Svelte 5 desktop app
+apps/api                Axum API for PostgreSQL cloud persistence & auth
+apps/mobile             Flutter mobile client (iOS & Android)
+packages/contracts      Shared TypeScript API and RPC contracts
+packages/api-client     TypeScript API client & SDK
+packages/ui-tokens      Shared design tokens & style variables
+crates/aro-core         Shared domain models, contracts, and errors
+crates/aro-agent        Autonomous agent execution and task loop
+crates/aro-agent-domain Agent domain models, states, and protocols
+crates/aro-files        File storage (local / S3-MinIO) and ClamAV scanning
+crates/aro-integrations External provider integrations (OAuth, webhooks)
+crates/aro-mcp          Model Context Protocol client and server bridge
+crates/aro-memory       Cognitive memory engine (SQLite FTS5, episodic & graph)
+crates/aro-plugins      Sandboxed plugin system and manifest manager
+crates/aro-policy       Security policies, boundaries, and permissions
+crates/aro-runtime      Local LLM orchestration (Ollama, llama.cpp)
+crates/aro-secrets      Secure OS-keyring secrets management
+crates/aro-skills       Procedural skills execution engine
+crates/aro-store        PostgreSQL persistence, transactions, and SQLx migrations
+crates/aro-tools        Guarded tool registry and sandbox execution
+crates/aro-vector       Vector embeddings and hybrid RRF search
+crates/aro-voice        Local STT (Whisper) and TTS (Piper) adapters
+docs/                   Product, architecture, security, and model setup
+scripts/                Developer setup and verification checks
+vendor/voice            Local voice runtimes and models, ignored by Git
+`
 
 ## Quick Start
 
@@ -53,7 +68,7 @@ npm install
 Run the desktop app in development:
 
 ```powershell
-
+npm run desktop:dev
 ```
 
 Run the PostgreSQL API in development:
@@ -80,14 +95,17 @@ Then start the desktop app in another terminal. The first screen is the auth gat
 
 Run checks:
 
-```powershell
+`powershell
+npm run contracts:check
+npm run api-client:test
+npm run test:unit
+npm run test:components
 npm run check
 npm run build
 npm run doctor
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+npm run lint:rust
 cargo test --workspace
-```
+`
 
 Run a full API smoke test against the local PostgreSQL stack:
 

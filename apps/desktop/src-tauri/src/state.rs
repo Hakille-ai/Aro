@@ -50,7 +50,9 @@ impl AppState {
         let keyring_id = format!("search-{}", settings.search.provider);
         settings.search.api_key = load_provider_api_key(&keyring_id).ok().flatten();
         settings.search.auth_configured = settings.search.api_key.is_some();
-        let smtp_pw = load_provider_api_key("notification-smtp-password").ok().flatten();
+        let smtp_pw = load_provider_api_key("notification-smtp-password")
+            .ok()
+            .flatten();
         let notif_api = load_provider_api_key("notification-api-key").ok().flatten();
         settings.notification.auth_configured = smtp_pw.is_some() || notif_api.is_some();
         settings.notification.smtp_password = smtp_pw;
@@ -100,7 +102,9 @@ impl AppState {
                 }
             }
             Err(err) => {
-                eprintln!("ARO: could not wipe AI cache after cloud user change (kept for retry): {err}");
+                eprintln!(
+                    "ARO: could not wipe AI cache after cloud user change (kept for retry): {err}"
+                );
             }
         }
     }
@@ -371,9 +375,8 @@ fn load_last_cloud_user_id(data_dir: &Path) -> AroResult<Option<String>> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(AroError::Configuration(err.to_string())),
     };
-    let value: serde_json::Value =
-        serde_json::from_str(raw.trim_start_matches('\u{feff}'))
-            .map_err(|err| AroError::Configuration(err.to_string()))?;
+    let value: serde_json::Value = serde_json::from_str(raw.trim_start_matches('\u{feff}'))
+        .map_err(|err| AroError::Configuration(err.to_string()))?;
     Ok(value
         .get("userId")
         .and_then(|v| v.as_str())

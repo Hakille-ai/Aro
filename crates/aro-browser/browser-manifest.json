@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "note": "Pinned browser automation versions. The sidecar/headless-shell binaries are resolved in Phase 5 (packaging). For now the service drives a system Chrome/Edge/Chromium channel (see config.rs discovery).",
+  "chromiumoxide": "0.9.1",
+  "headlessShell": {
+    "version": "stable",
+    "source": "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
+  },
+  "targets": {
+    "x86_64-pc-windows-msvc": { "channel": "system-first", "fallback": "sidecar" },
+    "x86_64-apple-darwin": { "channel": "system-first", "fallback": "sidecar" },
+    "aarch64-apple-darwin": { "channel": "system-first", "fallback": "sidecar" },
+    "x86_64-unknown-linux-gnu": { "channel": "system-first", "fallback": "sidecar" }
+  }
+}

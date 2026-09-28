@@ -1167,12 +1167,7 @@ pub fn merge_memory_results(
     for (_, memory) in all_by_id {
         let last_used = memory.last_used_at.unwrap_or(memory.created_at);
         let recency = compute_recency_decay(last_used, now, memory.pinned);
-        let utility = compute_memory_utility(
-            0.0,
-            memory.salience,
-            recency,
-            memory.recall_count,
-        );
+        let utility = compute_memory_utility(0.0, memory.salience, recency, memory.recall_count);
         scored_unpinned.push((memory, utility));
     }
 
@@ -1182,7 +1177,13 @@ pub fn merge_memory_results(
             .1
             .partial_cmp(&left.1)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| right.0.salience.partial_cmp(&left.0.salience).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                right
+                    .0
+                    .salience
+                    .partial_cmp(&left.0.salience)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| right.0.updated_at.cmp(&left.0.updated_at))
             .then_with(|| left.0.id.cmp(&right.0.id))
     });
@@ -1441,7 +1442,6 @@ mod tests {
         let fused = reciprocal_rank_fusion(&empty_fts, &empty_vec, 60.0, 0.40, 0.60);
         assert!(fused.is_empty());
     }
-
 
     #[tokio::test]
     #[ignore = "requires local Qdrant on 127.0.0.1:6333/6334"]

@@ -1,8 +1,10 @@
 mod api_client;
+mod billing;
+mod commands;
 mod plugin_accounts;
 mod state;
-mod billing;
 mod workspace_patch;
+use commands::{agent_dispatch_directive, agent_get_memory, agent_save_memory};
 use workspace_patch::apply_unified_patch;
 
 use std::collections::BTreeMap;
@@ -16,13 +18,13 @@ use api_client::{
 use aro_core::{
     AgentContextItem, AgentLaneView, AgentOrchestratorSnapshot, AgentRun, AgentRunPriority,
     AgentRunStartRequest, AgentRunStatus, AgentRunView, AppSettings, AroError, AroResult,
-    AssistantMode, AuthSession, ChatMessage, Conversation, Episode, FileObject, Folder, LongTermMemory,
-    Membership, MembershipRole, ModelProviderConnection, ModelProviderKind, ModelRef,
-    NotificationFilter, NotificationItem, Organization,
-    OrganizationMember, PermissionProfile, Project, PublicApiKey, RuntimeStatus,
-    SendMessageRequest, SendMessageResponse, SyncStatus, SynthesisRequest, SynthesisResult,
-    TranscriptionRequest, TranscriptionResult, User, UserPreferences, VoiceReadinessIssue,
-    VoiceReadinessIssueCode, VoiceRuntimeKind, VoiceSettings, VoiceStatus,
+    AssistantMode, AuthSession, ChatMessage, Conversation, Episode, FileObject, Folder,
+    LongTermMemory, Membership, MembershipRole, ModelProviderConnection, ModelProviderKind,
+    ModelRef, NotificationFilter, NotificationItem, Organization, OrganizationMember,
+    PermissionProfile, Project, PublicApiKey, RuntimeStatus, SendMessageRequest,
+    SendMessageResponse, SyncStatus, SynthesisRequest, SynthesisResult, TranscriptionRequest,
+    TranscriptionResult, User, UserPreferences, VoiceReadinessIssue, VoiceReadinessIssueCode,
+    VoiceRuntimeKind, VoiceSettings, VoiceStatus,
     WakeWordDetectionRequest as CoreWakeWordDetectionRequest, WakeWordRuntimeKind,
 };
 use aro_runtime::{list_models_for_connection, ModelRouter};
@@ -346,10 +348,11 @@ async fn cloud_invitation_accept(
     token: String,
     email: String,
     password: String,
+    totp_code: Option<String>,
 ) -> CommandResult<CloudSessionView> {
     let session = state
         .cloud
-        .accept_invitation(token, email, password)
+        .accept_invitation(token, email, password, totp_code)
         .await
         .map_err(to_command_error)?;
     let session = state
@@ -1844,6 +1847,7 @@ async fn project_list(state: State<'_, AppState>) -> CommandResult<Vec<Project>>
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn project_create(
     state: State<'_, AppState>,
     name: String,
@@ -2580,7 +2584,10 @@ async fn notification_list(
     filter: Option<NotificationFilter>,
 ) -> CommandResult<Vec<NotificationItem>> {
     let f = filter.unwrap_or_default();
-    state.engine.list_notifications(&f).map_err(to_command_error)
+    state
+        .engine
+        .list_notifications(&f)
+        .map_err(to_command_error)
 }
 
 #[tauri::command]
@@ -2588,20 +2595,28 @@ async fn notification_create(
     state: State<'_, AppState>,
     item: NotificationItem,
 ) -> CommandResult<NotificationItem> {
-    let created = state.engine.create_notification(&item).map_err(to_command_error)?;
+    let created = state
+        .engine
+        .create_notification(&item)
+        .map_err(to_command_error)?;
     let settings = state.settings().await;
     if settings.notification.desktop_notifications_enabled {
-        let _ = notify_desktop_os(created.title.clone(), created.body.clone(), created.action_url.clone()).await;
+        let _ = notify_desktop_os(
+            created.title.clone(),
+            created.body.clone(),
+            created.action_url.clone(),
+        )
+        .await;
     }
     Ok(created)
 }
 
 #[tauri::command]
-async fn notification_mark_read(
-    state: State<'_, AppState>,
-    id: String,
-) -> CommandResult<bool> {
-    state.engine.mark_notification_as_read(&id).map_err(to_command_error)
+async fn notification_mark_read(state: State<'_, AppState>, id: String) -> CommandResult<bool> {
+    state
+        .engine
+        .mark_notification_as_read(&id)
+        .map_err(to_command_error)
 }
 
 #[tauri::command]
@@ -2609,15 +2624,18 @@ async fn notification_mark_all_read(
     state: State<'_, AppState>,
     organization_id: Option<Uuid>,
 ) -> CommandResult<u64> {
-    state.engine.mark_all_notifications_as_read(organization_id).map_err(to_command_error)
+    state
+        .engine
+        .mark_all_notifications_as_read(organization_id)
+        .map_err(to_command_error)
 }
 
 #[tauri::command]
-async fn notification_delete(
-    state: State<'_, AppState>,
-    id: String,
-) -> CommandResult<bool> {
-    state.engine.delete_notification(&id).map_err(to_command_error)
+async fn notification_delete(state: State<'_, AppState>, id: String) -> CommandResult<bool> {
+    state
+        .engine
+        .delete_notification(&id)
+        .map_err(to_command_error)
 }
 
 #[tauri::command]
@@ -2625,7 +2643,10 @@ async fn notification_clear_all(
     state: State<'_, AppState>,
     organization_id: Option<Uuid>,
 ) -> CommandResult<u64> {
-    state.engine.clear_all_notifications(organization_id).map_err(to_command_error)
+    state
+        .engine
+        .clear_all_notifications(organization_id)
+        .map_err(to_command_error)
 }
 
 #[tauri::command]
@@ -2633,7 +2654,10 @@ async fn notification_unread_count(
     state: State<'_, AppState>,
     organization_id: Option<Uuid>,
 ) -> CommandResult<u64> {
-    state.engine.get_unread_notification_count(organization_id).map_err(to_command_error)
+    state
+        .engine
+        .get_unread_notification_count(organization_id)
+        .map_err(to_command_error)
 }
 
 #[tauri::command]
@@ -2649,7 +2673,11 @@ async fn notification_set_secret(
     let keyring_id = match secret_type.as_str() {
         "smtp_password" | "smtpPassword" => "notification-smtp-password",
         "api_key" | "apiKey" => "notification-api-key",
-        _ => return Err(format!("Unsupported notification secret type: {secret_type}")),
+        _ => {
+            return Err(format!(
+                "Unsupported notification secret type: {secret_type}"
+            ))
+        }
     };
     save_provider_api_key(keyring_id, key).map_err(to_command_error)?;
     let settings = state.settings().await;
@@ -2664,7 +2692,11 @@ async fn notification_clear_secret(
     let keyring_id = match secret_type.as_str() {
         "smtp_password" | "smtpPassword" => "notification-smtp-password",
         "api_key" | "apiKey" => "notification-api-key",
-        _ => return Err(format!("Unsupported notification secret type: {secret_type}")),
+        _ => {
+            return Err(format!(
+                "Unsupported notification secret type: {secret_type}"
+            ))
+        }
     };
     clear_provider_api_key(keyring_id).map_err(to_command_error)?;
     let settings = state.settings().await;
@@ -2684,12 +2716,20 @@ async fn email_send_direct(
 
     match provider.as_str() {
         "resend" => {
-            let api_key = settings.notification.api_key
+            let api_key = settings
+                .notification
+                .api_key
                 .or_else(|| std::env::var("RESEND_API_KEY").ok())
                 .filter(|k| !k.trim().is_empty())
-                .ok_or_else(|| "Clé API Resend non configurée dans les Paramètres ARO".to_string())?;
+                .ok_or_else(|| {
+                    "Clé API Resend non configurée dans les Paramètres ARO".to_string()
+                })?;
 
-            let from_str = settings.notification.smtp_from.as_deref().unwrap_or("onboarding@resend.dev");
+            let from_str = settings
+                .notification
+                .smtp_from
+                .as_deref()
+                .unwrap_or("onboarding@resend.dev");
             let client = reqwest::Client::new();
             let payload = serde_json::json!({
                 "from": from_str,
@@ -2699,7 +2739,8 @@ async fn email_send_direct(
                 "html": if is_html.unwrap_or(false) { Some(body.as_str()) } else { None }
             });
 
-            let resp = client.post("https://api.resend.com/emails")
+            let resp = client
+                .post("https://api.resend.com/emails")
                 .header("Authorization", format!("Bearer {api_key}"))
                 .json(&payload)
                 .send()
@@ -2712,7 +2753,10 @@ async fn email_send_direct(
                 return Err(format!("Erreur API Resend ({status}): {err_text}"));
             }
 
-            let resp_json: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({ "success": true }));
+            let resp_json: serde_json::Value = resp
+                .json()
+                .await
+                .unwrap_or(serde_json::json!({ "success": true }));
             Ok(serde_json::json!({
                 "success": true,
                 "provider": "resend",
@@ -2721,14 +2765,26 @@ async fn email_send_direct(
             }))
         }
         "sendgrid" => {
-            let api_key = settings.notification.api_key
+            let api_key = settings
+                .notification
+                .api_key
                 .or_else(|| std::env::var("SENDGRID_API_KEY").ok())
                 .filter(|k| !k.trim().is_empty())
-                .ok_or_else(|| "Clé API SendGrid non configurée dans les Paramètres ARO".to_string())?;
+                .ok_or_else(|| {
+                    "Clé API SendGrid non configurée dans les Paramètres ARO".to_string()
+                })?;
 
-            let from_str = settings.notification.smtp_from.as_deref().unwrap_or("noreply@aro-ai.com");
+            let from_str = settings
+                .notification
+                .smtp_from
+                .as_deref()
+                .unwrap_or("noreply@aro-ai.com");
             let client = reqwest::Client::new();
-            let content_type = if is_html.unwrap_or(false) { "text/html" } else { "text/plain" };
+            let content_type = if is_html.unwrap_or(false) {
+                "text/html"
+            } else {
+                "text/plain"
+            };
             let payload = serde_json::json!({
                 "personalizations": [{
                     "to": [{ "email": to.trim() }]
@@ -2741,7 +2797,8 @@ async fn email_send_direct(
                 }]
             });
 
-            let resp = client.post("https://api.sendgrid.com/v3/mail/send")
+            let resp = client
+                .post("https://api.sendgrid.com/v3/mail/send")
                 .header("Authorization", format!("Bearer {api_key}"))
                 .json(&payload)
                 .send()
@@ -2762,14 +2819,27 @@ async fn email_send_direct(
             }))
         }
         _ => {
-            let host = settings.notification.smtp_host.as_deref().unwrap_or("").trim();
+            let host = settings
+                .notification
+                .smtp_host
+                .as_deref()
+                .unwrap_or("")
+                .trim();
             if host.is_empty() {
                 return Err("Serveur SMTP non configuré dans les Paramètres ARO".into());
             }
             let port = settings.notification.smtp_port.unwrap_or(587);
-            let from_str = settings.notification.smtp_from.as_deref().unwrap_or("noreply@aro-ai.com");
-            let tls_mode = settings.notification.smtp_tls_mode.as_deref().unwrap_or("starttls");
-            
+            let from_str = settings
+                .notification
+                .smtp_from
+                .as_deref()
+                .unwrap_or("noreply@aro-ai.com");
+            let tls_mode = settings
+                .notification
+                .smtp_tls_mode
+                .as_deref()
+                .unwrap_or("starttls");
+
             use lettre::{
                 message::{header::ContentType, Mailbox},
                 transport::smtp::authentication::Credentials,
@@ -2777,19 +2847,22 @@ async fn email_send_direct(
             };
             use std::time::Duration;
 
-            let from: Mailbox = from_str.parse().map_err(|e| format!("Adresse expéditeur invalide: {e}"))?;
-            let to_mb: Mailbox = to.trim().parse().map_err(|e| format!("Adresse destinataire invalide: {e}"))?;
+            let from: Mailbox = from_str
+                .parse()
+                .map_err(|e| format!("Adresse expéditeur invalide: {e}"))?;
+            let to_mb: Mailbox = to
+                .trim()
+                .parse()
+                .map_err(|e| format!("Adresse destinataire invalide: {e}"))?;
 
-            let builder = Message::builder()
-                .from(from)
-                .to(to_mb)
-                .subject(subject);
+            let builder = Message::builder().from(from).to(to_mb).subject(subject);
 
             let message = if is_html.unwrap_or(false) {
                 builder.header(ContentType::TEXT_HTML).body(body)
             } else {
                 builder.header(ContentType::TEXT_PLAIN).body(body)
-            }.map_err(|e| format!("Erreur de composition de message: {e}"))?;
+            }
+            .map_err(|e| format!("Erreur de composition de message: {e}"))?;
 
             let transport_builder = if tls_mode.eq_ignore_ascii_case("tls") {
                 AsyncSmtpTransport::<Tokio1Executor>::relay(host)
@@ -2804,14 +2877,21 @@ async fn email_send_direct(
             };
 
             let mut transport_builder = transport_builder;
-            if let (Some(username), Some(password)) = (&settings.notification.smtp_user, &settings.notification.smtp_password) {
+            if let (Some(username), Some(password)) = (
+                &settings.notification.smtp_user,
+                &settings.notification.smtp_password,
+            ) {
                 if !username.trim().is_empty() && !password.trim().is_empty() {
-                    transport_builder = transport_builder.credentials(Credentials::new(username.clone(), password.clone()));
+                    transport_builder = transport_builder
+                        .credentials(Credentials::new(username.clone(), password.clone()));
                 }
             }
 
             let mailer = transport_builder.build();
-            let response = mailer.send(message).await.map_err(|e| format!("Échec de l'envoi d'e-mail: {e}"))?;
+            let response = mailer
+                .send(message)
+                .await
+                .map_err(|e| format!("Échec de l'envoi d'e-mail: {e}"))?;
 
             Ok(serde_json::json!({
                 "success": true,
@@ -2824,13 +2904,16 @@ async fn email_send_direct(
 }
 
 #[tauri::command]
-async fn email_test_connection(
-    state: State<'_, AppState>,
-) -> CommandResult<serde_json::Value> {
+async fn email_test_connection(state: State<'_, AppState>) -> CommandResult<serde_json::Value> {
     let settings = state.settings().await;
-    let recipient = settings.notification.email_recipient.clone()
+    let recipient = settings
+        .notification
+        .email_recipient
+        .clone()
         .filter(|r| !r.trim().is_empty())
-        .ok_or_else(|| "Veuillez configurer une adresse e-mail de destinataire dans les Paramètres".to_string())?;
+        .ok_or_else(|| {
+            "Veuillez configurer une adresse e-mail de destinataire dans les Paramètres".to_string()
+        })?;
 
     email_send_direct(
         state,
@@ -3542,7 +3625,10 @@ async fn message_send_stream(
     }
 
     let mut step_callback = |step: aro_core::AgentStep| {
-        if matches!(step.kind, aro_core::AgentStepKind::Tool | aro_core::AgentStepKind::Error) {
+        if matches!(
+            step.kind,
+            aro_core::AgentStepKind::Tool | aro_core::AgentStepKind::Error
+        ) {
             let _ = app_clone_step.emit(
                 "agent-step-update",
                 AgentStepPayload {
@@ -4296,17 +4382,18 @@ async fn plugins_account_connect_api_key(
 
     let auth_method = request.auth_method.unwrap_or_else(|| "api_key".to_string());
     let trimmed_key = request.api_key.trim();
-    let account_identifier = if let Some(ident) = request.account_identifier.filter(|s| !s.trim().is_empty()) {
-        ident.trim().to_string()
-    } else if let Some(lbl) = request.label.as_ref().filter(|s| !s.trim().is_empty()) {
-        lbl.trim().to_string()
-    } else {
-        format!(
-            "key-{}...{}",
-            &trimmed_key[..3.min(trimmed_key.len())],
-            &trimmed_key[trimmed_key.len().saturating_sub(4)..]
-        )
-    };
+    let account_identifier =
+        if let Some(ident) = request.account_identifier.filter(|s| !s.trim().is_empty()) {
+            ident.trim().to_string()
+        } else if let Some(lbl) = request.label.as_ref().filter(|s| !s.trim().is_empty()) {
+            lbl.trim().to_string()
+        } else {
+            format!(
+                "key-{}...{}",
+                &trimmed_key[..3.min(trimmed_key.len())],
+                &trimmed_key[trimmed_key.len().saturating_sub(4)..]
+            )
+        };
 
     let label = request.label.unwrap_or_else(|| account_identifier.clone());
 
@@ -4436,6 +4523,149 @@ async fn computer_use(
     request: serde_json::Value,
 ) -> CommandResult<aro_core::ToolExecutionResult> {
     execute_tool_with_workspace_root(&state, aro_core::TOOL_CORE_COMPUTER_USE, request).await
+}
+
+#[tauri::command]
+async fn browser_fetch_page_text(
+    state: State<'_, AppState>,
+    url: String,
+    max_chars: Option<usize>,
+) -> CommandResult<aro_core::WebPageSnapshot> {
+    // Lecture serveur one-shot pour le mode lecteur du navigateur intégré
+    // (sites refusant l'iframe). Aucun run agent, aucune étape persistée.
+    state
+        .engine
+        .fetch_page_snapshot(&url, max_chars)
+        .await
+        .map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn browser_vault_save(account: String, kind: String, secret: String) -> CommandResult<bool> {
+    // Le coffre vit dans le keyring OS. Il n'existe AUCUNE commande de
+    // lecture : les secrets ne ressortent que via l'autofill CDP.
+    if account.trim().is_empty() || secret.is_empty() {
+        return Err("account and secret are required".to_string());
+    }
+    let key = match kind.trim().to_lowercase().as_str() {
+        "password" | "username" => format!("{}:{}", account.trim(), kind.trim().to_lowercase()),
+        _ => return Err("kind must be 'username' or 'password'".to_string()),
+    };
+    aro_browser::save_credential(&key, &aro_browser::SecretString::new(secret))
+        .map_err(to_command_error)?;
+    Ok(true)
+}
+
+#[tauri::command]
+async fn browser_vault_has(account: String, kind: String) -> CommandResult<bool> {
+    let key = format!("{}:{}", account.trim(), kind.trim().to_lowercase());
+    match aro_browser::load_credential(&key) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+#[tauri::command]
+async fn browser_vault_delete(account: String, kind: String) -> CommandResult<bool> {
+    let key = format!("{}:{}", account.trim(), kind.trim().to_lowercase());
+    match aro_browser::delete_credential(&key) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+fn parse_browser_tab(tab_id: &str) -> Result<aro_tools::BrowserTabId, String> {
+    uuid::Uuid::parse_str(tab_id.trim())
+        .map(aro_tools::BrowserTabId)
+        .map_err(|_| format!("invalid browser tab id `{tab_id}`"))
+}
+
+#[tauri::command]
+async fn browser_tabs_list(state: State<'_, AppState>) -> CommandResult<Vec<aro_tools::BrowserTabInfo>> {
+    state.engine.tool_executor().browser_tab_list().await.map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn browser_tab_open(state: State<'_, AppState>, url: Option<String>) -> CommandResult<aro_tools::BrowserTabInfo> {
+    state.engine.tool_executor().browser_tab_open(url).await.map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn browser_tab_close(state: State<'_, AppState>, tab_id: String) -> CommandResult<bool> {
+    let id = parse_browser_tab(&tab_id)?;
+    state.engine.tool_executor().browser_tab_close(id).await.map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn browser_navigate(state: State<'_, AppState>, tab_id: Option<String>, url: String) -> CommandResult<aro_tools::PageSnapshot> {
+    let id = tab_id.map(|t| parse_browser_tab(&t)).transpose()?;
+    state.engine.tool_executor().browser_navigate_tab(id, &url).await.map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn browser_snapshot(state: State<'_, AppState>, tab_id: String) -> CommandResult<aro_tools::PageSnapshot> {
+    let id = parse_browser_tab(&tab_id)?;
+    state.engine.tool_executor().browser_snapshot_tab(id).await.map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn browser_frame(state: State<'_, AppState>, tab_id: String) -> CommandResult<BrowserFrame> {
+    let id = parse_browser_tab(&tab_id)?;
+    let jpeg = state.engine.tool_executor().browser_frame_jpeg(id).await.map_err(to_command_error)?;
+    Ok(BrowserFrame { image_base64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &jpeg), mime: "image/jpeg".to_string() })
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserFrame {
+    image_base64: String,
+    mime: String,
+}
+
+#[tauri::command]
+async fn browser_click(state: State<'_, AppState>, tab_id: String, x: f64, y: f64) -> CommandResult<aro_tools::PageSnapshot> {
+    let id = parse_browser_tab(&tab_id)?;
+    state.engine.tool_executor().browser_click_point(id, x, y).await.map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn browser_click_ref(state: State<'_, AppState>, tab_id: String, target_ref: String) -> CommandResult<aro_tools::PageSnapshot> {
+    let id = parse_browser_tab(&tab_id)?;
+    state.engine.tool_executor().browser_click_ref(id, &target_ref).await.map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn browser_autofill_user(state: State<'_, AppState>, tab_id: String, username_ref: String, password_ref: String, account: String) -> CommandResult<aro_tools::PageSnapshot> {
+    let id = parse_browser_tab(&tab_id)?;
+    state.engine.tool_executor().browser_autofill_user(id, &username_ref, &password_ref, &account).await.map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn browser_type_text(state: State<'_, AppState>, tab_id: String, text: String) -> CommandResult<aro_tools::PageSnapshot> {
+    let id = parse_browser_tab(&tab_id)?;
+    state.engine.tool_executor().browser_type_focused(id, &text).await.map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn browser_press_key(state: State<'_, AppState>, tab_id: String, key: String) -> CommandResult<aro_tools::PageSnapshot> {
+    let id = parse_browser_tab(&tab_id)?;
+    state.engine.tool_executor().browser_press_key(id, &key).await.map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn browser_wheel(state: State<'_, AppState>, tab_id: String, delta_x: f64, delta_y: f64) -> CommandResult<aro_tools::PageSnapshot> {
+    let id = parse_browser_tab(&tab_id)?;
+    state.engine.tool_executor().browser_wheel(id, delta_x, delta_y).await.map_err(to_command_error)
+}
+
+#[tauri::command]
+async fn browser_import_bookmarks() -> CommandResult<Vec<aro_browser::ImportedBookmark>> {
+    aro_browser::import_bookmarks().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn browser_import_history(limit: Option<usize>) -> CommandResult<Vec<aro_browser::ImportedHistoryEntry>> {
+    aro_browser::import_history(limit.unwrap_or(100)).map_err(|err| err.to_string())
 }
 
 fn to_command_error(error: impl std::fmt::Display) -> String {
@@ -5014,6 +5244,9 @@ fn main() {
             message_send_stream,
             message_arena_stream,
             message_update,
+            agent_get_memory,
+            agent_save_memory,
+            agent_dispatch_directive,
             agent_run_start,
             agent_run_list,
             agent_orchestrator_snapshot,
@@ -5068,7 +5301,25 @@ fn main() {
             assistant_status,
             code_execute,
             document_create,
-            computer_use
+            computer_use,
+            browser_fetch_page_text,
+            browser_vault_save,
+            browser_vault_has,
+            browser_vault_delete,
+            browser_tabs_list,
+            browser_tab_open,
+            browser_tab_close,
+            browser_navigate,
+            browser_snapshot,
+            browser_frame,
+            browser_click,
+            browser_click_ref,
+            browser_autofill_user,
+            browser_type_text,
+            browser_press_key,
+            browser_wheel,
+            browser_import_bookmarks,
+            browser_import_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running ARO");

@@ -13,6 +13,7 @@ export interface BrowserCredential {
   id: string;
   domain: string;
   username: string;
+  /** Legacy plaintext slot — always empty since the vault migration (secrets live in the OS keyring). */
   password: string;
   createdAt: string;
   lastUsedAt?: string;
@@ -102,17 +103,32 @@ export const browserHistory = writable<BrowserHistoryEntry[]>(
 );
 
 export const browserCredentials = writable<BrowserCredential[]>(
-  loadFromStorage<BrowserCredential[]>(STORAGE_KEY_CREDENTIALS, [
-    {
-      id: "cred-demo-1",
-      domain: "github.com",
-      username: "developer@aro.internal",
-      password: "••••••••••••",
-      createdAt: new Date().toISOString(),
-      lastUsedAt: new Date().toISOString(),
-    },
-  ])
+  loadFromStorage<BrowserCredential[]>(STORAGE_KEY_CREDENTIALS, [])
 );
+
+// One-time vault migration: purge any legacy plaintext password that may
+// still sit in localStorage from older versions. Secrets now live only in
+// the OS keyring (see browser_vault_save).
+browserCredentials.update((list) => {
+  let scrubbed = false;
+  const next = list.map((cred) => {
+    if (cred.password) {
+      scrubbed = true;
+      return { ...cred, password: "" };
+    }
+    return cred;
+  });
+  if (scrubbed) {
+    try {
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem(STORAGE_KEY_CREDENTIALS, JSON.stringify(next));
+      }
+    } catch {
+      // Ignore persistence failures: in-memory state is already clean.
+    }
+  }
+  return next;
+});
 
 export const browserPermissions = writable<BrowserPermissions>(
   loadFromStorage<BrowserPermissions>(STORAGE_KEY_PERMISSIONS, defaultPermissions)
@@ -441,8 +457,11 @@ export function deleteBrowserHistoryEntry(id: string): void {
 }
 
 export function addBrowserCredential(cred: Omit<BrowserCredential, "id" | "createdAt">): void {
+  // Vault migration: passwords are NEVER persisted here anymore (OS keyring
+  // via browser_vault_save). The index keeps domain + username only.
   const newCred: BrowserCredential = {
     ...cred,
+    password: "",
     id: "cred-" + Date.now(),
     createdAt: new Date().toISOString(),
   };
@@ -463,11 +482,263 @@ export function updateBrowserPermissions(perms: Partial<BrowserPermissions>): vo
   browserPermissions.update((prev) => ({ ...prev, ...perms }));
 }
 
+// ── Live backend bridge (real Chromium via Tauri) ──────────────────────
+// Graceful outside Tauri (web preview / vitest): every call rejects with a
+// clear error instead of crashing, so the UI can show its offline state.
+
+export interface LiveBrowserTab {
+  id: string;
+  url: string;
+  title: string;
+  loading: boolean;
+  aiControlled: boolean;
+  aiStatusMessage?: string;
+  createdAt: string;
+  lastSnapshotAt?: string;
+}
+
+export interface LiveElementRef {
+  id: string;
+  role: string;
+  name: string;
+  inputType?: string;
+  value?: string;
+  inViewport: boolean;
+}
+
+export interface LivePageSnapshot {
+  tabId: string;
+  url: string;
+  title: string;
+  screenshotBase64: string;
+  screenshotWidth: number;
+  screenshotHeight: number;
+  elements: LiveElementRef[];
+  textExcerpt: string;
+  capturedAt: string;
+}
+
+async function liveInvoke<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
+  if (!isTauri()) throw new Error("live browser requires the Tauri desktop app");
+  const { invoke } = await import("@tauri-apps/api/core");
+  return await invoke<T>(cmd, args);
+}
+
+export const liveBrowserAvailable = (): boolean => isTauri();
+
+export async function liveTabsList(): Promise<LiveBrowserTab[]> {
+  const tabs = await liveInvoke<Array<Record<string, unknown>>>("browser_tabs_list");
+  return tabs.map((t) => ({
+    id: String(t.id ?? (t as { tabId?: unknown }).tabId ?? ""),
+    url: String(t.url ?? ""),
+    title: String(t.title ?? ""),
+    loading: Boolean(t.loading ?? false),
+    aiControlled: Boolean(t.aiControlled ?? (t as { ai_controlled?: unknown }).ai_controlled ?? false),
+    aiStatusMessage: (t.aiStatusMessage as string | undefined) ?? undefined,
+    createdAt: String((t as { createdAt?: unknown }).createdAt ?? new Date().toISOString()),
+    lastSnapshotAt: (t as { lastSnapshotAt?: unknown }) as string | undefined,
+  }));
+}
+
+export async function liveTabOpen(url?: string): Promise<LiveBrowserTab> {
+  const t = await liveInvoke<Record<string, unknown>>("browser_tab_open", { url: url ?? null });
+  return {
+    id: String(t.id ?? ""),
+    url: String(t.url ?? url ?? ""),
+    title: String(t.title ?? ""),
+    loading: false,
+    aiControlled: false,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+export async function liveTabClose(tabId: string): Promise<boolean> {
+  return await liveInvoke<boolean>("browser_tab_close", { tabId });
+}
+
+export async function liveNavigate(tabId: string | null, url: string): Promise<LivePageSnapshot> {
+  return await liveInvoke<LivePageSnapshot>("browser_navigate", { tabId, url });
+}
+
+export async function liveSnapshot(tabId: string): Promise<LivePageSnapshot> {
+  return await liveInvoke<LivePageSnapshot>("browser_snapshot", { tabId });
+}
+
+export async function liveFrame(tabId: string): Promise<{ imageBase64: string; mime: string }> {
+  return await liveInvoke<{ imageBase64: string; mime: string }>("browser_frame", { tabId });
+}
+
+export async function liveClick(tabId: string, x: number, y: number): Promise<LivePageSnapshot> {
+  return await liveInvoke<LivePageSnapshot>("browser_click", { tabId, x, y });
+}
+
+export async function liveClickRef(tabId: string, targetRef: string): Promise<LivePageSnapshot> {
+  return await liveInvoke<LivePageSnapshot>("browser_click_ref", { tabId, targetRef });
+}
+
+export async function liveTypeText(tabId: string, text: string): Promise<LivePageSnapshot> {
+  return await liveInvoke<LivePageSnapshot>("browser_type_text", { tabId, text });
+}
+
+export async function livePressKey(tabId: string, key: string): Promise<LivePageSnapshot> {
+  return await liveInvoke<LivePageSnapshot>("browser_press_key", { tabId, key });
+}
+
+export async function liveWheel(tabId: string, deltaX: number, deltaY: number): Promise<LivePageSnapshot> {
+  return await liveInvoke<LivePageSnapshot>("browser_wheel", { tabId, deltaX, deltaY });
+}
+
+export async function liveAutofillUser(tabId: string, usernameRef: string, passwordRef: string, account: string): Promise<LivePageSnapshot> {
+  return await liveInvoke<LivePageSnapshot>("browser_autofill_user", { tabId, usernameRef, passwordRef, account });
+}
+
+// ── Vault (OS keyring — write/has/delete only, never read) ─────────────
+
+export async function vaultSave(account: string, kind: "username" | "password", secret: string): Promise<boolean> {
+  try {
+    return await liveInvoke<boolean>("browser_vault_save", { account, kind, secret });
+  } catch {
+    return false;
+  }
+}
+
+export async function vaultHas(account: string, kind: "username" | "password"): Promise<boolean> {
+  try {
+    return await liveInvoke<boolean>("browser_vault_has", { account, kind });
+  } catch {
+    return false;
+  }
+}
+
+export async function vaultDelete(account: string, kind: "username" | "password"): Promise<boolean> {
+  try {
+    return await liveInvoke<boolean>("browser_vault_delete", { account, kind });
+  } catch {
+    return false;
+  }
+}
+
+// ── Vault account index (domains only — never secrets) ─────────────────
+
+const STORAGE_KEY_VAULT_ACCOUNTS = "aro_vault_accounts";
+
+export const vaultAccounts = writable<string[]>(
+  loadFromStorage<string[]>(STORAGE_KEY_VAULT_ACCOUNTS, [])
+);
+
+vaultAccounts.subscribe((val) => saveToStorage(STORAGE_KEY_VAULT_ACCOUNTS, val));
+
+export function vaultAccountAdd(account: string): void {
+  const clean = account.trim().toLowerCase().replace(/^https?:\/\//i, "").split("/")[0];
+  if (!clean) return;
+  vaultAccounts.update((list) => (list.includes(clean) ? list : [...list, clean]));
+}
+
+export function vaultAccountRemove(account: string): void {
+  vaultAccounts.update((list) => list.filter((a) => a !== account));
+}
+
+// ── System browser import ──────────────────────────────────────────────
+
+export interface ImportedBookmark {
+  name: string;
+  url: string;
+}
+
+export interface ImportedHistoryEntry {
+  url: string;
+  title: string;
+  visitCount: number;
+}
+
+export async function importSystemBookmarks(): Promise<ImportedBookmark[]> {
+  return await liveInvoke<ImportedBookmark[]>("browser_import_bookmarks");
+}
+
+export async function importSystemHistory(limit = 100): Promise<ImportedHistoryEntry[]> {
+  return await liveInvoke<ImportedHistoryEntry[]>("browser_import_history", { limit });
+}
+
 function extractDomain(url: string): string {
   try {
     const parsed = new URL(url);
     return parsed.hostname.replace(/^www\./, "");
   } catch {
     return url;
+  }
+}
+
+function isTauri(): boolean {
+  return typeof window !== "undefined" && Boolean((window as any).__TAURI_INTERNALS__);
+}
+
+async function invokeTauri<T>(cmd: string, args: Record<string, any> = {}): Promise<T> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return await invoke<T>(cmd, args);
+}
+
+export interface ReaderPageSnapshot {
+  url: string;
+  finalUrl: string;
+  title: string;
+  excerpt: string;
+  content: string;
+  status: number;
+}
+
+// Onglets pour lesquels une extraction lecteur est déjà en cours
+// (évite les doubles appels du $: réactif Svelte).
+const readerFetchInflight = new Set<string>();
+
+function setTabReaderState(
+  targetTabId: string,
+  patch: Partial<Pick<BrowserTab, "extractedContent" | "loading" | "title">>
+): void {
+  browserTabs.update((tabs) =>
+    tabs.map((tab) => {
+      if (tab.id !== targetTabId) return tab;
+      const updated: BrowserTab = { ...tab, ...patch };
+      if (tab.id === get(activeTabId)) {
+        internalActiveTab.set(updated);
+      }
+      return updated;
+    })
+  );
+}
+
+/**
+ * Récupère le contenu texte réel d'une page via le backend Rust
+ * (`browser_fetch_page_text`) et le stocke dans `extractedContent`
+ * pour le mode lecteur. Utilisé quand un site refuse l'iframe
+ * (X-Frame-Options / CSP) : le panneau affiche du vrai contenu
+ * au lieu d'un cadre vide. No-op hors Tauri ou si déjà extrait.
+ */
+export async function fetchReaderContent(tabId?: string): Promise<void> {
+  const targetTabId = tabId || get(activeTabId);
+  const tabs = get(browserTabs);
+  const tab = tabs.find((t) => t.id === targetTabId);
+  if (!tab || !isTauri()) return;
+  if (tab.extractedContent || readerFetchInflight.has(targetTabId)) return;
+  if (!/^https?:\/\//i.test(tab.url)) return;
+  readerFetchInflight.add(targetTabId);
+  setTabReaderState(targetTabId, { loading: true });
+  try {
+    const snap = await invokeTauri<ReaderPageSnapshot>("browser_fetch_page_text", {
+      url: tab.url,
+      maxChars: 24000,
+    });
+    const body = (snap.content || snap.excerpt || "").trim();
+    setTabReaderState(targetTabId, {
+      loading: false,
+      title: snap.title || tab.title,
+      extractedContent: body
+        ? `${snap.title ? `# ${snap.title}\n\n` : ""}${body}`
+        : undefined,
+    });
+    if (!body) readerFetchInflight.delete(targetTabId);
+  } catch (err) {
+    console.warn("Reader content fetch failed for", tab.url, err);
+    setTabReaderState(targetTabId, { loading: false });
+    readerFetchInflight.delete(targetTabId);
   }
 }

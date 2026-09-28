@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use std::thread;
 use aro_core::LongTermMemory;
 use aro_memory::SqliteMemoryStore;
+use std::sync::Arc;
+use std::thread;
 use uuid::Uuid;
 
 fn setup_test_store() -> (SqliteMemoryStore, std::path::PathBuf) {
@@ -23,7 +23,9 @@ fn test_get_memories_by_ids_empty_and_single() {
     mem.category = "personal".to_string();
     store.upsert_memory(&mem).expect("upsert mem");
 
-    let single_res = store.get_memories_by_ids(&[mem.id]).expect("single ID query");
+    let single_res = store
+        .get_memories_by_ids(&[mem.id])
+        .expect("single ID query");
     assert_eq!(single_res.len(), 1);
     assert_eq!(single_res[0].id, mem.id);
     assert_eq!(single_res[0].content, "Knowledge item alpha");
@@ -80,7 +82,9 @@ fn test_get_memories_by_ids_strict_order_preservation() {
     let mut query_ids: Vec<Uuid> = original_memories.iter().map(|m| m.id).collect();
     query_ids.reverse();
 
-    let retrieved = store.get_memories_by_ids(&query_ids).expect("reversed query");
+    let retrieved = store
+        .get_memories_by_ids(&query_ids)
+        .expect("reversed query");
     assert_eq!(retrieved.len(), 100);
 
     for (i, mem) in retrieved.iter().enumerate() {
@@ -123,7 +127,9 @@ fn test_get_memories_by_ids_duplicates_missing_and_deleted() {
         non_existent_2,
     ];
 
-    let retrieved = store.get_memories_by_ids(&query).expect("query with dup/missing/deleted");
+    let retrieved = store
+        .get_memories_by_ids(&query)
+        .expect("query with dup/missing/deleted");
 
     // Expected: duplicates deduplicated at first occurrence, missing ignored, deleted ignored
     // Result order: [m1, m3]
@@ -172,7 +178,9 @@ fn test_touch_memories_used_batch_and_atomicity() {
     store.upsert_memory(&m3).expect("upsert 3");
 
     // Batch touch on m1 and m3
-    store.touch_memories_used(&[m1.id, m3.id]).expect("batch touch");
+    store
+        .touch_memories_used(&[m1.id, m3.id])
+        .expect("batch touch");
 
     let r1 = store.get_memory(m1.id).expect("get 1").unwrap();
     let r2 = store.get_memory(m2.id).expect("get 2").unwrap();
@@ -218,7 +226,10 @@ fn test_touch_memories_used_concurrent_multithreaded_strict_increments() {
         handle.join().expect("thread join failed");
     }
 
-    let final_mem = shared_store.get_memory(target_id).expect("get").expect("found");
+    let final_mem = shared_store
+        .get_memory(target_id)
+        .expect("get")
+        .expect("found");
     let expected_count = (num_threads * touches_per_thread) as u32;
 
     assert_eq!(
@@ -238,7 +249,9 @@ fn test_touch_memories_used_on_deleted_and_missing_records() {
     store.upsert_memory(&mem).expect("upsert");
 
     // Touch once -> recall_count = 1
-    store.touch_memories_used(&[mem.id]).expect("touch before delete");
+    store
+        .touch_memories_used(&[mem.id])
+        .expect("touch before delete");
     let before_delete = store.get_memory(mem.id).expect("get").unwrap();
     assert_eq!(before_delete.recall_count, 1);
 
@@ -246,7 +259,9 @@ fn test_touch_memories_used_on_deleted_and_missing_records() {
     store.delete_memory(mem.id).expect("delete");
 
     // Touch after delete -> should not increment because WHERE deleted_at IS NULL
-    store.touch_memories_used(&[mem.id]).expect("touch after delete");
+    store
+        .touch_memories_used(&[mem.id])
+        .expect("touch after delete");
 
     // Verify in raw SQLite that recall_count is still 1
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -257,11 +272,16 @@ fn test_touch_memories_used_on_deleted_and_missing_records() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(raw_recall, 1, "Deleted memory recall_count must not increment");
+    assert_eq!(
+        raw_recall, 1,
+        "Deleted memory recall_count must not increment"
+    );
 
     // Non-existent ID touch
     let missing_id = Uuid::new_v4();
-    store.touch_memories_used(&[missing_id]).expect("touch non-existent id");
+    store
+        .touch_memories_used(&[missing_id])
+        .expect("touch non-existent id");
 
     let _ = std::fs::remove_file(&path);
 }

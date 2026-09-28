@@ -24,7 +24,7 @@ ARO now has a shared tool execution layer for web-aware agents.
 - extracted page text is truncated to configured limits.
 
 Domain allow-lists support exact domains, wildcard `*`, and subdomain patterns like `*.example.com`.
-Requested domains only narrow the persisted permission profile; they can never broaden it. `webAccess: "auto"` is deny-by-default and performs no prefetch or network call. Only the explicit `"on"` mode can enable web access.
+Requested domains only narrow the persisted permission profile; they can never broaden it. An empty allow-list means all public domains are allowed (consistent with `WebAccessPolicy::domain_allowed`). `webAccess: "auto"` allows web use when useful (URLs, explicit search, sub-agents) — only `"off"` disables network. Sandbox / read-only presets and profiles with `allow_network=false` still block.
 
 ## Runtime Flow
 

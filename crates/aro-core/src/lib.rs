@@ -8,8 +8,8 @@ pub mod identity;
 pub mod instructions;
 pub mod integration;
 pub mod memory;
-pub mod plan;
 pub mod notification;
+pub mod plan;
 pub mod platform;
 pub mod runtime;
 pub mod settings;
@@ -33,4 +33,3 @@ pub use runtime::*;
 pub use settings::*;
 pub use tool::*;
 pub use voice::*;
-

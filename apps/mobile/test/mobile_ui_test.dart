@@ -105,7 +105,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(
-        find.text('Paramètres › ${section.title}'),
+        find.text(section.id == 'billing' ? 'Offre & consommation' : 'Paramètres › ${section.title}'),
         findsOneWidget,
         reason: section.id,
       );

@@ -26,6 +26,9 @@
 *.sqlite
 *.sqlite3
 /vendor/voice/downloads/
+# Fetched browser sidecars (Chrome-for-testing headless-shell, ~200MB):
+# rebuilt locally via `npm run browser:sidecar`, never committed.
+/apps/desktop/src-tauri/binaries/
 /vendor/voice/runtimes/
 /vendor/voice/models/
 /vendor/voice/*.wav

@@ -1,5 +1,21 @@
 import type { AssistantMode } from "./conversations-memory-files";
 import type { ModelRef } from "./settings-models-runtime";
+export {
+  extractMessageAgents,
+  type SubAgentInfo,
+  type AgentMessageType,
+  type AgentParticipantKind,
+  type AgentParticipant,
+  type AgentArtifactRef,
+  type AgentMessageEnvelope,
+  type AgentMemoryFinding,
+  type AgentMemoryContext,
+  type AgentPermissionProfile,
+  createAgentEnvelope,
+  compilePermissionDirective,
+  formatAgentEnvelopeForPrompt,
+  formatAgentMemoryForPrompt,
+} from "@aro/contracts";
 
 export type AgentRunStatus =
   | "queued"

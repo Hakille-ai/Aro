@@ -473,9 +473,22 @@ pub fn compute_initial_salience(content: &str, pinned: bool, category: MemoryCat
 
     // Rule indicators (+0.15)
     const RULE_KEYWORDS: &[&str] = &[
-        "always", "never", "must", "shall", "rule", "constraint",
-        "forbidden", "mandatory", "require", "strictement", "toujours",
-        "jamais", "interdit", "obligatoire", "règle", "regle",
+        "always",
+        "never",
+        "must",
+        "shall",
+        "rule",
+        "constraint",
+        "forbidden",
+        "mandatory",
+        "require",
+        "strictement",
+        "toujours",
+        "jamais",
+        "interdit",
+        "obligatoire",
+        "règle",
+        "regle",
     ];
     if RULE_KEYWORDS.iter().any(|&kw| lower.contains(kw)) {
         score += 0.15;
@@ -483,9 +496,17 @@ pub fn compute_initial_salience(content: &str, pinned: bool, category: MemoryCat
 
     // User command / directive indicators (+0.15)
     const COMMAND_KEYWORDS: &[&str] = &[
-        "remember", "don't forget", "do not forget", "keep in mind",
-        "note that", "important", "retiens", "souviens-toi", "n'oublie pas",
-        "mémorise", "memorise",
+        "remember",
+        "don't forget",
+        "do not forget",
+        "keep in mind",
+        "note that",
+        "important",
+        "retiens",
+        "souviens-toi",
+        "n'oublie pas",
+        "mémorise",
+        "memorise",
     ];
     if COMMAND_KEYWORDS.iter().any(|&kw| lower.contains(kw)) {
         score += 0.15;
@@ -516,11 +537,7 @@ pub fn compute_initial_salience(content: &str, pinned: bool, category: MemoryCat
 /// Computes the Ebbinghaus exponential recency decay R(t) = exp(-ln(2) * dt / 168.0).
 /// Pinned memories are completely exempt (returns 1.0).
 /// Future dates (now < last_used_at) return 1.0 (clamped).
-pub fn compute_recency_decay(
-    last_used_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-    pinned: bool,
-) -> f32 {
+pub fn compute_recency_decay(last_used_at: DateTime<Utc>, now: DateTime<Utc>, pinned: bool) -> f32 {
     if pinned {
         return 1.0;
     }
@@ -835,17 +852,29 @@ mod tests {
         // t = 7 days (168h) -> R = 0.50
         let t_7d = t0 + Duration::hours(168);
         let r_7d = compute_recency_decay(t0, t_7d, false);
-        assert!((r_7d - 0.50).abs() < 1e-4, "Expected 0.50 at 7 days, got {}", r_7d);
+        assert!(
+            (r_7d - 0.50).abs() < 1e-4,
+            "Expected 0.50 at 7 days, got {}",
+            r_7d
+        );
 
         // t = 14 days (336h) -> R = 0.25
         let t_14d = t0 + Duration::hours(336);
         let r_14d = compute_recency_decay(t0, t_14d, false);
-        assert!((r_14d - 0.25).abs() < 1e-4, "Expected 0.25 at 14 days, got {}", r_14d);
+        assert!(
+            (r_14d - 0.25).abs() < 1e-4,
+            "Expected 0.25 at 14 days, got {}",
+            r_14d
+        );
 
         // t = 28 days (672h) -> R = 0.0625
         let t_28d = t0 + Duration::hours(672);
         let r_28d = compute_recency_decay(t0, t_28d, false);
-        assert!((r_28d - 0.0625).abs() < 1e-4, "Expected 0.0625 at 28 days, got {}", r_28d);
+        assert!(
+            (r_28d - 0.0625).abs() < 1e-4,
+            "Expected 0.0625 at 28 days, got {}",
+            r_28d
+        );
     }
 
     #[test]
@@ -855,7 +884,10 @@ mod tests {
 
         // Pinned is always 1.0 regardless of time
         let r_pinned = compute_recency_decay(t_past, t0, true);
-        assert_eq!(r_pinned, 1.0, "Pinned memory must be completely immune to decay");
+        assert_eq!(
+            r_pinned, 1.0,
+            "Pinned memory must be completely immune to decay"
+        );
 
         // Future date (now < last_used_at) clamped to 1.0
         let t_future = t0 + Duration::days(5);
@@ -870,16 +902,30 @@ mod tests {
         assert!((0.1..=1.0).contains(&s_plain));
 
         // Rule keyword boosts salience
-        let s_rule = compute_initial_salience("Always use strict typing", false, MemoryCategory::Personal);
-        assert!(s_rule > s_plain, "Rule keyword 'always' must increase salience");
+        let s_rule =
+            compute_initial_salience("Always use strict typing", false, MemoryCategory::Personal);
+        assert!(
+            s_rule > s_plain,
+            "Rule keyword 'always' must increase salience"
+        );
 
         // Directive command boosts salience
-        let s_cmd = compute_initial_salience("Remember that user prefers dark theme", false, MemoryCategory::Personal);
-        assert!(s_cmd > s_plain, "Command keyword 'remember' must increase salience");
+        let s_cmd = compute_initial_salience(
+            "Remember that user prefers dark theme",
+            false,
+            MemoryCategory::Personal,
+        );
+        assert!(
+            s_cmd > s_plain,
+            "Command keyword 'remember' must increase salience"
+        );
 
         // Preference category has higher weight than personal
         let s_pref = compute_initial_salience("simple note", false, MemoryCategory::Preference);
-        assert!(s_pref > s_plain, "Preference category must have higher salience than Personal");
+        assert!(
+            s_pref > s_plain,
+            "Preference category must have higher salience than Personal"
+        );
 
         // Pinned memory guaranteed high salience
         let s_pinned = compute_initial_salience("simple note", true, MemoryCategory::Personal);
@@ -900,19 +946,31 @@ mod tests {
 
         // 1. Monotonic in hybrid_score
         let u_higher_hybrid = compute_memory_utility(0.8, 0.5, 0.5, 2);
-        assert!(u_higher_hybrid > base_u, "Utility must increase with hybrid_score");
+        assert!(
+            u_higher_hybrid > base_u,
+            "Utility must increase with hybrid_score"
+        );
 
         // 2. Monotonic in salience
         let u_higher_salience = compute_memory_utility(0.5, 0.8, 0.5, 2);
-        assert!(u_higher_salience > base_u, "Utility must increase with salience");
+        assert!(
+            u_higher_salience > base_u,
+            "Utility must increase with salience"
+        );
 
         // 3. Monotonic in recency_factor
         let u_higher_recency = compute_memory_utility(0.5, 0.5, 0.9, 2);
-        assert!(u_higher_recency > base_u, "Utility must increase with recency_factor");
+        assert!(
+            u_higher_recency > base_u,
+            "Utility must increase with recency_factor"
+        );
 
         // 4. Monotonic in recall_count
         let u_higher_recall = compute_memory_utility(0.5, 0.5, 0.5, 5);
-        assert!(u_higher_recall > base_u, "Utility must increase with recall_count");
+        assert!(
+            u_higher_recall > base_u,
+            "Utility must increase with recall_count"
+        );
 
         // 5. Zero recall count yields 0 for recall term
         let u_zero_recall = compute_memory_utility(1.0, 1.0, 1.0, 0);
@@ -1095,4 +1153,3 @@ mod tests {
         assert_eq!(report.working_evicted, 4);
     }
 }
-

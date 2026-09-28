@@ -19,12 +19,12 @@ use aro_core::{
     estimate_message_tokens, estimate_tokens, AgentRun, AssistantMode, ChatMessage, ContextBudget,
     Conversation, EpisodeSummary, MessageRole, ModelGeneration, ModelGenerationRequest,
     ModelProviderKind, ModelResponseFormat, RuntimeStatus, SendMessageRequest,
-    ToolExecutionRequest, ToolExecutionStatus, WebAccessMode, WorkingMemoryBuffer, TOOL_CORE_MEMORY_RECALL,
-    TOOL_CORE_MEMORY_SEARCH, TOOL_MEMORY_RECALL, TOOL_MEMORY_SEARCH,
+    ToolExecutionRequest, ToolExecutionStatus, WebAccessMode, WorkingMemoryBuffer,
+    TOOL_CORE_MEMORY_RECALL, TOOL_CORE_MEMORY_SEARCH, TOOL_MEMORY_RECALL, TOOL_MEMORY_SEARCH,
 };
 use aro_memory::SqliteMemoryStore;
 use aro_runtime::context_manager::{
-    AssembledContext, CompactionState, ContinuousCompactor, ContextWindowManager,
+    AssembledContext, CompactionState, ContextWindowManager, ContinuousCompactor,
 };
 use aro_runtime::{AssistantEngine, ModelProvider};
 use aro_vector::{MemoryVectorService, VectorMemoryConfig, VectorMemoryMode};
@@ -60,7 +60,10 @@ impl Default for LongConversationMockProvider {
 
 #[async_trait]
 impl ModelProvider for LongConversationMockProvider {
-    async fn generate(&self, request: ModelGenerationRequest) -> aro_core::AroResult<ModelGeneration> {
+    async fn generate(
+        &self,
+        request: ModelGenerationRequest,
+    ) -> aro_core::AroResult<ModelGeneration> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         let user_input_lower = request.user_input.to_lowercase();
         let sys_prompt = &request.system_prompt;
@@ -85,11 +88,13 @@ impl ModelProvider for LongConversationMockProvider {
 
         let content = if is_joint_query {
             let has_a = sys_prompt.contains("9464") && sys_prompt.contains("/aro-metrics");
-            let has_b = sys_prompt.contains("infra-stg-7712") && sys_prompt.contains("k8s-eu-west-3");
+            let has_b =
+                sys_prompt.contains("infra-stg-7712") && sys_prompt.contains("k8s-eu-west-3");
             if has_a && has_b {
                 "Recalled both configurations: Prometheus port 9464, route /aro-metrics, and secret ID infra-stg-7712, cluster k8s-eu-west-3.".to_string()
             } else if has_a {
-                "Recalled Prometheus port 9464, route /aro-metrics (Fact B missing in context).".to_string()
+                "Recalled Prometheus port 9464, route /aro-metrics (Fact B missing in context)."
+                    .to_string()
             } else if has_b {
                 "Recalled secret ID infra-stg-7712, cluster k8s-eu-west-3 (Fact A missing in context).".to_string()
             } else {
@@ -99,7 +104,8 @@ impl ModelProvider for LongConversationMockProvider {
             let has_port = sys_prompt.contains("9464");
             let has_route = sys_prompt.contains("/aro-metrics");
             if has_port && has_route {
-                "Recalled from cognitive memory: Prometheus port 9464, route /aro-metrics.".to_string()
+                "Recalled from cognitive memory: Prometheus port 9464, route /aro-metrics."
+                    .to_string()
             } else {
                 "Fact A not found in assembled context.".to_string()
             }
@@ -107,7 +113,8 @@ impl ModelProvider for LongConversationMockProvider {
             let has_secret = sys_prompt.contains("infra-stg-7712");
             let has_cluster = sys_prompt.contains("k8s-eu-west-3");
             if has_secret && has_cluster {
-                "Recalled from cognitive memory: secret ID infra-stg-7712, cluster k8s-eu-west-3.".to_string()
+                "Recalled from cognitive memory: secret ID infra-stg-7712, cluster k8s-eu-west-3."
+                    .to_string()
             } else {
                 "Fact B not found in assembled context.".to_string()
             }
@@ -118,7 +125,9 @@ impl ModelProvider for LongConversationMockProvider {
 
         // Format according to requested model response format
         let wants_json = request.response_format == ModelResponseFormat::AgentActionJson
-            || request.system_prompt.contains("Return exactly one JSON object");
+            || request
+                .system_prompt
+                .contains("Return exactly one JSON object");
         let payload = if wants_json {
             json!({
                 "type": "final",
@@ -175,10 +184,8 @@ fn create_test_harness() -> (AssistantEngine, SqliteMemoryStore, PathBuf) {
     // Disable external Qdrant network calls to ensure deterministic, zero-latency execution
     std::env::set_var("ARO_VECTOR_MEMORY_MODE", "disabled");
 
-    let db_path = std::env::temp_dir().join(format!(
-        "aro-m4-100turn-bench-{}.sqlite",
-        Uuid::new_v4()
-    ));
+    let db_path =
+        std::env::temp_dir().join(format!("aro-m4-100turn-bench-{}.sqlite", Uuid::new_v4()));
     let store = SqliteMemoryStore::new(&db_path).expect("failed to create sqlite memory store");
 
     let mut vector_cfg = VectorMemoryConfig::from_env();
@@ -309,10 +316,8 @@ fn assert_context_window_ceiling_invariants(
     );
 
     // 7. Input tokens summation check: sys + sem + epi + work <= 6,800
-    let calculated_input = usage.system_tokens
-        + usage.semantic_tokens
-        + usage.episodic_tokens
-        + usage.working_tokens;
+    let calculated_input =
+        usage.system_tokens + usage.semantic_tokens + usage.episodic_tokens + usage.working_tokens;
     assert_eq!(
         usage.total_input_tokens, calculated_input,
         "Turn {}: total_input_tokens {} does not match partition sum {}",
@@ -525,7 +530,8 @@ fn assert_all_10_episodes_integrity(
             k + 1
         );
         assert_eq!(
-            ep.conversation_id, conv_id,
+            ep.conversation_id,
+            conv_id,
             "Episode {} conversation_id mismatch",
             k + 1
         );
@@ -610,7 +616,10 @@ fn assert_all_10_episodes_integrity(
         .get_latest_episode(conv_id)
         .expect("must get latest episode")
         .expect("latest episode must exist");
-    assert_eq!(latest.turn_start, 91, "Latest episode turn_start must be 91");
+    assert_eq!(
+        latest.turn_start, 91,
+        "Latest episode turn_start must be 91"
+    );
     assert_eq!(latest.turn_end, 100, "Latest episode turn_end must be 100");
 
     // 9. SQLite FTS5 BM25 searchability across episodes
@@ -847,10 +856,9 @@ async fn test_100_turns_end_to_end_conversation_fact_planting_and_recall() {
 
             // Verify Fact B was evicted from raw working memory
             assert!(
-                assembled
-                    .working_messages
-                    .iter()
-                    .all(|m| !m.content.contains("secret ID infra-stg-7712, cluster k8s-eu-west-3 must be used")),
+                assembled.working_messages.iter().all(|m| !m
+                    .content
+                    .contains("secret ID infra-stg-7712, cluster k8s-eu-west-3 must be used")),
                 "Turn 98: Fact B raw user message MUST be evicted from working memory"
             );
         }
@@ -1011,8 +1019,7 @@ async fn test_100_turns_end_to_end_conversation_fact_planting_and_recall() {
     drop(store);
 
     // 2. Reopen fresh store from disk SQLite DB file
-    let restarted_store =
-        SqliteMemoryStore::new(&db_path).expect("reopen sqlite store after drop");
+    let restarted_store = SqliteMemoryStore::new(&db_path).expect("reopen sqlite store after drop");
     let all_messages_restarted = restarted_store
         .list_messages(conv_id)
         .expect("list messages after restart");
@@ -1093,16 +1100,18 @@ async fn test_100_turns_end_to_end_conversation_fact_planting_and_recall() {
     let history_101 = restarted_store
         .list_messages(conv_id)
         .expect("list messages after turn 101");
-    let pinned_101 = restarted_store
-        .list_pinned_memories()
-        .unwrap_or_default();
-    let episodes_101 = restarted_store
-        .list_episodes(conv_id)
-        .unwrap_or_default();
-    let summaries_101: Vec<EpisodeSummary> = episodes_101.iter().map(EpisodeSummary::from).collect();
+    let pinned_101 = restarted_store.list_pinned_memories().unwrap_or_default();
+    let episodes_101 = restarted_store.list_episodes(conv_id).unwrap_or_default();
+    let summaries_101: Vec<EpisodeSummary> =
+        episodes_101.iter().map(EpisodeSummary::from).collect();
 
     let assembled_101 = window_mgr
-        .assemble_context(&base_system_prompt, &pinned_101, &summaries_101, &history_101)
+        .assemble_context(
+            &base_system_prompt,
+            &pinned_101,
+            &summaries_101,
+            &history_101,
+        )
         .expect("assemble context at turn 101");
 
     assert_context_window_ceiling_invariants(101, &assembled_101, window_mgr.budget());
@@ -1124,10 +1133,8 @@ async fn test_100_turns_end_to_end_conversation_fact_planting_and_recall() {
 #[test]
 fn test_100_turns_token_ceiling_and_compaction_invariants() {
     let (store, db_path) = {
-        let path = std::env::temp_dir().join(format!(
-            "aro-m4-invariants-test-{}.sqlite",
-            Uuid::new_v4()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("aro-m4-invariants-test-{}.sqlite", Uuid::new_v4()));
         let s = SqliteMemoryStore::new(&path).expect("create sqlite store");
         (s, path)
     };
@@ -1172,7 +1179,9 @@ fn test_100_turns_token_ceiling_and_compaction_invariants() {
         store.add_message(&u_msg).expect("add u_msg");
 
         // Background compaction check (as runs inside engine)
-        let _ = compactor.consolidate_if_needed(conv_id).expect("compaction");
+        let _ = compactor
+            .consolidate_if_needed(conv_id)
+            .expect("compaction");
 
         let a_msg = ChatMessage::new(conv_id, MessageRole::Assistant, a_text);
         store.add_message(&a_msg).expect("add a_msg");
@@ -1208,10 +1217,8 @@ fn test_100_turns_token_ceiling_and_compaction_invariants() {
 #[test]
 fn test_compaction_recovery_on_interrupted_state() {
     let (store, db_path) = {
-        let path = std::env::temp_dir().join(format!(
-            "aro-m4-midcrash-test-{}.sqlite",
-            Uuid::new_v4()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("aro-m4-midcrash-test-{}.sqlite", Uuid::new_v4()));
         let s = SqliteMemoryStore::new(&path).expect("create sqlite store");
         (s, path)
     };
@@ -1233,7 +1240,9 @@ fn test_compaction_recovery_on_interrupted_state() {
             format!("Turn {turn}: user message"),
         );
         store.add_message(&u_msg).expect("add u");
-        let _ = compactor.consolidate_if_needed(conv_id).expect("compaction");
+        let _ = compactor
+            .consolidate_if_needed(conv_id)
+            .expect("compaction");
         let a_msg = ChatMessage::new(
             conv_id,
             MessageRole::Assistant,
@@ -1247,17 +1256,14 @@ fn test_compaction_recovery_on_interrupted_state() {
     let reopened = SqliteMemoryStore::new(&db_path).expect("reopen");
     let messages = reopened.list_messages(conv_id).expect("list messages");
 
-    let state = CompactionState::recover(&reopened, conv_id, &messages)
-        .expect("recover compaction state");
+    let state =
+        CompactionState::recover(&reopened, conv_id, &messages).expect("recover compaction state");
 
     assert_eq!(
         state.last_compacted_turn, 30,
         "Last compacted turn must be 30"
     );
-    assert_eq!(
-        state.current_turn, 35,
-        "Current turn must be 35"
-    );
+    assert_eq!(state.current_turn, 35, "Current turn must be 35");
     assert_eq!(
         state.uncompacted_turns, 5,
         "Uncompacted turns must be exactly 5 (turns 31-35)"
@@ -1297,7 +1303,11 @@ fn test_compaction_recovery_on_interrupted_state() {
     }
 
     let episodes = reopened.list_episodes(conv_id).expect("list episodes");
-    assert_eq!(episodes.len(), 4, "Must have exactly 4 episodes after turn 40");
+    assert_eq!(
+        episodes.len(),
+        4,
+        "Must have exactly 4 episodes after turn 40"
+    );
     assert_eq!(episodes[3].turn_start, 31);
     assert_eq!(episodes[3].turn_end, 40);
 

@@ -59,13 +59,14 @@ void main() {
     expect(prefs.getString('aro.draft.u.c2'), isNull);
   });
 
-  test('broken keystore degrades to prefs instead of crashing', () async {
+  test('broken keystore keeps drafts only in memory', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     final drafts = DraftStore(backend: ThrowingDraftBackend(), prefs: prefs);
 
     await drafts.write('aro.draft.u.c3', 'repli');
     expect(await drafts.read('aro.draft.u.c3'), 'repli');
+    expect(prefs.getString('aro.draft.u.c3'), isNull);
     await drafts.remove('aro.draft.u.c3');
     expect(await drafts.read('aro.draft.u.c3'), isNull);
   });

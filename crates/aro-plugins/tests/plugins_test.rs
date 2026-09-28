@@ -1,6 +1,6 @@
 use aro_plugins::{
-    get_curated_marketplace, CreateCustomPluginRequest, McpManifest, PluginManager,
-    PluginManifest, PluginSourceType, PluginStatus, CANONICAL_PLUGIN_SCHEMA_V1,
+    get_curated_marketplace, CreateCustomPluginRequest, McpManifest, PluginManager, PluginManifest,
+    PluginSourceType, PluginStatus, CANONICAL_PLUGIN_SCHEMA_V1,
 };
 use aro_skills::SkillRegistry;
 use std::fs;
@@ -476,22 +476,44 @@ async fn test_load_all_seeds_default_plugins() {
 
     for id in &expected_ids {
         let plugin = installed.iter().find(|p| p.id == *id);
-        assert!(plugin.is_some(), "Default plugin {} should be installed", id);
+        assert!(
+            plugin.is_some(),
+            "Default plugin {} should be installed",
+            id
+        );
         let p = plugin.unwrap();
-        assert!(p.is_system, "Default plugin {} must have is_system = true", id);
+        assert!(
+            p.is_system,
+            "Default plugin {} must have is_system = true",
+            id
+        );
         assert!(p.enabled, "Default plugin {} should be enabled", id);
-        assert!(!p.skills.is_empty(), "Default plugin {} must have skills", id);
+        assert!(
+            !p.skills.is_empty(),
+            "Default plugin {} must have skills",
+            id
+        );
     }
 
     // Verify marketplace listing shows default plugins as installed
     let market = manager.list_marketplace().await;
     for id in &expected_ids {
         let item = market.iter().find(|m| m.id == *id).unwrap();
-        assert!(item.installed, "Marketplace item {} must be marked installed", id);
+        assert!(
+            item.installed,
+            "Marketplace item {} must be marked installed",
+            id
+        );
     }
 
     // Non-default plugins should NOT be marked installed
-    let non_default = ["google-workspace", "openai-ecosystem", "github-developer", "slack-workspace", "code-reviewer"];
+    let non_default = [
+        "google-workspace",
+        "openai-ecosystem",
+        "github-developer",
+        "slack-workspace",
+        "code-reviewer",
+    ];
     for id in &non_default {
         let item = market.iter().find(|m| m.id == *id).unwrap();
         assert!(!item.installed, "Plugin {} should not be installed yet", id);
@@ -512,7 +534,10 @@ async fn test_ecosystem_plugins_installation_and_tools() {
     assert_eq!(g_plugin.id, "google-workspace");
     assert!(!g_plugin.is_system, "marketplace plugin must not be system");
     assert_eq!(g_plugin.mcp_servers.len(), 1);
-    assert!(g_plugin.skills.iter().any(|s| s.id == "workspace-organizer"));
+    assert!(g_plugin
+        .skills
+        .iter()
+        .any(|s| s.id == "workspace-organizer"));
 
     let cal_res = manager
         .call_mcp_tool(
@@ -571,7 +596,9 @@ async fn test_ecosystem_plugins_installation_and_tools() {
         )
         .await
         .expect("call list_issues");
-    assert!(issues_res.plain_text().contains("Support default agent plugins"));
+    assert!(issues_res
+        .plain_text()
+        .contains("Support default agent plugins"));
 
     // 4. Install slack-workspace
     let sl_plugin = manager
@@ -629,7 +656,10 @@ async fn test_disabled_plugin_state_and_skill_unregistration_persists_across_rel
         .get_plugin("google-workspace")
         .await
         .expect("plugin exists after reload");
-    assert!(!loaded.enabled, "Plugin must remain disabled across app restarts");
+    assert!(
+        !loaded.enabled,
+        "Plugin must remain disabled across app restarts"
+    );
     assert_eq!(loaded.status, PluginStatus::Inactive);
     assert!(
         registry2.get("workspace-organizer").await.is_none(),
@@ -657,7 +687,10 @@ async fn test_disabled_plugin_state_and_skill_unregistration_persists_across_rel
         .get_plugin("google-workspace")
         .await
         .expect("plugin exists");
-    assert!(loaded3.enabled, "Plugin must remain enabled across app restarts");
+    assert!(
+        loaded3.enabled,
+        "Plugin must remain enabled across app restarts"
+    );
     assert_eq!(loaded3.status, PluginStatus::Active);
     assert!(
         registry3.get("workspace-organizer").await.is_some(),
@@ -838,7 +871,11 @@ async fn test_install_custom_persists_emoji_branding() {
     assert_eq!(reloaded.brand_color.as_deref(), Some("#0A84FF"));
 
     // No file logo → read returns None.
-    assert!(manager.read_plugin_logo("my-logo-plugin").await.unwrap().is_none());
+    assert!(manager
+        .read_plugin_logo("my-logo-plugin")
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -903,12 +940,11 @@ async fn test_install_custom_rejects_bad_names_and_logos() {
 /// Skip silencieux si git est absent du PATH (CI sans git).
 #[tokio::test]
 async fn test_install_from_git_file_url_end_to_end() {
-    if std::process::Command::new("git")
+    if !std::process::Command::new("git")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
-        == false
     {
         eprintln!("skipping git install test: git not available");
         return;
@@ -977,4 +1013,3 @@ async fn test_install_from_git_file_url_end_to_end() {
     assert!(err.contains("plugin.json"), "unexpected: {err}");
     assert!(!err.contains("Updating files"), "unexpected: {err}");
 }
-

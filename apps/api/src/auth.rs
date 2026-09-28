@@ -124,10 +124,7 @@ impl AuthContext {
     /// of the submitting user without a bearer token. Tenant scoping is
     /// identical to request auth: every store call still checks
     /// organization membership.
-    pub fn for_worker(
-        user_id: Uuid,
-        organization_id: Uuid,
-    ) -> Result<Self, aro_core::AroError> {
+    pub fn for_worker(user_id: Uuid, organization_id: Uuid) -> Result<Self, aro_core::AroError> {
         Ok(Self {
             user_id,
             organization_id,
@@ -168,9 +165,10 @@ impl FromRequestParts<ApiState> for AuthContext {
             .await
             .map_err(ApiError::from)?;
 
-        if std::env::var("ARO_COMMERCIAL_ENFORCEMENT").as_deref()==Ok("true")
-            && crate::billing::requires_managed_sync(&parts.method,parts.uri.path()) {
-            crate::billing::require_managed_sync(state,tenant).await?;
+        if std::env::var("ARO_COMMERCIAL_ENFORCEMENT").as_deref() == Ok("true")
+            && crate::billing::requires_managed_sync(&parts.method, parts.uri.path())
+        {
+            crate::billing::require_managed_sync(state, tenant).await?;
         }
 
         Ok(Self {

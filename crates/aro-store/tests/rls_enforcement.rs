@@ -26,7 +26,9 @@ fn restricted_url(database_url: &str) -> Result<String, Box<dyn std::error::Erro
         .split_once("://")
         .ok_or("DATABASE_URL has no scheme")?;
     let after_authority = rest.split_once('@').map(|(_, tail)| tail).unwrap_or(rest);
-    Ok(format!("{scheme}://{PROBE_ROLE}:{PROBE_PASSWORD}@{after_authority}"))
+    Ok(format!(
+        "{scheme}://{PROBE_ROLE}:{PROBE_PASSWORD}@{after_authority}"
+    ))
 }
 
 /// Serializes probe-role setup: parallel tests sharing one scratch database
@@ -94,7 +96,11 @@ async fn fixture() -> Result<Option<Fixture>, Box<dyn std::error::Error>> {
     let owner_ctx =
         TenantContext::new(owner.user.id, owner.active_organization.id).expect("tenant ctx");
     let conversation = store
-        .create_conversation(owner_ctx, "RLS enforcement".to_string(), AssistantMode::Chat)
+        .create_conversation(
+            owner_ctx,
+            "RLS enforcement".to_string(),
+            AssistantMode::Chat,
+        )
         .await?;
     store
         .add_message(
@@ -198,11 +204,13 @@ async fn rls_rejects_cross_tenant_writes() -> TestResult {
     let (actor, _) = owner_ids(&f);
     let (_, foreign_org) = outsider_ids(&f);
     let mut tx = f.probe.begin().await?;
-    sqlx::query("SELECT set_config('aro.actor_id', $1, true), set_config('aro.organization_id', $2, true)")
-        .bind(actor.to_string())
-        .bind(f.owner.active_organization.id.to_string())
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "SELECT set_config('aro.actor_id', $1, true), set_config('aro.organization_id', $2, true)",
+    )
+    .bind(actor.to_string())
+    .bind(f.owner.active_organization.id.to_string())
+    .execute(&mut *tx)
+    .await?;
     // Forged organization on INSERT must fail the WITH CHECK policy.
     // A savepoint contains the expected failure: Postgres aborts the whole
     // transaction on error, so the legitimate insert below needs a clean

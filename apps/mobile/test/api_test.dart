@@ -105,6 +105,27 @@ void main() {
     await assertion;
     expect(api.authenticated, isFalse);
   });
+  test('Ambiguous refresh failure clears the consumed predecessor', () async {
+    var refreshes = 0;
+    final api = AroApi(
+      baseUrl: 'https://example.test',
+      credentials: MemoryCredentials(),
+      client: MockClient((req) async {
+        if (req.url.path.endsWith('/auth/refresh')) {
+          refreshes++;
+          throw http.ClientException('connection lost after server rotation');
+        }
+        return http.Response('{}', 401);
+      }),
+    );
+    await api.saveSession(session('old'));
+    await expectLater(
+      api.request('GET', '/projects'),
+      throwsA(isA<ApiException>()),
+    );
+    expect(api.authenticated, isFalse);
+    expect(refreshes, 1);
+  });
   test('Failed writes are not automatically replayed', () async {
     var calls = 0;
     final api = AroApi(

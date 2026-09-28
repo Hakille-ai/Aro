@@ -12,8 +12,8 @@
 use aro_core::{
     AgentRun, AssistantMode, Conversation, Episode, LongTermMemory, ToolExecutionRequest,
     TOOL_CORE_MEMORY_FORGET, TOOL_CORE_MEMORY_RECALL, TOOL_CORE_MEMORY_SAVE,
-    TOOL_CORE_MEMORY_SEARCH, TOOL_CORE_MEMORY_UPDATE, TOOL_MEMORY_FORGET,
-    TOOL_MEMORY_RECALL, TOOL_MEMORY_SAVE, TOOL_MEMORY_SEARCH, TOOL_MEMORY_UPDATE,
+    TOOL_CORE_MEMORY_SEARCH, TOOL_CORE_MEMORY_UPDATE, TOOL_MEMORY_FORGET, TOOL_MEMORY_RECALL,
+    TOOL_MEMORY_SAVE, TOOL_MEMORY_SEARCH, TOOL_MEMORY_UPDATE,
 };
 use aro_memory::SqliteMemoryStore;
 use aro_runtime::AssistantEngine;
@@ -101,7 +101,10 @@ async fn test_memory_save_and_search_dual_dispatch() {
             "limit": 5
         }),
     );
-    let sres1 = engine.execute_tool(&run, search_req1).await.expect("search 1");
+    let sres1 = engine
+        .execute_tool(&run, search_req1)
+        .await
+        .expect("search 1");
     assert!(sres1.status == aro_core::ToolExecutionStatus::Completed);
     assert!(sres1.output["count"].as_u64().unwrap() >= 1);
     let memories = sres1.output["memories"].as_array().expect("memories array");
@@ -128,7 +131,10 @@ async fn test_memory_save_and_search_dual_dispatch() {
             "limit": 5
         }),
     );
-    let sres2 = engine.execute_tool(&run, search_req2).await.expect("search 2");
+    let sres2 = engine
+        .execute_tool(&run, search_req2)
+        .await
+        .expect("search 2");
     assert!(sres2.status == aro_core::ToolExecutionStatus::Completed);
     assert!(sres2.output["count"].as_u64().unwrap() >= 1);
     let memories2 = sres2.output["memories"].as_array().expect("memories array");
@@ -189,7 +195,10 @@ async fn test_memory_recall_by_id_and_entity_key_with_atomic_recall() {
             "includeEpisodes": true
         }),
     );
-    let res1 = engine.execute_tool(&run, recall_req1).await.expect("recall 1");
+    let res1 = engine
+        .execute_tool(&run, recall_req1)
+        .await
+        .expect("recall 1");
     assert!(res1.status == aro_core::ToolExecutionStatus::Completed);
     assert_eq!(res1.output["found"], true);
     assert_eq!(res1.output["memory"]["id"], memory.id.to_string());
@@ -208,7 +217,10 @@ async fn test_memory_recall_by_id_and_entity_key_with_atomic_recall() {
             "id": memory.id.to_string()
         }),
     );
-    let _res2 = engine.execute_tool(&run, recall_req2).await.expect("recall 2");
+    let _res2 = engine
+        .execute_tool(&run, recall_req2)
+        .await
+        .expect("recall 2");
     let touched2 = store.get_memory(memory.id).unwrap().unwrap();
     assert_eq!(touched2.recall_count, 2, "recall_count must increment to 2");
 
@@ -222,10 +234,15 @@ async fn test_memory_recall_by_id_and_entity_key_with_atomic_recall() {
             "includeEpisodes": true
         }),
     );
-    let res3 = engine.execute_tool(&run, recall_req3).await.expect("recall 3");
+    let res3 = engine
+        .execute_tool(&run, recall_req3)
+        .await
+        .expect("recall 3");
     assert!(res3.status == aro_core::ToolExecutionStatus::Completed);
     assert_eq!(res3.output["found"], true);
-    let eps = res3.output["relatedEpisodes"].as_array().expect("episodes array");
+    let eps = res3.output["relatedEpisodes"]
+        .as_array()
+        .expect("episodes array");
     assert!(!eps.is_empty(), "Should correlate with Keycloak episode");
 
     cleanup_temp_db(db_path);
@@ -294,7 +311,10 @@ async fn test_memory_update_primitive() {
             "salience": 0.80
         }),
     );
-    let res2 = engine.execute_tool(&run, update_req2).await.expect("update 2");
+    let res2 = engine
+        .execute_tool(&run, update_req2)
+        .await
+        .expect("update 2");
     assert_eq!(res2.output["success"], true);
     let updated2 = store.get_memory(memory.id).unwrap().unwrap();
     assert_eq!(updated2.salience, 0.80);
@@ -353,12 +373,18 @@ async fn test_memory_forget_lifecycle() {
         .search_memories("Legacy monolith server", 5)
         .await
         .expect("search after forget");
-    assert!(!sres2.iter().any(|m| m.id == memory.id), "Archived memory must not appear in search");
+    assert!(
+        !sres2.iter().any(|m| m.id == memory.id),
+        "Archived memory must not appear in search"
+    );
 
     // Verify stored status is archived
     let archived = store.get_memory(memory.id).unwrap();
     // get_memory only returns non-deleted records
-    assert!(archived.is_none(), "Soft-deleted memory must return None from get_memory");
+    assert!(
+        archived.is_none(),
+        "Soft-deleted memory must return None from get_memory"
+    );
 
     // Test alias `core.memory.forget` on another memory
     let memory2 = LongTermMemory {
@@ -387,7 +413,10 @@ async fn test_memory_forget_lifecycle() {
             "id": memory2.id.to_string()
         }),
     );
-    let res2 = engine.execute_tool(&run, forget_req2).await.expect("forget 2");
+    let res2 = engine
+        .execute_tool(&run, forget_req2)
+        .await
+        .expect("forget 2");
     assert_eq!(res2.output["success"], true);
     assert_eq!(res2.output["status"], "archived");
 
@@ -407,7 +436,9 @@ async fn test_memory_save_auto_salience_and_clamping() {
         json!({ "content": "   " }),
     );
     let empty_res = engine.execute_tool(&run, empty_req).await;
-    assert!(empty_res.is_err() || empty_res.unwrap().status == aro_core::ToolExecutionStatus::Failed);
+    assert!(
+        empty_res.is_err() || empty_res.unwrap().status == aro_core::ToolExecutionStatus::Failed
+    );
 
     // 2. Save without salience: auto-calculates salience in [0.1, 1.0]
     let auto_req = ToolExecutionRequest::new(
@@ -420,7 +451,10 @@ async fn test_memory_save_auto_salience_and_clamping() {
             "pinned": false
         }),
     );
-    let auto_res = engine.execute_tool(&run, auto_req).await.expect("auto salience");
+    let auto_res = engine
+        .execute_tool(&run, auto_req)
+        .await
+        .expect("auto salience");
     let auto_id = Uuid::parse_str(auto_res.output["id"].as_str().unwrap()).unwrap();
     let auto_mem = store.get_memory(auto_id).unwrap().unwrap();
     assert!(
@@ -500,7 +534,10 @@ async fn test_top_k_search_and_pinned_priority() {
 
     assert!(!results.is_empty(), "Must return memories");
     // Pinned memory must be first
-    assert!(results[0].pinned, "Pinned memory must take priority over unpinned");
+    assert!(
+        results[0].pinned,
+        "Pinned memory must take priority over unpinned"
+    );
     assert_eq!(results[0].id, pinned_mem.id);
 
     cleanup_temp_db(db_path);

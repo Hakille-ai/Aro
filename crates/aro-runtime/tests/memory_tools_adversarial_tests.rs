@@ -19,8 +19,7 @@ use aro_core::{
     LongTermMemory, ToolExecutionRequest, ToolExecutionStatus, TOOL_CORE_MEMORY_DELETE,
     TOOL_CORE_MEMORY_FORGET, TOOL_CORE_MEMORY_LIST, TOOL_CORE_MEMORY_RECALL, TOOL_CORE_MEMORY_SAVE,
     TOOL_CORE_MEMORY_SEARCH, TOOL_CORE_MEMORY_UPDATE, TOOL_MEMORY_DELETE, TOOL_MEMORY_FORGET,
-    TOOL_MEMORY_LIST, TOOL_MEMORY_RECALL, TOOL_MEMORY_SAVE, TOOL_MEMORY_SEARCH,
-    TOOL_MEMORY_UPDATE,
+    TOOL_MEMORY_LIST, TOOL_MEMORY_RECALL, TOOL_MEMORY_SAVE, TOOL_MEMORY_SEARCH, TOOL_MEMORY_UPDATE,
 };
 use aro_memory::SqliteMemoryStore;
 use aro_runtime::AssistantEngine;
@@ -29,10 +28,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 fn create_test_engine() -> (AssistantEngine, SqliteMemoryStore, std::path::PathBuf) {
-    let db_path = std::env::temp_dir().join(format!(
-        "aro-m3-adversarial-test-{}.sqlite",
-        Uuid::new_v4()
-    ));
+    let db_path =
+        std::env::temp_dir().join(format!("aro-m3-adversarial-test-{}.sqlite", Uuid::new_v4()));
     let store = SqliteMemoryStore::new(&db_path).expect("failed to create sqlite memory store");
     let engine = AssistantEngine::new(store.clone());
     (engine, store, db_path)
@@ -70,20 +67,80 @@ async fn test_adversarial_memory_save_primitives() {
 
     // 1. Multiple categories, explicit & clamped saliences, pinned variations
     let cases = vec![
-        ("technical", Some(0.85), false, "PostgreSQL connection pool max size is 64"),
-        ("preference", Some(0.95), true, "User prefers spaces over tabs for indentation"),
-        ("fact", Some(0.50), false, "Internal API gateway endpoint is https://gw.internal"),
-        ("rule", Some(1.00), true, "Never store unencrypted plaintext secrets"),
-        ("decision", Some(0.70), false, "Adopted Apache Arrow for IPC interchange"),
-        ("system", Some(0.40), false, "Metrics reporting interval set to 15 seconds"),
-        ("personal", Some(0.60), false, "User timezone is Europe/Paris"),
-        ("custom_arbitrary", Some(0.75), false, "Arbitrary custom tag categorisation test"),
+        (
+            "technical",
+            Some(0.85),
+            false,
+            "PostgreSQL connection pool max size is 64",
+        ),
+        (
+            "preference",
+            Some(0.95),
+            true,
+            "User prefers spaces over tabs for indentation",
+        ),
+        (
+            "fact",
+            Some(0.50),
+            false,
+            "Internal API gateway endpoint is https://gw.internal",
+        ),
+        (
+            "rule",
+            Some(1.00),
+            true,
+            "Never store unencrypted plaintext secrets",
+        ),
+        (
+            "decision",
+            Some(0.70),
+            false,
+            "Adopted Apache Arrow for IPC interchange",
+        ),
+        (
+            "system",
+            Some(0.40),
+            false,
+            "Metrics reporting interval set to 15 seconds",
+        ),
+        (
+            "personal",
+            Some(0.60),
+            false,
+            "User timezone is Europe/Paris",
+        ),
+        (
+            "custom_arbitrary",
+            Some(0.75),
+            false,
+            "Arbitrary custom tag categorisation test",
+        ),
         // Extreme salience clamping
-        ("technical", Some(10.0), false, "Extremely high salience clamped to 1.0"),
-        ("technical", Some(0.0), false, "Zero salience clamped to 0.1"),
-        ("technical", Some(-5.5), false, "Negative salience clamped to 0.1"),
+        (
+            "technical",
+            Some(10.0),
+            false,
+            "Extremely high salience clamped to 1.0",
+        ),
+        (
+            "technical",
+            Some(0.0),
+            false,
+            "Zero salience clamped to 0.1",
+        ),
+        (
+            "technical",
+            Some(-5.5),
+            false,
+            "Negative salience clamped to 0.1",
+        ),
         // Omitted salience -> auto-calculated
-        ("preference", None, false, "I always prefer dark mode in IDE"),
+        (
+            "preference",
+            None,
+            false,
+            "I always prefer dark mode in IDE",
+        ),
     ];
 
     let mut saved_ids = Vec::new();
@@ -99,14 +156,13 @@ async fn test_adversarial_memory_save_primitives() {
             input_map["salience"] = json!(sal);
         }
 
-        let req = ToolExecutionRequest::new(
-            run.id,
-            run.conversation_id,
-            TOOL_MEMORY_SAVE,
-            input_map,
-        );
+        let req =
+            ToolExecutionRequest::new(run.id, run.conversation_id, TOOL_MEMORY_SAVE, input_map);
 
-        let res = engine.execute_tool(&run, req).await.expect("execute memory_save");
+        let res = engine
+            .execute_tool(&run, req)
+            .await
+            .expect("execute memory_save");
         assert_eq!(res.status, ToolExecutionStatus::Completed);
         assert_eq!(res.output["success"], true);
         assert_eq!(res.output["content"], content);
@@ -116,7 +172,10 @@ async fn test_adversarial_memory_save_primitives() {
         saved_ids.push(id);
 
         // Verify direct persistence in SqliteMemoryStore
-        let stored = store.get_memory(id).expect("query store").expect("record exists");
+        let stored = store
+            .get_memory(id)
+            .expect("query store")
+            .expect("record exists");
         assert_eq!(stored.id, id);
         assert_eq!(stored.content, content);
         assert_eq!(stored.category, cat);
@@ -174,7 +233,10 @@ async fn test_adversarial_memory_save_primitives() {
             "category": "technical"
         }),
     );
-    let large_res = engine.execute_tool(&run, large_req).await.expect("large save");
+    let large_res = engine
+        .execute_tool(&run, large_req)
+        .await
+        .expect("large save");
     assert_eq!(large_res.status, ToolExecutionStatus::Completed);
     let large_id = Uuid::parse_str(large_res.output["id"].as_str().unwrap()).unwrap();
     let stored_large = store.get_memory(large_id).unwrap().unwrap();
@@ -195,21 +257,111 @@ async fn test_adversarial_memory_search_primitives() {
 
     // Seed 15 diverse memories
     let seed_data = vec![
-        ("Rust async runtime tokio executes worker threads", "technical", "project", false, 0.8),
-        ("Kubernetes ingress controller uses NGINX routing", "technical", "project", false, 0.75),
-        ("User strictly prefers concise responses without filler", "preference", "user", true, 0.95),
-        ("User prefers French documentation when available", "preference", "user", false, 0.65),
-        ("System backup snapshot cron triggers at 02:00 UTC", "system", "project", false, 0.5),
-        ("Redis cluster cache TTL defaults to 3600 seconds", "technical", "project", false, 0.8),
-        ("Authentication tokens expire after 15 minutes of inactivity", "rule", "conversation", true, 0.9),
-        ("Decision: Use SQLite WAL mode for concurrency", "decision", "project", true, 0.9),
-        ("Docker image alpine base reduces layer footprint", "technical", "conversation", false, 0.6),
-        ("GraphQL federation gateway combines domain subgraphs", "technical", "project", false, 0.7),
-        ("User interface theme defaults to system dark mode", "preference", "user", false, 0.7),
-        ("Database connection timeout configured to 5000ms", "technical", "project", false, 0.6),
-        ("Prometheus scrape interval configured at 10s", "system", "project", false, 0.55),
-        ("Ephemeral session cookies must be partitioned", "rule", "conversation", false, 0.7),
-        ("Kafka topic partitions replicated across 3 brokers", "technical", "project", false, 0.85),
+        (
+            "Rust async runtime tokio executes worker threads",
+            "technical",
+            "project",
+            false,
+            0.8,
+        ),
+        (
+            "Kubernetes ingress controller uses NGINX routing",
+            "technical",
+            "project",
+            false,
+            0.75,
+        ),
+        (
+            "User strictly prefers concise responses without filler",
+            "preference",
+            "user",
+            true,
+            0.95,
+        ),
+        (
+            "User prefers French documentation when available",
+            "preference",
+            "user",
+            false,
+            0.65,
+        ),
+        (
+            "System backup snapshot cron triggers at 02:00 UTC",
+            "system",
+            "project",
+            false,
+            0.5,
+        ),
+        (
+            "Redis cluster cache TTL defaults to 3600 seconds",
+            "technical",
+            "project",
+            false,
+            0.8,
+        ),
+        (
+            "Authentication tokens expire after 15 minutes of inactivity",
+            "rule",
+            "conversation",
+            true,
+            0.9,
+        ),
+        (
+            "Decision: Use SQLite WAL mode for concurrency",
+            "decision",
+            "project",
+            true,
+            0.9,
+        ),
+        (
+            "Docker image alpine base reduces layer footprint",
+            "technical",
+            "conversation",
+            false,
+            0.6,
+        ),
+        (
+            "GraphQL federation gateway combines domain subgraphs",
+            "technical",
+            "project",
+            false,
+            0.7,
+        ),
+        (
+            "User interface theme defaults to system dark mode",
+            "preference",
+            "user",
+            false,
+            0.7,
+        ),
+        (
+            "Database connection timeout configured to 5000ms",
+            "technical",
+            "project",
+            false,
+            0.6,
+        ),
+        (
+            "Prometheus scrape interval configured at 10s",
+            "system",
+            "project",
+            false,
+            0.55,
+        ),
+        (
+            "Ephemeral session cookies must be partitioned",
+            "rule",
+            "conversation",
+            false,
+            0.7,
+        ),
+        (
+            "Kafka topic partitions replicated across 3 brokers",
+            "technical",
+            "project",
+            false,
+            0.85,
+        ),
     ];
 
     for (content, cat, scope, pinned, salience) in seed_data {
@@ -245,7 +397,10 @@ async fn test_adversarial_memory_search_primitives() {
                 "limit": req_limit
             }),
         );
-        let res = engine.execute_tool(&run, search_req).await.expect("search limit test");
+        let res = engine
+            .execute_tool(&run, search_req)
+            .await
+            .expect("search limit test");
         assert_eq!(res.status, ToolExecutionStatus::Completed);
         let count = res.output["count"].as_u64().unwrap() as usize;
         let memories = res.output["memories"].as_array().unwrap();
@@ -270,7 +425,10 @@ async fn test_adversarial_memory_search_primitives() {
             "limit": 10
         }),
     );
-    let cat_res = engine.execute_tool(&run, cat_req).await.expect("search cat");
+    let cat_res = engine
+        .execute_tool(&run, cat_req)
+        .await
+        .expect("search cat");
     let cat_mems = cat_res.output["memories"].as_array().unwrap();
     assert!(!cat_mems.is_empty());
     for m in cat_mems {
@@ -288,9 +446,15 @@ async fn test_adversarial_memory_search_primitives() {
             "limit": 10
         }),
     );
-    let empty_cat_res = engine.execute_tool(&run, empty_cat_req).await.expect("search empty cat");
+    let empty_cat_res = engine
+        .execute_tool(&run, empty_cat_req)
+        .await
+        .expect("search empty cat");
     assert_eq!(empty_cat_res.output["count"], 0);
-    assert!(empty_cat_res.output["memories"].as_array().unwrap().is_empty());
+    assert!(empty_cat_res.output["memories"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     // 3. Scope filtering
     let scope_req = ToolExecutionRequest::new(
@@ -303,7 +467,10 @@ async fn test_adversarial_memory_search_primitives() {
             "limit": 10
         }),
     );
-    let scope_res = engine.execute_tool(&run, scope_req).await.expect("search scope");
+    let scope_res = engine
+        .execute_tool(&run, scope_req)
+        .await
+        .expect("search scope");
     let scope_mems = scope_res.output["memories"].as_array().unwrap();
     assert!(!scope_mems.is_empty());
     for m in scope_mems {
@@ -322,7 +489,10 @@ async fn test_adversarial_memory_search_primitives() {
             "limit": 10
         }),
     );
-    let comb_res = engine.execute_tool(&run, comb_req).await.expect("combined search");
+    let comb_res = engine
+        .execute_tool(&run, comb_req)
+        .await
+        .expect("combined search");
     let comb_mems = comb_res.output["memories"].as_array().unwrap();
     for m in comb_mems {
         assert_eq!(m["category"], "technical");
@@ -339,7 +509,10 @@ async fn test_adversarial_memory_search_primitives() {
             "limit": 5
         }),
     );
-    let ps_res = engine.execute_tool(&run, pinned_search_req).await.expect("pinned search");
+    let ps_res = engine
+        .execute_tool(&run, pinned_search_req)
+        .await
+        .expect("pinned search");
     let ps_mems = ps_res.output["memories"].as_array().unwrap();
     assert!(!ps_mems.is_empty());
     let first = &ps_mems[0];
@@ -401,7 +574,10 @@ async fn test_adversarial_memory_recall_primitives() {
             "includeEpisodes": true
         }),
     );
-    let res1 = engine.execute_tool(&run, recall_req1).await.expect("recall 1");
+    let res1 = engine
+        .execute_tool(&run, recall_req1)
+        .await
+        .expect("recall 1");
     assert_eq!(res1.status, ToolExecutionStatus::Completed);
     assert_eq!(res1.output["found"], true);
     assert_eq!(res1.output["memory"]["id"], memory_id.to_string());
@@ -411,7 +587,9 @@ async fn test_adversarial_memory_recall_primitives() {
     );
 
     // Verify episodes correlated
-    let eps = res1.output["relatedEpisodes"].as_array().expect("episodes array");
+    let eps = res1.output["relatedEpisodes"]
+        .as_array()
+        .expect("episodes array");
     assert!(!eps.is_empty(), "Must correlate with Memcached episode");
 
     // Verify atomic recall_count incremented 0 -> 1
@@ -430,9 +608,15 @@ async fn test_adversarial_memory_recall_primitives() {
                 "includeEpisodes": false
             }),
         );
-        let loop_res = engine.execute_tool(&run, loop_req).await.expect("repeat recall");
+        let loop_res = engine
+            .execute_tool(&run, loop_req)
+            .await
+            .expect("repeat recall");
         assert_eq!(loop_res.output["found"], true);
-        assert!(loop_res.output.get("relatedEpisodes").is_none() || loop_res.output["relatedEpisodes"].is_null());
+        assert!(
+            loop_res.output.get("relatedEpisodes").is_none()
+                || loop_res.output["relatedEpisodes"].is_null()
+        );
 
         let cur_stored = store.get_memory(memory_id).unwrap().unwrap();
         assert_eq!(
@@ -449,7 +633,10 @@ async fn test_adversarial_memory_recall_primitives() {
         TOOL_MEMORY_RECALL,
         json!({ "id": non_existent_id.to_string() }),
     );
-    let miss_res = engine.execute_tool(&run, miss_req).await.expect("miss recall");
+    let miss_res = engine
+        .execute_tool(&run, miss_req)
+        .await
+        .expect("miss recall");
     assert_eq!(miss_res.status, ToolExecutionStatus::Completed);
     assert_eq!(miss_res.output["found"], false);
     assert!(miss_res.output.get("memory").is_none() || miss_res.output["memory"].is_null());
@@ -461,7 +648,10 @@ async fn test_adversarial_memory_recall_primitives() {
         TOOL_MEMORY_RECALL,
         json!({ "id": "not-a-valid-uuid-at-all" }),
     );
-    let malformed_res = engine.execute_tool(&run, malformed_req).await.expect("malformed id recall");
+    let malformed_res = engine
+        .execute_tool(&run, malformed_req)
+        .await
+        .expect("malformed id recall");
     assert_eq!(malformed_res.status, ToolExecutionStatus::Completed);
     assert_eq!(malformed_res.output["found"], false);
 
@@ -475,7 +665,10 @@ async fn test_adversarial_memory_recall_primitives() {
             "include_episodes": true
         }),
     );
-    let ek_res = engine.execute_tool(&run, ek_req).await.expect("entity_key recall");
+    let ek_res = engine
+        .execute_tool(&run, ek_req)
+        .await
+        .expect("entity_key recall");
     assert_eq!(ek_res.output["found"], true);
     assert_eq!(ek_res.output["memory"]["id"], memory_id.to_string());
 
@@ -525,7 +718,10 @@ async fn test_adversarial_memory_update_primitives() {
             "category": "system"
         }),
     );
-    let update_res = engine.execute_tool(&run, update_req).await.expect("execute update");
+    let update_res = engine
+        .execute_tool(&run, update_req)
+        .await
+        .expect("execute update");
     assert_eq!(update_res.status, ToolExecutionStatus::Completed);
     assert_eq!(update_res.output["success"], true);
     assert_eq!(update_res.output["id"], memory_id.to_string());
@@ -555,10 +751,16 @@ async fn test_adversarial_memory_update_primitives() {
             "salience": 999.0
         }),
     );
-    let clamp_res = engine.execute_tool(&run, clamp_up_req).await.expect("salience clamp update");
+    let clamp_res = engine
+        .execute_tool(&run, clamp_up_req)
+        .await
+        .expect("salience clamp update");
     assert_eq!(clamp_res.output["success"], true);
     let clamped_mem = store.get_memory(memory_id).unwrap().unwrap();
-    assert_eq!(clamped_mem.salience, 1.0, "Salience 999.0 must clamp to 1.0");
+    assert_eq!(
+        clamped_mem.salience, 1.0,
+        "Salience 999.0 must clamp to 1.0"
+    );
     // Ensure content and pinned were NOT overwritten
     assert_eq!(
         clamped_mem.content,
@@ -576,7 +778,10 @@ async fn test_adversarial_memory_update_primitives() {
             "pinned": false
         }),
     );
-    let unpin_res = engine.execute_tool(&run, unpin_req).await.expect("unpin update");
+    let unpin_res = engine
+        .execute_tool(&run, unpin_req)
+        .await
+        .expect("unpin update");
     assert_eq!(unpin_res.output["success"], true);
     let unpinned_mem = store.get_memory(memory_id).unwrap().unwrap();
     assert!(!unpinned_mem.pinned);
@@ -677,21 +882,30 @@ async fn test_adversarial_memory_forget_and_archival() {
             "reason": "Service deprecated"
         }),
     );
-    let forget_res1 = engine.execute_tool(&run, forget_req1).await.expect("forget 1");
+    let forget_res1 = engine
+        .execute_tool(&run, forget_req1)
+        .await
+        .expect("forget 1");
     assert_eq!(forget_res1.status, ToolExecutionStatus::Completed);
     assert_eq!(forget_res1.output["success"], true);
     assert_eq!(forget_res1.output["id"], id1.to_string());
     assert_eq!(forget_res1.output["status"], "archived");
 
     // Verify mem1 is soft-deleted from active store
-    assert!(store.get_memory(id1).unwrap().is_none(), "mem1 must be soft-deleted");
+    assert!(
+        store.get_memory(id1).unwrap().is_none(),
+        "mem1 must be soft-deleted"
+    );
 
     // Verify mem1 is no longer returned in search
     let after_search1 = engine
         .search_memories("microservice", 5)
         .await
         .expect("search after 1");
-    assert!(!after_search1.iter().any(|m| m.id == id1), "mem1 must not appear in search");
+    assert!(
+        !after_search1.iter().any(|m| m.id == id1),
+        "mem1 must not appear in search"
+    );
 
     // Verify mem1 recall returns found: false
     let recall_req1 = ToolExecutionRequest::new(
@@ -700,7 +914,10 @@ async fn test_adversarial_memory_forget_and_archival() {
         TOOL_MEMORY_RECALL,
         json!({ "id": id1.to_string() }),
     );
-    let recall_res1 = engine.execute_tool(&run, recall_req1).await.expect("recall deleted");
+    let recall_res1 = engine
+        .execute_tool(&run, recall_req1)
+        .await
+        .expect("recall deleted");
     assert_eq!(recall_res1.output["found"], false);
 
     // 3. Forget mem2 via legacy alias `core.memory.delete`
@@ -712,17 +929,26 @@ async fn test_adversarial_memory_forget_and_archival() {
             "id": id2.to_string()
         }),
     );
-    let delete_res2 = engine.execute_tool(&run, delete_req2).await.expect("delete 2");
+    let delete_res2 = engine
+        .execute_tool(&run, delete_req2)
+        .await
+        .expect("delete 2");
     assert_eq!(delete_res2.status, ToolExecutionStatus::Completed);
     assert_eq!(delete_res2.output["success"], true);
 
     // Verify mem2 is soft-deleted and removed from search
-    assert!(store.get_memory(id2).unwrap().is_none(), "mem2 must be soft-deleted");
+    assert!(
+        store.get_memory(id2).unwrap().is_none(),
+        "mem2 must be soft-deleted"
+    );
     let after_search2 = engine
         .search_memories("credentials qa_tester", 5)
         .await
         .expect("search after 2");
-    assert!(!after_search2.iter().any(|m| m.id == id2), "mem2 must not appear in search");
+    assert!(
+        !after_search2.iter().any(|m| m.id == id2),
+        "mem2 must not appear in search"
+    );
 
     cleanup_temp_db(db_path);
 }
@@ -744,7 +970,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_CORE_MEMORY_SAVE,
         json!({ "content": "Dotted memory save verification note", "category": "technical" }),
     );
-    let s_dot_res = engine.execute_tool(&run, save_dotted).await.expect("dotted save");
+    let s_dot_res = engine
+        .execute_tool(&run, save_dotted)
+        .await
+        .expect("dotted save");
     assert_eq!(s_dot_res.status, ToolExecutionStatus::Completed);
     let id_dotted = Uuid::parse_str(s_dot_res.output["id"].as_str().unwrap()).unwrap();
 
@@ -755,7 +984,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_MEMORY_SAVE,
         json!({ "content": "Snake memory save verification note", "category": "technical" }),
     );
-    let s_snake_res = engine.execute_tool(&run, save_snake).await.expect("snake save");
+    let s_snake_res = engine
+        .execute_tool(&run, save_snake)
+        .await
+        .expect("snake save");
     assert_eq!(s_snake_res.status, ToolExecutionStatus::Completed);
     let id_snake = Uuid::parse_str(s_snake_res.output["id"].as_str().unwrap()).unwrap();
 
@@ -766,7 +998,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_CORE_MEMORY_SEARCH,
         json!({ "query": "verification note", "limit": 5 }),
     );
-    let sd_res = engine.execute_tool(&run, search_dotted).await.expect("dotted search");
+    let sd_res = engine
+        .execute_tool(&run, search_dotted)
+        .await
+        .expect("dotted search");
     assert_eq!(sd_res.status, ToolExecutionStatus::Completed);
     assert!(sd_res.output["count"].as_u64().unwrap() >= 2);
 
@@ -777,7 +1012,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_MEMORY_SEARCH,
         json!({ "query": "verification note", "limit": 5 }),
     );
-    let ss_res = engine.execute_tool(&run, search_snake).await.expect("snake search");
+    let ss_res = engine
+        .execute_tool(&run, search_snake)
+        .await
+        .expect("snake search");
     assert_eq!(ss_res.status, ToolExecutionStatus::Completed);
     assert!(ss_res.output["count"].as_u64().unwrap() >= 2);
 
@@ -788,7 +1026,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_CORE_MEMORY_RECALL,
         json!({ "id": id_dotted.to_string() }),
     );
-    let rd_res = engine.execute_tool(&run, recall_dotted).await.expect("dotted recall");
+    let rd_res = engine
+        .execute_tool(&run, recall_dotted)
+        .await
+        .expect("dotted recall");
     assert_eq!(rd_res.output["found"], true);
 
     // Recall snake
@@ -798,7 +1039,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_MEMORY_RECALL,
         json!({ "id": id_snake.to_string() }),
     );
-    let rs_res = engine.execute_tool(&run, recall_snake).await.expect("snake recall");
+    let rs_res = engine
+        .execute_tool(&run, recall_snake)
+        .await
+        .expect("snake recall");
     assert_eq!(rs_res.output["found"], true);
 
     // Update dotted
@@ -808,7 +1052,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_CORE_MEMORY_UPDATE,
         json!({ "id": id_dotted.to_string(), "salience": 0.88 }),
     );
-    let ud_res = engine.execute_tool(&run, update_dotted).await.expect("dotted update");
+    let ud_res = engine
+        .execute_tool(&run, update_dotted)
+        .await
+        .expect("dotted update");
     assert_eq!(ud_res.output["success"], true);
 
     // Update snake
@@ -818,7 +1065,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_MEMORY_UPDATE,
         json!({ "id": id_snake.to_string(), "salience": 0.88 }),
     );
-    let us_res = engine.execute_tool(&run, update_snake).await.expect("snake update");
+    let us_res = engine
+        .execute_tool(&run, update_snake)
+        .await
+        .expect("snake update");
     assert_eq!(us_res.output["success"], true);
 
     // List dotted (legacy)
@@ -828,7 +1078,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_CORE_MEMORY_LIST,
         json!({ "limit": 10 }),
     );
-    let ld_res = engine.execute_tool(&run, list_dotted).await.expect("dotted list");
+    let ld_res = engine
+        .execute_tool(&run, list_dotted)
+        .await
+        .expect("dotted list");
     assert_eq!(ld_res.status, ToolExecutionStatus::Completed);
     assert!(ld_res.output["count"].as_u64().unwrap() >= 2);
 
@@ -839,7 +1092,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_MEMORY_LIST,
         json!({ "limit": 10 }),
     );
-    let ls_res = engine.execute_tool(&run, list_snake).await.expect("snake list");
+    let ls_res = engine
+        .execute_tool(&run, list_snake)
+        .await
+        .expect("snake list");
     assert_eq!(ls_res.status, ToolExecutionStatus::Completed);
     assert!(ls_res.output["count"].as_u64().unwrap() >= 2);
 
@@ -850,7 +1106,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_CORE_MEMORY_FORGET,
         json!({ "id": id_dotted.to_string() }),
     );
-    let fd_res = engine.execute_tool(&run, forget_dotted).await.expect("dotted forget");
+    let fd_res = engine
+        .execute_tool(&run, forget_dotted)
+        .await
+        .expect("dotted forget");
     assert_eq!(fd_res.output["status"], "archived");
 
     // Forget snake
@@ -860,7 +1119,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_MEMORY_FORGET,
         json!({ "id": id_snake.to_string() }),
     );
-    let fs_res = engine.execute_tool(&run, forget_snake).await.expect("snake forget");
+    let fs_res = engine
+        .execute_tool(&run, forget_snake)
+        .await
+        .expect("snake forget");
     assert_eq!(fs_res.output["status"], "archived");
 
     // Delete dotted (legacy)
@@ -887,7 +1149,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_CORE_MEMORY_DELETE,
         json!({ "id": seed_del1.id.to_string() }),
     );
-    let dd_res = engine.execute_tool(&run, del_dotted).await.expect("dotted delete");
+    let dd_res = engine
+        .execute_tool(&run, del_dotted)
+        .await
+        .expect("dotted delete");
     assert_eq!(dd_res.output["success"], true);
 
     // Delete snake (legacy alias)
@@ -914,7 +1179,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         TOOL_MEMORY_DELETE,
         json!({ "id": seed_del2.id.to_string() }),
     );
-    let ds_res = engine.execute_tool(&run, del_snake).await.expect("snake delete");
+    let ds_res = engine
+        .execute_tool(&run, del_snake)
+        .await
+        .expect("snake delete");
     assert_eq!(ds_res.output["success"], true);
 
     // 2. Comprehensive Agent::validate_action validation
@@ -933,13 +1201,8 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         max_steps: Some(1),
     };
     let agent_run = agent_runtime.start_run(&start_req, None);
-    let context_pack = agent_runtime.build_context_pack(
-        &agent_run,
-        &[],
-        &[],
-        &[],
-        EnvironmentSnapshot::default(),
-    );
+    let context_pack =
+        agent_runtime.build_context_pack(&agent_run, &[], &[], &[], EnvironmentSnapshot::default());
 
     let dummy_id = Uuid::new_v4().to_string();
 
@@ -949,7 +1212,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         (TOOL_CORE_MEMORY_SAVE, json!({ "content": "val test" })),
         (TOOL_CORE_MEMORY_SEARCH, json!({ "query": "val query" })),
         (TOOL_CORE_MEMORY_RECALL, json!({ "id": dummy_id })),
-        (TOOL_CORE_MEMORY_UPDATE, json!({ "id": dummy_id, "salience": 0.9 })),
+        (
+            TOOL_CORE_MEMORY_UPDATE,
+            json!({ "id": dummy_id, "salience": 0.9 }),
+        ),
         (TOOL_CORE_MEMORY_FORGET, json!({ "id": dummy_id })),
         (TOOL_CORE_MEMORY_LIST, json!({})),
         (TOOL_CORE_MEMORY_DELETE, json!({ "id": dummy_id })),
@@ -957,7 +1223,10 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
         (TOOL_MEMORY_SAVE, json!({ "content": "val test" })),
         (TOOL_MEMORY_SEARCH, json!({ "query": "val query" })),
         (TOOL_MEMORY_RECALL, json!({ "id": dummy_id })),
-        (TOOL_MEMORY_UPDATE, json!({ "id": dummy_id, "salience": 0.9 })),
+        (
+            TOOL_MEMORY_UPDATE,
+            json!({ "id": dummy_id, "salience": 0.9 }),
+        ),
         (TOOL_MEMORY_FORGET, json!({ "id": dummy_id })),
         (TOOL_MEMORY_LIST, json!({})),
         (TOOL_MEMORY_DELETE, json!({ "id": dummy_id })),
@@ -973,7 +1242,8 @@ async fn test_adversarial_dual_dispatch_and_agent_validation() {
     ];
 
     for (tool_id, input) in valid_tool_calls {
-        let action = AgentAction::tool(tool_id, input, Some("testing alias validation".to_string()));
+        let action =
+            AgentAction::tool(tool_id, input, Some("testing alias validation".to_string()));
         let validation_res = agent_runtime.validate_action(&action, &context_pack);
         assert!(
             validation_res.is_ok(),

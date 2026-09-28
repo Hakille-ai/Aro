@@ -63,11 +63,16 @@ fn test_fk_cascade_deletes_and_fts_consistency() {
     assert_eq!(fts_count_before, 2);
 
     // Delete the conversation -> foreign key ON DELETE CASCADE should fire
-    store.delete_conversation(conv.id).expect("delete conversation");
+    store
+        .delete_conversation(conv.id)
+        .expect("delete conversation");
 
     // Verify conversation deleted
     let conv_listed = store.list_episodes(conv.id).expect("list after delete");
-    assert!(conv_listed.is_empty(), "Episodes should be gone via cascade");
+    assert!(
+        conv_listed.is_empty(),
+        "Episodes should be gone via cascade"
+    );
 
     let ep_count_after: i64 = conn
         .query_row(
@@ -76,7 +81,10 @@ fn test_fk_cascade_deletes_and_fts_consistency() {
             |row| row.get(0),
         )
         .expect("ep count after");
-    assert_eq!(ep_count_after, 0, "episodes table must have 0 rows for deleted conversation");
+    assert_eq!(
+        ep_count_after, 0,
+        "episodes table must have 0 rows for deleted conversation"
+    );
 
     // Check FTS table for ghost rows!
     let fts_count_after: i64 = conn
@@ -87,7 +95,10 @@ fn test_fk_cascade_deletes_and_fts_consistency() {
         )
         .expect("fts count after");
 
-    println!("FK Cascade Test: FTS count after delete = {}", fts_count_after);
+    println!(
+        "FK Cascade Test: FTS count after delete = {}",
+        fts_count_after
+    );
     assert_eq!(
         fts_count_after, 0,
         "episodes_fts virtual table must have 0 rows after cascade deletion (no ghost rows in FTS!)"
@@ -98,7 +109,8 @@ fn test_fk_cascade_deletes_and_fts_consistency() {
 
 #[test]
 fn test_transaction_rollback_and_fts_atomicity() {
-    let path = std::env::temp_dir().join(format!("aro-rollback-atomicity-{}.sqlite", Uuid::new_v4()));
+    let path =
+        std::env::temp_dir().join(format!("aro-rollback-atomicity-{}.sqlite", Uuid::new_v4()));
     let store = SqliteMemoryStore::new(&path).expect("store init");
 
     let conv = store
@@ -118,12 +130,15 @@ fn test_transaction_rollback_and_fts_atomicity() {
     store.store_episode(&ep).expect("store original ep");
 
     // Verify search matches original
-    let results = store.search_episodes(conv.id, "Original", 5).expect("search");
+    let results = store
+        .search_episodes(conv.id, "Original", 5)
+        .expect("search");
     assert_eq!(results.len(), 1);
 
     // Now test a rollback on an UPDATE
     let mut conn = Connection::open(&path).expect("open raw");
-    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;").expect("pragma");
+    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
+        .expect("pragma");
 
     {
         let tx = conn.transaction().expect("begin tx");
@@ -159,11 +174,18 @@ fn test_transaction_rollback_and_fts_atomicity() {
     assert_eq!(listed[0].summary, "Original stable summary");
 
     // 2. FTS search for "CORRUPTED" must return 0 results
-    let corrupted_search = store.search_episodes(conv.id, "CORRUPTED", 5).expect("search");
-    assert!(corrupted_search.is_empty(), "Rolled back content must not appear in FTS search");
+    let corrupted_search = store
+        .search_episodes(conv.id, "CORRUPTED", 5)
+        .expect("search");
+    assert!(
+        corrupted_search.is_empty(),
+        "Rolled back content must not appear in FTS search"
+    );
 
     // 3. FTS search for original must still work
-    let original_search = store.search_episodes(conv.id, "Original", 5).expect("search");
+    let original_search = store
+        .search_episodes(conv.id, "Original", 5)
+        .expect("search");
     assert_eq!(original_search.len(), 1);
     assert_eq!(original_search[0].id, ep.id);
 
@@ -175,7 +197,10 @@ fn test_transaction_rollback_and_fts_atomicity() {
             |row| row.get(0),
         )
         .expect("raw fts count");
-    assert_eq!(raw_fts_count, 1, "There should be exactly 1 row in episodes_fts");
+    assert_eq!(
+        raw_fts_count, 1,
+        "There should be exactly 1 row in episodes_fts"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -250,7 +275,9 @@ fn test_adversarial_fts5_queries_and_injections() {
     }
 
     // Verify that normal valid search still works after all adversarial attempts
-    let normal = store.search_episodes(conv.id, "SQLite", 10).expect("normal search");
+    let normal = store
+        .search_episodes(conv.id, "SQLite", 10)
+        .expect("normal search");
     assert_eq!(normal.len(), 1);
     assert_eq!(normal[0].id, ep.id);
 
@@ -268,8 +295,12 @@ fn test_episode_boundary_and_large_payloads() {
 
     // 1. Episode with massive summary and entity payload (100k characters)
     let large_summary = "A".repeat(50000);
-    let large_decisions = (0..500).map(|i| format!("Decision number {} with detail", i)).collect::<Vec<_>>();
-    let large_entities = (0..500).map(|i| format!("Entity_{}", i)).collect::<Vec<_>>();
+    let large_decisions = (0..500)
+        .map(|i| format!("Decision number {} with detail", i))
+        .collect::<Vec<_>>();
+    let large_entities = (0..500)
+        .map(|i| format!("Entity_{}", i))
+        .collect::<Vec<_>>();
 
     let ep_large = Episode::new(
         conv.id,
@@ -282,14 +313,19 @@ fn test_episode_boundary_and_large_payloads() {
     );
     store.store_episode(&ep_large).expect("store large episode");
 
-    let retrieved = store.get_latest_episode(conv.id).expect("get latest").unwrap();
+    let retrieved = store
+        .get_latest_episode(conv.id)
+        .expect("get latest")
+        .unwrap();
     assert_eq!(retrieved.token_count, 100000);
     assert_eq!(retrieved.summary.len(), 50000);
     assert_eq!(retrieved.key_decisions.len(), 500);
     assert_eq!(retrieved.entities.len(), 500);
 
     // 2. Search matches inside large entities and decisions
-    let found = store.search_episodes(conv.id, "Entity_499", 5).expect("search entity");
+    let found = store
+        .search_episodes(conv.id, "Entity_499", 5)
+        .expect("search entity");
     assert_eq!(found.len(), 1);
 
     // 3. Inverted turns: turn_start > turn_end
@@ -304,14 +340,18 @@ fn test_episode_boundary_and_large_payloads() {
     );
     // store_episode currently allows inverted turn numbers because SQL schema does not enforce CHECK (turn_start <= turn_end)
     let inv_res = store.store_episode(&ep_inverted);
-    assert!(inv_res.is_ok(), "Schema currently allows inverted spans without CHECK constraint");
+    assert!(
+        inv_res.is_ok(),
+        "Schema currently allows inverted spans without CHECK constraint"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn test_episode_upsert_idempotency_and_fts_replacement() {
-    let path = std::env::temp_dir().join(format!("aro-upsert-idempotency-{}.sqlite", Uuid::new_v4()));
+    let path =
+        std::env::temp_dir().join(format!("aro-upsert-idempotency-{}.sqlite", Uuid::new_v4()));
     let store = SqliteMemoryStore::new(&path).expect("store init");
 
     let conv = store
@@ -335,8 +375,17 @@ fn test_episode_upsert_idempotency_and_fts_replacement() {
     store.store_episode(&ep_v1).expect("store v1");
 
     // Search matches v1
-    assert_eq!(store.search_episodes(conv.id, "TailwindCSS", 5).unwrap().len(), 1);
-    assert_eq!(store.search_episodes(conv.id, "GraphQL", 5).unwrap().len(), 0);
+    assert_eq!(
+        store
+            .search_episodes(conv.id, "TailwindCSS", 5)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store.search_episodes(conv.id, "GraphQL", 5).unwrap().len(),
+        0
+    );
 
     // Upsert with completely new v2 content
     let ep_v2 = Episode {
@@ -355,10 +404,16 @@ fn test_episode_upsert_idempotency_and_fts_replacement() {
     store.store_episode(&ep_v2).expect("store v2");
 
     // Search matches v2
-    assert_eq!(store.search_episodes(conv.id, "GraphQL", 5).unwrap().len(), 1);
+    assert_eq!(
+        store.search_episodes(conv.id, "GraphQL", 5).unwrap().len(),
+        1
+    );
     // Old v1 term must NO LONGER match!
     assert_eq!(
-        store.search_episodes(conv.id, "TailwindCSS", 5).unwrap().len(),
+        store
+            .search_episodes(conv.id, "TailwindCSS", 5)
+            .unwrap()
+            .len(),
         0,
         "Old content must not match after upsert update"
     );
@@ -372,7 +427,10 @@ fn test_episode_upsert_idempotency_and_fts_replacement() {
             |row| row.get(0),
         )
         .expect("fts count");
-    assert_eq!(fts_count, 1, "There must be exactly 1 row in episodes_fts after upsert");
+    assert_eq!(
+        fts_count, 1,
+        "There must be exactly 1 row in episodes_fts after upsert"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -420,7 +478,11 @@ fn test_wal_concurrency_heavy_stress() {
     let mut writer_handles = Vec::new();
     for writer_idx in 0..num_writers {
         let store_writer = store.clone();
-        let target_conv_id = if writer_idx % 2 == 0 { conv1.id } else { conv2.id };
+        let target_conv_id = if writer_idx % 2 == 0 {
+            conv1.id
+        } else {
+            conv2.id
+        };
         let total_writes_clone = total_writes.clone();
         let write_errors_clone = write_errors.clone();
 
@@ -432,7 +494,10 @@ fn test_wal_concurrency_heavy_stress() {
                     target_conv_id,
                     start,
                     end,
-                    format!("Writer {} batch {} testing concurrent throughput and locks", writer_idx, i),
+                    format!(
+                        "Writer {} batch {} testing concurrent throughput and locks",
+                        writer_idx, i
+                    ),
                     vec![format!("WriterDecision_{}_{}", writer_idx, i)],
                     vec![format!("Entity_{}", i)],
                     150,
@@ -457,7 +522,11 @@ fn test_wal_concurrency_heavy_stress() {
     let mut reader_handles = Vec::new();
     for reader_idx in 0..num_readers {
         let store_reader = store.clone();
-        let conv_id = if reader_idx % 2 == 0 { conv1.id } else { conv2.id };
+        let conv_id = if reader_idx % 2 == 0 {
+            conv1.id
+        } else {
+            conv2.id
+        };
         let total_reads_clone = total_reads.clone();
         let read_errors_clone = read_errors.clone();
         let stop_clone = stop_readers.clone();
@@ -521,7 +590,8 @@ fn test_wal_concurrency_heavy_stress() {
 
 #[test]
 fn test_immediate_transaction_behavior_solves_writer_contention() {
-    let path = std::env::temp_dir().join(format!("aro-wal-immediate-test-{}.sqlite", Uuid::new_v4()));
+    let path =
+        std::env::temp_dir().join(format!("aro-wal-immediate-test-{}.sqlite", Uuid::new_v4()));
     let store = SqliteMemoryStore::new(&path).expect("store init");
 
     let conv = store
@@ -557,7 +627,8 @@ fn test_immediate_transaction_behavior_solves_writer_contention() {
                     )?;
 
                     // Use IMMEDIATE transaction behavior to prevent lock upgrade deadlocks
-                    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                    let tx =
+                        conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                     tx.execute(
                         r#"
                         INSERT INTO episodes (
@@ -617,4 +688,3 @@ fn test_immediate_transaction_behavior_solves_writer_contention() {
     assert_eq!(errors, 0, "With TransactionBehavior::Immediate, zero write lock errors occur under concurrent writers");
     assert_eq!(completed, num_writers * writes_per_writer);
 }
-

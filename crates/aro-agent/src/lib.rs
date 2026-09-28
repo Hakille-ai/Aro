@@ -4,32 +4,34 @@ use std::{
 };
 
 use aro_core::{
-    AgentAction, AgentActionType, AgentLane, AgentLaneStatus, AgentRun, AgentRunStartRequest,
-    AgentRunStatus, AgentStep, AgentStepKind, ChatMessage, ContextPack, ContextSource, MessageRole,
-    ModelGenerationRequest, ModelResponseFormat, PermissionProfile, ToolCategory,
-    ToolConfirmationPolicy, ToolDataCaptureMode, ToolDependency, ToolDependencyKind,
+    normalize_tool_id, AgentAction, AgentActionType, AgentLane, AgentLaneStatus, AgentRun,
+    AgentRunStartRequest, AgentRunStatus, AgentStep, AgentStepKind, ChatMessage, ContextPack,
+    ContextSource, MessageRole, ModelGenerationRequest, ModelResponseFormat, PermissionProfile,
+    ToolCategory, ToolConfirmationPolicy, ToolDataCaptureMode, ToolDependency, ToolDependencyKind,
     ToolDescriptor, ToolExecutionEnvironment, ToolExecutionKind, ToolExecutionSpec,
     ToolIdempotency, ToolObservability, ToolOwner, ToolOwnerKind, ToolPermissionEffect,
     ToolPermissionRequirement, ToolProvenance, ToolProvenanceKind, ToolRef, ToolRetryPolicy,
     ToolRetryStrategy, ToolRisk, ToolRiskLevel, ToolSideEffects, ToolSource, ToolStatus,
-    ToolUsageLimits, TOOL_CODE_EXECUTE, TOOL_CORE_AGENT_DELEGATE, TOOL_CORE_AGENT_SPAWN,
-    TOOL_CORE_AGENT_STATUS, TOOL_CORE_CODE_EXECUTE, TOOL_CORE_CONNECTOR_CALL,
-    TOOL_CORE_CONNECTOR_LIST, TOOL_CORE_CONTEXT_SEARCH, TOOL_CORE_DOCUMENT_CREATE,
-    TOOL_CORE_MCP_CALL, TOOL_CORE_MEMORY_DELETE, TOOL_CORE_MEMORY_FORGET, TOOL_CORE_MEMORY_LIST,
-    TOOL_CORE_MEMORY_RECALL, TOOL_CORE_MEMORY_SAVE, TOOL_CORE_MEMORY_SEARCH,
-    TOOL_CORE_MEMORY_UPDATE, TOOL_CORE_SEARCH_WEB, TOOL_CORE_SHELL_EXECUTE, TOOL_CORE_SKILL_INVOKE,
-    TOOL_CORE_SKILL_LIST, TOOL_CORE_WEB_PAGE_READ, TOOL_CORE_WORKSPACE_GREP,
-    TOOL_CORE_WORKSPACE_LIST, TOOL_CORE_WORKSPACE_READ, TOOL_CORE_WORKSPACE_SEARCH,
-    TOOL_CORE_WORKSPACE_WRITE, TOOL_DESCRIPTOR_SCHEMA_VERSION, TOOL_DOCUMENT_CREATE,
-    TOOL_CORE_BROWSER_NAVIGATE, TOOL_CORE_BROWSER_ACTION, TOOL_CORE_COMPUTER_USE,
-    TOOL_BROWSER_NAVIGATE, TOOL_BROWSER_ACTION, TOOL_COMPUTER_USE,
-    TOOL_MEMORY_DELETE, TOOL_MEMORY_FORGET, TOOL_MEMORY_LIST, TOOL_MEMORY_RECALL,
-    TOOL_MEMORY_SAVE, TOOL_MEMORY_SEARCH, TOOL_MEMORY_UPDATE, TOOL_WEB_FETCH, TOOL_WEB_SEARCH,
-    TOOL_CORE_NOTIFICATION_SEND, TOOL_NOTIFICATION_SEND, TOOL_CORE_EMAIL_SEND, TOOL_EMAIL_SEND,
-    TOOL_CORE_NOTIFICATION_SCHEDULE, TOOL_NOTIFICATION_SCHEDULE,
-    normalize_tool_id,
+    ToolUsageLimits, TOOL_ARTIFACT_CREATE, TOOL_BROWSER_ACTION, TOOL_BROWSER_NAVIGATE,
+    TOOL_BROWSER_SNAPSHOT, TOOL_BROWSER_TABS, TOOL_BROWSER_AUTOFILL,
+    TOOL_CODE_EXECUTE, TOOL_COMPUTER_USE, TOOL_CORE_AGENT_DELEGATE, TOOL_CORE_AGENT_SPAWN,
+    TOOL_CORE_AGENT_STATUS, TOOL_CORE_ARTIFACT_CREATE, TOOL_CORE_BROWSER_ACTION,
+    TOOL_CORE_BROWSER_NAVIGATE, TOOL_CORE_BROWSER_SNAPSHOT, TOOL_CORE_BROWSER_TABS,
+    TOOL_CORE_BROWSER_AUTOFILL, TOOL_CORE_CODE_EXECUTE, TOOL_CORE_COMPUTER_USE,
+    TOOL_CORE_CONNECTOR_CALL, TOOL_CORE_CONNECTOR_LIST, TOOL_CORE_CONTEXT_SEARCH,
+    TOOL_CORE_DOCUMENT_CREATE, TOOL_CORE_EMAIL_SEND, TOOL_CORE_MCP_CALL, TOOL_CORE_MEMORY_DELETE,
+    TOOL_CORE_MEMORY_FORGET, TOOL_CORE_MEMORY_LIST, TOOL_CORE_MEMORY_RECALL, TOOL_CORE_MEMORY_SAVE,
+    TOOL_CORE_MEMORY_SEARCH, TOOL_CORE_MEMORY_UPDATE, TOOL_CORE_NOTIFICATION_SCHEDULE,
+    TOOL_CORE_NOTIFICATION_SEND, TOOL_CORE_SEARCH_WEB, TOOL_CORE_SHELL_EXECUTE,
+    TOOL_CORE_SKILL_INVOKE, TOOL_CORE_SKILL_LIST, TOOL_CORE_WEB_PAGE_READ,
+    TOOL_CORE_WORKSPACE_DELETE, TOOL_CORE_WORKSPACE_GIT_DIFF, TOOL_CORE_WORKSPACE_GREP,
+    TOOL_CORE_WORKSPACE_LIST, TOOL_CORE_WORKSPACE_READ, TOOL_CORE_WORKSPACE_REPLACE_IN_FILES,
+    TOOL_CORE_WORKSPACE_SEARCH, TOOL_CORE_WORKSPACE_WRITE, TOOL_DESCRIPTOR_SCHEMA_VERSION,
+    TOOL_DOCUMENT_CREATE, TOOL_EMAIL_SEND, TOOL_MEMORY_DELETE, TOOL_MEMORY_FORGET,
+    TOOL_MEMORY_LIST, TOOL_MEMORY_RECALL, TOOL_MEMORY_SAVE, TOOL_MEMORY_SEARCH, TOOL_MEMORY_UPDATE,
+    TOOL_NOTIFICATION_SCHEDULE, TOOL_NOTIFICATION_SEND, TOOL_WEB_FETCH, TOOL_WEB_SEARCH,
+    TOOL_WORKSPACE_DELETE, TOOL_WORKSPACE_GIT_DIFF, TOOL_WORKSPACE_REPLACE_IN_FILES,
 };
-
 
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -269,7 +271,10 @@ impl AgentRuntime {
                     tool.id == tool_id
                         || tool.aliases.iter().any(|a| a == tool_id)
                         || normalize_tool_id(&tool.id) == normalize_tool_id(tool_id)
-                        || tool.aliases.iter().any(|a| normalize_tool_id(a) == normalize_tool_id(tool_id))
+                        || tool
+                            .aliases
+                            .iter()
+                            .any(|a| normalize_tool_id(a) == normalize_tool_id(tool_id))
                 });
                 if !is_enabled {
                     return Err(format!(
@@ -310,7 +315,7 @@ impl AgentRuntime {
                 "Response contract:\n- Answer the user directly in natural text.\n- Do not wrap the answer in JSON.\n- Use Markdown only when it improves readability.\n- Cite source IDs only when context sources materially affect the answer."
             }
             ModelResponseFormat::AgentActionJson => {
-                "Response contract:\nReturn exactly one JSON object and no markdown. Use {\"type\":\"final\",\"content\":\"...\"} when answering the user, {\"type\":\"tool\",\"toolId\":\"core.search.web\",\"input\":{\"query\":\"...\"},\"reason\":\"...\"} or another listed tool (including core.browser.navigate, core.browser.action, core.computer.use, core.workspace.write/read) when external, web, browser, computer, file, or page context is required, or {\"type\":\"pause\",\"reason\":\"...\"} when user input is required. For URLs or web browsing, prefer core.browser.navigate or core.web.page.read. Cite source IDs in final content when context sources matter. If you reason inside <think>...</think> tags, you must always output your final answer or JSON action after </think>."
+                "Response contract:\nReturn exactly one JSON object and no markdown. Use {\"type\":\"final\",\"content\":\"...\"} when answering the user, {\"type\":\"tool\",\"toolId\":\"core.search.web\",\"input\":{\"query\":\"...\"},\"reason\":\"...\"} or another listed tool (including core.browser.navigate, core.browser.action, core.computer.use, core.workspace.write/read) when external, web, browser, computer, file, or page context is required, or {\"type\":\"pause\",\"reason\":\"...\"} when user input is required. For URLs or web browsing, prefer core.browser.navigate or core.web.page.read. Browser loop: core.browser.tabs (open/list) → core.browser.snapshot (read elements[] refs) → core.browser.action with targetRef (click/type/press/scroll/wait/select). For core.browser.action inspect/extract/screenshot, always pass the page `url` in input. Cite source IDs in final content when context sources matter. If you reason inside <think>...</think> tags, you must always output your final answer or JSON action after </think>."
             }
         };
         ModelGenerationRequest {
@@ -543,6 +548,9 @@ impl Default for ToolRegistry {
             core_web_page_read_descriptor(),
             core_browser_navigate_descriptor(),
             core_browser_action_descriptor(),
+            core_browser_tabs_descriptor(),
+            core_browser_snapshot_descriptor(),
+            core_browser_autofill_descriptor(),
             // System & computer use tools
             core_computer_use_descriptor(),
             // Workspace tools
@@ -551,6 +559,11 @@ impl Default for ToolRegistry {
             workspace_list_descriptor(),
             workspace_grep_descriptor(),
             workspace_search_descriptor(),
+            workspace_delete_descriptor(),
+            workspace_replace_in_files_descriptor(),
+            workspace_git_diff_descriptor(),
+            // Artifact tools
+            artifact_create_descriptor(),
             // Shell & Code execution & Document creation
             shell_execute_descriptor(),
             core_code_execute_descriptor(),
@@ -647,6 +660,12 @@ impl PermissionPolicy {
     pub fn can_access_domain(&self, domain: &str) -> bool {
         if !self.profile.allow_network {
             return false;
+        }
+        // Allowlist vide = tous les domaines publics autorisés (cohérent
+        // avec WebAccessPolicy::domain_allowed). Seule une allowlist
+        // non vide restreint.
+        if self.profile.allowed_domains.is_empty() {
+            return true;
         }
         let domain = domain.trim_end_matches('.').to_ascii_lowercase();
         self.profile.allowed_domains.iter().any(|allowed| {
@@ -894,31 +913,32 @@ fn core_browser_navigate_descriptor() -> ToolDescriptor {
         schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
         id: TOOL_CORE_BROWSER_NAVIGATE.to_string(),
         version: "1.0.0".to_string(),
-        name: "Navigate in-app browser".to_string(),
-        description: "Navigate the integrated in-app browser to a URL, rendering the page and extracting content."
+        name: "Navigate real browser tab".to_string(),
+        description: "Navigate a real Chromium tab (CDP) to a URL with JS rendering. Opens a new tab unless tabId names an existing one. Returns the tabId plus a verified snapshot (screenshot, element refs, text)."
             .to_string(),
         category: ToolCategory::Web,
         input_schema: json!({
             "type": "object",
             "properties": {
                 "url": { "type": "string", "minLength": 1 },
-                "target": { "type": "string" }
+                "target": { "type": "string" },
+                "tabId": { "type": "string", "description": "Existing tab id; omit to open a new tab" }
             },
             "required": ["url"],
-            "additionalProperties": false
+            "additionalProperties": true
         }),
         output_schema: json!({
             "type": "object",
             "properties": {
+                "tabId": { "type": "string" },
                 "url": { "type": "string" },
                 "title": { "type": "string" },
-                "content": { "type": "string" },
-                "excerpt": { "type": "string" },
-                "status": { "type": "integer" },
-                "browserState": { "type": "string" }
+                "elements": { "type": "array" },
+                "textExcerpt": { "type": "string" },
+                "screenshotBase64": { "type": "string" }
             },
-            "required": ["url", "title", "content", "status"],
-            "additionalProperties": false
+            "required": ["tabId", "url", "title"],
+            "additionalProperties": true
         }),
         permissions: vec![ToolPermissionRequirement {
             action: "network.read".to_string(),
@@ -979,18 +999,19 @@ fn core_browser_action_descriptor() -> ToolDescriptor {
         id: TOOL_CORE_BROWSER_ACTION.to_string(),
         version: "1.0.0".to_string(),
         name: "Perform in-app browser action".to_string(),
-        description: "Perform an interaction in the integrated browser such as clicking a selector, typing text, or scrolling."
+        description: "Interact with a web page: inspect/extract/screenshot fetch the page text server-side (pass its `url`), click/type/scroll act on the integrated browser view."
             .to_string(),
         category: ToolCategory::Web,
         input_schema: json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["click", "type", "scroll", "inspect", "screenshot"] },
+                "action": { "type": "string", "enum": ["click", "type", "scroll", "inspect", "extract", "screenshot"] },
                 "selector": { "type": "string" },
-                "text": { "type": "string" }
+                "text": { "type": "string" },
+                "url": { "type": "string", "description": "Page URL (required for inspect/extract/screenshot: content is fetched server-side)" }
             },
             "required": ["action"],
-            "additionalProperties": false
+            "additionalProperties": true
         }),
         output_schema: json!({
             "type": "object",
@@ -1055,8 +1076,260 @@ fn core_browser_action_descriptor() -> ToolDescriptor {
     }
 }
 
-fn core_computer_use_descriptor() -> ToolDescriptor {
+fn core_browser_tabs_descriptor() -> ToolDescriptor {
     ToolDescriptor {
+        schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
+        id: TOOL_CORE_BROWSER_TABS.to_string(),
+        version: "1.0.0".to_string(),
+        name: "Manage browser tabs".to_string(),
+        description: "List, open, close, or focus real Chromium tabs. The agent can drive several tabs at once; each call returns tab ids."
+            .to_string(),
+        category: ToolCategory::Web,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "operation": { "type": "string", "enum": ["list", "open", "close", "focus"] },
+                "url": { "type": "string", "description": "URL for operation=open" },
+                "tabId": { "type": "string", "description": "Tab id for close/focus" }
+            },
+            "required": [],
+            "additionalProperties": true
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "tabs": { "type": "array" },
+                "tabId": { "type": "string" },
+                "url": { "type": "string" },
+                "title": { "type": "string" },
+                "closed": { "type": "boolean" }
+            },
+            "required": [],
+            "additionalProperties": true
+        }),
+        permissions: vec![ToolPermissionRequirement {
+            action: "network.read".to_string(),
+            resource: "browser:tabs".to_string(),
+        }],
+        risk: ToolRisk {
+            level: ToolRiskLevel::Low,
+            effects: vec![ToolPermissionEffect::ExternalRead],
+            confirmation: ToolConfirmationPolicy::Never,
+        },
+        capabilities: vec!["browser.tabs".to_string(), "browser.multitab".to_string()],
+        execution: ToolExecutionSpec {
+            kind: ToolExecutionKind::Backend,
+            handler: "browser.tabs.v1".to_string(),
+            environment: ToolExecutionEnvironment::Browser,
+            streaming: false,
+            idempotency: ToolIdempotency::Recommended,
+            side_effects: ToolSideEffects::ReadOnly,
+        },
+        timeout_ms: 15_000,
+        retry: ToolRetryPolicy {
+            max_attempts: 1,
+            strategy: ToolRetryStrategy::None,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        },
+        limits: ToolUsageLimits {
+            max_concurrency: 5,
+            rate_per_minute: 60,
+            max_input_bytes: 8 * 1_024,
+            max_output_bytes: 512 * 1_024,
+        },
+        dependencies: Vec::new(),
+        observability: ToolObservability {
+            record_input: ToolDataCaptureMode::MetadataOnly,
+            record_output: ToolDataCaptureMode::ReferenceOnly,
+            metrics_namespace: "aro_tool_browser_tabs".to_string(),
+            cost_unit: Some("action".to_string()),
+        },
+        status: ToolStatus::Active,
+        provenance: ToolProvenance {
+            kind: ToolProvenanceKind::Core,
+            package: "aro-tools".to_string(),
+            signature: None,
+        },
+        owner: ToolOwner {
+            kind: ToolOwnerKind::Team,
+            id: "platform-browser".to_string(),
+        },
+        aliases: vec![TOOL_BROWSER_TABS.to_string(), "browser_tabs".to_string()],
+        tags: vec!["browser".to_string(), "tabs".to_string()],
+    }
+}
+
+fn core_browser_snapshot_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
+        id: TOOL_CORE_BROWSER_SNAPSHOT.to_string(),
+        version: "1.0.0".to_string(),
+        name: "Observe browser tab".to_string(),
+        description: "Capture a verified snapshot of a live tab: screenshot, referenced interactive elements (use their ref ids with browser.action), and readable text. Pass tabId, or url to open-and-observe."
+            .to_string(),
+        category: ToolCategory::Web,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "tabId": { "type": "string", "description": "Tab id from tabs/navigate output" },
+                "url": { "type": "string", "description": "Open this URL in a new tab, then snapshot" }
+            },
+            "required": [],
+            "additionalProperties": true
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "tabId": { "type": "string" },
+                "url": { "type": "string" },
+                "title": { "type": "string" },
+                "elements": { "type": "array" },
+                "textExcerpt": { "type": "string" },
+                "screenshotBase64": { "type": "string" }
+            },
+            "required": ["tabId", "url", "title", "elements"],
+            "additionalProperties": true
+        }),
+        permissions: vec![ToolPermissionRequirement {
+            action: "network.read".to_string(),
+            resource: "browser:active".to_string(),
+        }],
+        risk: ToolRisk {
+            level: ToolRiskLevel::Low,
+            effects: vec![ToolPermissionEffect::ExternalRead],
+            confirmation: ToolConfirmationPolicy::Never,
+        },
+        capabilities: vec!["browser.snapshot".to_string(), "browser.observe".to_string()],
+        execution: ToolExecutionSpec {
+            kind: ToolExecutionKind::Backend,
+            handler: "browser.snapshot.v1".to_string(),
+            environment: ToolExecutionEnvironment::Browser,
+            streaming: false,
+            idempotency: ToolIdempotency::Recommended,
+            side_effects: ToolSideEffects::ReadOnly,
+        },
+        timeout_ms: 20_000,
+        retry: ToolRetryPolicy {
+            max_attempts: 1,
+            strategy: ToolRetryStrategy::None,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        },
+        limits: ToolUsageLimits {
+            max_concurrency: 5,
+            rate_per_minute: 60,
+            max_input_bytes: 8 * 1_024,
+            max_output_bytes: 2 * 1_024 * 1_024,
+        },
+        dependencies: Vec::new(),
+        observability: ToolObservability {
+            record_input: ToolDataCaptureMode::MetadataOnly,
+            record_output: ToolDataCaptureMode::ReferenceOnly,
+            metrics_namespace: "aro_tool_browser_snapshot".to_string(),
+            cost_unit: Some("observation".to_string()),
+        },
+        status: ToolStatus::Active,
+        provenance: ToolProvenance {
+            kind: ToolProvenanceKind::Core,
+            package: "aro-tools".to_string(),
+            signature: None,
+        },
+        owner: ToolOwner {
+            kind: ToolOwnerKind::Team,
+            id: "platform-browser".to_string(),
+        },
+        aliases: vec![TOOL_BROWSER_SNAPSHOT.to_string(), "browser_snapshot".to_string()],
+        tags: vec!["browser".to_string(), "observation".to_string()],
+    }
+}
+
+fn core_browser_autofill_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
+        id: TOOL_CORE_BROWSER_AUTOFILL.to_string(),
+        version: "1.0.0".to_string(),
+        name: "Autofill login from vault".to_string(),
+        description: "Fill a login form with credentials from the OS-keyring vault (never type passwords as text). Pass tabId plus usernameRef/passwordRef from a snapshot and the vault account (domain). Credential values are never exposed to the model or logs."
+            .to_string(),
+        category: ToolCategory::Web,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "tabId": { "type": "string" },
+                "usernameRef": { "type": "string" },
+                "passwordRef": { "type": "string" },
+                "account": { "type": "string", "description": "Vault account, usually the login domain" }
+            },
+            "required": ["tabId", "usernameRef", "passwordRef", "account"],
+            "additionalProperties": true
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "tabId": { "type": "string" },
+                "url": { "type": "string" },
+                "success": { "type": "boolean" },
+                "filledRefs": { "type": "array" },
+                "account": { "type": "string" }
+            },
+            "required": ["tabId", "success"],
+            "additionalProperties": true
+        }),
+        permissions: vec![ToolPermissionRequirement {
+            action: "browser.autofill".to_string(),
+            resource: "vault:${input.account}".to_string(),
+        }],
+        risk: ToolRisk {
+            level: ToolRiskLevel::High,
+            effects: vec![ToolPermissionEffect::SensitiveData],
+            confirmation: ToolConfirmationPolicy::Always,
+        },
+        capabilities: vec!["browser.autofill".to_string(), "vault.use".to_string()],
+        execution: ToolExecutionSpec {
+            kind: ToolExecutionKind::Backend,
+            handler: "browser.autofill.v1".to_string(),
+            environment: ToolExecutionEnvironment::Browser,
+            streaming: false,
+            idempotency: ToolIdempotency::Unsupported,
+            side_effects: ToolSideEffects::Reversible,
+        },
+        timeout_ms: 20_000,
+        retry: ToolRetryPolicy {
+            max_attempts: 1,
+            strategy: ToolRetryStrategy::None,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        },
+        limits: ToolUsageLimits {
+            max_concurrency: 2,
+            rate_per_minute: 20,
+            max_input_bytes: 8 * 1_024,
+            max_output_bytes: 64 * 1_024,
+        },
+        dependencies: Vec::new(),
+        observability: ToolObservability {
+            record_input: ToolDataCaptureMode::MetadataOnly,
+            record_output: ToolDataCaptureMode::ReferenceOnly,
+            metrics_namespace: "aro_tool_browser_autofill".to_string(),
+            cost_unit: Some("autofill".to_string()),
+        },
+        status: ToolStatus::Active,
+        provenance: ToolProvenance {
+            kind: ToolProvenanceKind::Core,
+            package: "aro-tools".to_string(),
+            signature: None,
+        },
+        owner: ToolOwner {
+            kind: ToolOwnerKind::Team,
+            id: "platform-browser".to_string(),
+        },
+        aliases: vec![TOOL_BROWSER_AUTOFILL.to_string(), "browser_autofill".to_string()],
+        tags: vec!["browser".to_string(), "vault".to_string()],
+    }
+}
+
+fn core_computer_use_descriptor() -> ToolDescriptor {    ToolDescriptor {
         schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
         id: TOOL_CORE_COMPUTER_USE.to_string(),
         version: "1.0.0".to_string(),
@@ -2105,6 +2378,344 @@ fn workspace_search_descriptor() -> ToolDescriptor {
     }
 }
 
+fn workspace_delete_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
+        id: TOOL_CORE_WORKSPACE_DELETE.to_string(),
+        version: "1.0.0".to_string(),
+        name: "Delete file or directory".to_string(),
+        description: "Delete a file or directory within the active project workspace.".to_string(),
+        category: ToolCategory::Files,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "minLength": 1 }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "status": { "type": "string" }
+            },
+            "required": ["path", "status"],
+            "additionalProperties": false
+        }),
+        permissions: vec![ToolPermissionRequirement {
+            action: "file.write".to_string(),
+            resource: "workspace:".to_string(),
+        }],
+        risk: ToolRisk {
+            level: ToolRiskLevel::High,
+            effects: vec![ToolPermissionEffect::Delete],
+            confirmation: ToolConfirmationPolicy::Always,
+        },
+        capabilities: vec!["workspace.delete".to_string()],
+        execution: ToolExecutionSpec {
+            kind: ToolExecutionKind::Backend,
+            handler: "workspace.delete.v1".to_string(),
+            environment: ToolExecutionEnvironment::CloudWorker,
+            streaming: false,
+            idempotency: ToolIdempotency::Recommended,
+            side_effects: ToolSideEffects::Irreversible,
+        },
+        timeout_ms: 10_000,
+        retry: ToolRetryPolicy {
+            max_attempts: 1,
+            strategy: ToolRetryStrategy::None,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        },
+        limits: ToolUsageLimits {
+            max_concurrency: 5,
+            rate_per_minute: 60,
+            max_input_bytes: 1024 * 1024,
+            max_output_bytes: 1024 * 1024,
+        },
+        dependencies: vec![],
+        observability: ToolObservability {
+            record_input: ToolDataCaptureMode::None,
+            record_output: ToolDataCaptureMode::None,
+            metrics_namespace: "aro_tool_workspace_delete".to_string(),
+            cost_unit: None,
+        },
+        status: ToolStatus::Active,
+        provenance: ToolProvenance {
+            kind: ToolProvenanceKind::Core,
+            package: "aro-tools".to_string(),
+            signature: None,
+        },
+        owner: ToolOwner {
+            kind: ToolOwnerKind::Team,
+            id: "platform-agent".to_string(),
+        },
+        aliases: vec![
+            TOOL_WORKSPACE_DELETE.to_string(),
+            "fs.delete".to_string(),
+            "fs.remove".to_string(),
+        ],
+        tags: vec![
+            "workspace".to_string(),
+            "file".to_string(),
+            "delete".to_string(),
+        ],
+    }
+}
+
+fn workspace_replace_in_files_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
+        id: TOOL_CORE_WORKSPACE_REPLACE_IN_FILES.to_string(),
+        version: "1.0.0".to_string(),
+        name: "Replace text across files".to_string(),
+        description: "Find and replace occurrences of a pattern across files in the workspace."
+            .to_string(),
+        category: ToolCategory::Files,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "target": { "type": "string", "minLength": 1 },
+                "replacement": { "type": "string" },
+                "path": { "type": "string" }
+            },
+            "required": ["target", "replacement"],
+            "additionalProperties": false
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "modifiedFiles": { "type": "array", "items": { "type": "string" } },
+                "count": { "type": "integer" }
+            },
+            "required": ["modifiedFiles", "count"],
+            "additionalProperties": false
+        }),
+        permissions: vec![ToolPermissionRequirement {
+            action: "file.write".to_string(),
+            resource: "workspace:".to_string(),
+        }],
+        risk: ToolRisk {
+            level: ToolRiskLevel::Medium,
+            effects: vec![ToolPermissionEffect::ReversibleWrite],
+            confirmation: ToolConfirmationPolicy::Never,
+        },
+        capabilities: vec!["workspace.replace".to_string()],
+        execution: ToolExecutionSpec {
+            kind: ToolExecutionKind::Backend,
+            handler: "workspace.replace_in_files.v1".to_string(),
+            environment: ToolExecutionEnvironment::CloudWorker,
+            streaming: false,
+            idempotency: ToolIdempotency::Recommended,
+            side_effects: ToolSideEffects::Reversible,
+        },
+        timeout_ms: 15_000,
+        retry: ToolRetryPolicy {
+            max_attempts: 1,
+            strategy: ToolRetryStrategy::None,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        },
+        limits: ToolUsageLimits {
+            max_concurrency: 5,
+            rate_per_minute: 60,
+            max_input_bytes: 5 * 1024 * 1024,
+            max_output_bytes: 5 * 1024 * 1024,
+        },
+        dependencies: vec![],
+        observability: ToolObservability {
+            record_input: ToolDataCaptureMode::None,
+            record_output: ToolDataCaptureMode::None,
+            metrics_namespace: "aro_tool_workspace_replace_in_files".to_string(),
+            cost_unit: None,
+        },
+        status: ToolStatus::Active,
+        provenance: ToolProvenance {
+            kind: ToolProvenanceKind::Core,
+            package: "aro-tools".to_string(),
+            signature: None,
+        },
+        owner: ToolOwner {
+            kind: ToolOwnerKind::Team,
+            id: "platform-agent".to_string(),
+        },
+        aliases: vec![
+            TOOL_WORKSPACE_REPLACE_IN_FILES.to_string(),
+            "fs.replace_in_files".to_string(),
+        ],
+        tags: vec![
+            "workspace".to_string(),
+            "file".to_string(),
+            "replace".to_string(),
+        ],
+    }
+}
+
+fn workspace_git_diff_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
+        id: TOOL_CORE_WORKSPACE_GIT_DIFF.to_string(),
+        version: "1.0.0".to_string(),
+        name: "Git diff".to_string(),
+        description: "Compute git diff patch between current workspace state and repository HEAD, optionally filtered by path.".to_string(),
+        category: ToolCategory::Files,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" }
+            },
+            "additionalProperties": false
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "diff": { "type": "string" },
+                "stderr": { "type": "string" },
+                "exitCode": { "type": ["integer", "null"] }
+            },
+            "required": ["diff", "stderr"],
+            "additionalProperties": false
+        }),
+        permissions: vec![ToolPermissionRequirement {
+            action: "file.read".to_string(),
+            resource: "workspace:".to_string(),
+        }],
+        risk: ToolRisk {
+            level: ToolRiskLevel::Low,
+            effects: vec![ToolPermissionEffect::Read],
+            confirmation: ToolConfirmationPolicy::Never,
+        },
+        capabilities: vec!["workspace.git_diff".to_string()],
+        execution: ToolExecutionSpec {
+            kind: ToolExecutionKind::Backend,
+            handler: "workspace.git_diff.v1".to_string(),
+            environment: ToolExecutionEnvironment::CloudWorker,
+            streaming: false,
+            idempotency: ToolIdempotency::Recommended,
+            side_effects: ToolSideEffects::ReadOnly,
+        },
+        timeout_ms: 15_000,
+        retry: ToolRetryPolicy {
+            max_attempts: 2,
+            strategy: ToolRetryStrategy::ExponentialJitter,
+            base_delay_ms: 100,
+            max_delay_ms: 1000,
+        },
+        limits: ToolUsageLimits {
+            max_concurrency: 5,
+            rate_per_minute: 60,
+            max_input_bytes: 1024 * 1024,
+            max_output_bytes: 5 * 1024 * 1024,
+        },
+        dependencies: vec![],
+        observability: ToolObservability {
+            record_input: ToolDataCaptureMode::None,
+            record_output: ToolDataCaptureMode::None,
+            metrics_namespace: "aro_tool_workspace_git_diff".to_string(),
+            cost_unit: None,
+        },
+        status: ToolStatus::Active,
+        provenance: ToolProvenance {
+            kind: ToolProvenanceKind::Core,
+            package: "aro-tools".to_string(),
+            signature: None,
+        },
+        owner: ToolOwner {
+            kind: ToolOwnerKind::Team,
+            id: "platform-agent".to_string(),
+        },
+        aliases: vec![
+            TOOL_WORKSPACE_GIT_DIFF.to_string(),
+            "git.diff".to_string(),
+        ],
+        tags: vec!["workspace".to_string(), "git".to_string(), "diff".to_string()],
+    }
+}
+
+fn artifact_create_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        schema_version: TOOL_DESCRIPTOR_SCHEMA_VERSION,
+        id: TOOL_CORE_ARTIFACT_CREATE.to_string(),
+        version: "1.0.0".to_string(),
+        name: "Create artifact".to_string(),
+        description: "Create an output artifact reference (markdown document, code snippet, report, or data file) associated with the run.".to_string(),
+        category: ToolCategory::Files,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "minLength": 1 },
+                "content": { "type": "string" },
+                "kind": { "type": "string" },
+                "id": { "type": "string" }
+            },
+            "required": ["title"],
+            "additionalProperties": false
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "artifactId": { "type": "string" },
+                "title": { "type": "string" }
+            },
+            "required": ["artifactId", "title"],
+            "additionalProperties": false
+        }),
+        permissions: vec![ToolPermissionRequirement {
+            action: "artifact.create".to_string(),
+            resource: "run:".to_string(),
+        }],
+        risk: ToolRisk {
+            level: ToolRiskLevel::Low,
+            effects: vec![ToolPermissionEffect::ReversibleWrite],
+            confirmation: ToolConfirmationPolicy::Never,
+        },
+        capabilities: vec!["artifact.create".to_string()],
+        execution: ToolExecutionSpec {
+            kind: ToolExecutionKind::Backend,
+            handler: "artifact.create.v1".to_string(),
+            environment: ToolExecutionEnvironment::CloudWorker,
+            streaming: false,
+            idempotency: ToolIdempotency::Recommended,
+            side_effects: ToolSideEffects::Reversible,
+        },
+        timeout_ms: 10_000,
+        retry: ToolRetryPolicy {
+            max_attempts: 1,
+            strategy: ToolRetryStrategy::None,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        },
+        limits: ToolUsageLimits {
+            max_concurrency: 5,
+            rate_per_minute: 60,
+            max_input_bytes: 10 * 1024 * 1024,
+            max_output_bytes: 10 * 1024 * 1024,
+        },
+        dependencies: vec![],
+        observability: ToolObservability {
+            record_input: ToolDataCaptureMode::None,
+            record_output: ToolDataCaptureMode::None,
+            metrics_namespace: "aro_tool_artifact_create".to_string(),
+            cost_unit: None,
+        },
+        status: ToolStatus::Active,
+        provenance: ToolProvenance {
+            kind: ToolProvenanceKind::Core,
+            package: "aro-tools".to_string(),
+            signature: None,
+        },
+        owner: ToolOwner {
+            kind: ToolOwnerKind::Team,
+            id: "platform-agent".to_string(),
+        },
+        aliases: vec![
+            TOOL_ARTIFACT_CREATE.to_string(),
+        ],
+        tags: vec!["artifact".to_string(), "output".to_string()],
+    }
+}
+
 // ─────────────────────────────────────────────────────────────
 // Memory tools — read/write long-term agent memory
 // ─────────────────────────────────────────────────────────────
@@ -2274,7 +2885,9 @@ fn memory_update_descriptor() -> ToolDescriptor {
         id: TOOL_CORE_MEMORY_UPDATE.to_string(),
         version: "1.0.0".to_string(),
         name: "Update memory".to_string(),
-        description: "Update an existing long-term memory's content, salience, pinned status, or category.".to_string(),
+        description:
+            "Update an existing long-term memory's content, salience, pinned status, or category."
+                .to_string(),
         category: ToolCategory::Memory,
         input_schema: json!({
             "type": "object",
@@ -2299,7 +2912,11 @@ fn memory_update_descriptor() -> ToolDescriptor {
             "additionalProperties": false
         }),
         permissions: vec![],
-        risk: ToolRisk { level: ToolRiskLevel::Low, effects: vec![], confirmation: ToolConfirmationPolicy::Never },
+        risk: ToolRisk {
+            level: ToolRiskLevel::Low,
+            effects: vec![],
+            confirmation: ToolConfirmationPolicy::Never,
+        },
         capabilities: vec!["memory.write".to_string()],
         execution: ToolExecutionSpec {
             kind: ToolExecutionKind::Backend,
@@ -2310,13 +2927,35 @@ fn memory_update_descriptor() -> ToolDescriptor {
             side_effects: ToolSideEffects::Reversible,
         },
         timeout_ms: 5_000,
-        retry: ToolRetryPolicy { max_attempts: 2, strategy: ToolRetryStrategy::ExponentialJitter, base_delay_ms: 100, max_delay_ms: 1000 },
-        limits: ToolUsageLimits { max_concurrency: 5, rate_per_minute: 60, max_input_bytes: 64 * 1024, max_output_bytes: 64 * 1024 },
+        retry: ToolRetryPolicy {
+            max_attempts: 2,
+            strategy: ToolRetryStrategy::ExponentialJitter,
+            base_delay_ms: 100,
+            max_delay_ms: 1000,
+        },
+        limits: ToolUsageLimits {
+            max_concurrency: 5,
+            rate_per_minute: 60,
+            max_input_bytes: 64 * 1024,
+            max_output_bytes: 64 * 1024,
+        },
         dependencies: vec![],
-        observability: ToolObservability { record_input: ToolDataCaptureMode::None, record_output: ToolDataCaptureMode::None, metrics_namespace: "aro_tool_memory_update".to_string(), cost_unit: None },
+        observability: ToolObservability {
+            record_input: ToolDataCaptureMode::None,
+            record_output: ToolDataCaptureMode::None,
+            metrics_namespace: "aro_tool_memory_update".to_string(),
+            cost_unit: None,
+        },
         status: ToolStatus::Active,
-        provenance: ToolProvenance { kind: ToolProvenanceKind::Core, package: "aro-runtime".to_string(), signature: None },
-        owner: ToolOwner { kind: ToolOwnerKind::Team, id: "platform-agent".to_string() },
+        provenance: ToolProvenance {
+            kind: ToolProvenanceKind::Core,
+            package: "aro-runtime".to_string(),
+            signature: None,
+        },
+        owner: ToolOwner {
+            kind: ToolOwnerKind::Team,
+            id: "platform-agent".to_string(),
+        },
         aliases: vec![TOOL_MEMORY_UPDATE.to_string(), "memory.update".to_string()],
         tags: vec!["memory".to_string(), "update".to_string()],
     }
@@ -2328,7 +2967,8 @@ fn memory_forget_descriptor() -> ToolDescriptor {
         id: TOOL_CORE_MEMORY_FORGET.to_string(),
         version: "1.0.0".to_string(),
         name: "Forget memory".to_string(),
-        description: "Archive / forget a specific long-term memory so it is no longer recalled.".to_string(),
+        description: "Archive / forget a specific long-term memory so it is no longer recalled."
+            .to_string(),
         category: ToolCategory::Memory,
         input_schema: json!({
             "type": "object",
@@ -2350,7 +2990,11 @@ fn memory_forget_descriptor() -> ToolDescriptor {
             "additionalProperties": false
         }),
         permissions: vec![],
-        risk: ToolRisk { level: ToolRiskLevel::Medium, effects: vec![], confirmation: ToolConfirmationPolicy::Policy },
+        risk: ToolRisk {
+            level: ToolRiskLevel::Medium,
+            effects: vec![],
+            confirmation: ToolConfirmationPolicy::Policy,
+        },
         capabilities: vec!["memory.write".to_string()],
         execution: ToolExecutionSpec {
             kind: ToolExecutionKind::Backend,
@@ -2361,13 +3005,35 @@ fn memory_forget_descriptor() -> ToolDescriptor {
             side_effects: ToolSideEffects::Reversible,
         },
         timeout_ms: 5_000,
-        retry: ToolRetryPolicy { max_attempts: 1, strategy: ToolRetryStrategy::None, base_delay_ms: 0, max_delay_ms: 0 },
-        limits: ToolUsageLimits { max_concurrency: 5, rate_per_minute: 30, max_input_bytes: 2 * 1024, max_output_bytes: 2 * 1024 },
+        retry: ToolRetryPolicy {
+            max_attempts: 1,
+            strategy: ToolRetryStrategy::None,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        },
+        limits: ToolUsageLimits {
+            max_concurrency: 5,
+            rate_per_minute: 30,
+            max_input_bytes: 2 * 1024,
+            max_output_bytes: 2 * 1024,
+        },
         dependencies: vec![],
-        observability: ToolObservability { record_input: ToolDataCaptureMode::None, record_output: ToolDataCaptureMode::None, metrics_namespace: "aro_tool_memory_forget".to_string(), cost_unit: None },
+        observability: ToolObservability {
+            record_input: ToolDataCaptureMode::None,
+            record_output: ToolDataCaptureMode::None,
+            metrics_namespace: "aro_tool_memory_forget".to_string(),
+            cost_unit: None,
+        },
         status: ToolStatus::Active,
-        provenance: ToolProvenance { kind: ToolProvenanceKind::Core, package: "aro-runtime".to_string(), signature: None },
-        owner: ToolOwner { kind: ToolOwnerKind::Team, id: "platform-agent".to_string() },
+        provenance: ToolProvenance {
+            kind: ToolProvenanceKind::Core,
+            package: "aro-runtime".to_string(),
+            signature: None,
+        },
+        owner: ToolOwner {
+            kind: ToolOwnerKind::Team,
+            id: "platform-agent".to_string(),
+        },
         aliases: vec![TOOL_MEMORY_FORGET.to_string(), "memory.forget".to_string()],
         tags: vec!["memory".to_string(), "forget".to_string()],
     }
@@ -3165,9 +3831,7 @@ fn notification_schedule_descriptor() -> ToolDescriptor {
     }
 }
 
-
 pub(crate) fn compact_excerpt(content: &str, max_chars: usize) -> String {
-
     let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.chars().count() <= max_chars {
         normalized
@@ -3372,9 +4036,15 @@ fn parse_agent_action(output: &str) -> Option<AgentAction> {
                         .map(|c| c.as_str().unwrap_or_default().trim().is_empty())
                         .unwrap_or(true);
                     if still_empty {
-                        if let Some(reason) = obj.get("reason").and_then(|r| r.as_str()).filter(|r| !r.trim().is_empty()) {
+                        if let Some(reason) = obj
+                            .get("reason")
+                            .and_then(|r| r.as_str())
+                            .filter(|r| !r.trim().is_empty())
+                        {
                             obj.insert("content".to_string(), json!(reason));
-                        } else if let Some(thought) = thinking.as_deref().filter(|t| !t.trim().is_empty()) {
+                        } else if let Some(thought) =
+                            thinking.as_deref().filter(|t| !t.trim().is_empty())
+                        {
                             let fallback = fallback_content_from_thought(thought);
                             obj.insert("content".to_string(), json!(fallback));
                         } else {
@@ -3595,7 +4265,10 @@ mod tests {
         let action = runtime.parse_model_action(raw);
 
         assert_eq!(action.action_type, AgentActionType::Final);
-        assert_eq!(action.content.as_deref(), Some("C'est une excellente question !"));
+        assert_eq!(
+            action.content.as_deref(),
+            Some("C'est une excellente question !")
+        );
     }
 
     #[test]
@@ -3605,7 +4278,10 @@ mod tests {
         let action = runtime.parse_model_action(raw);
 
         assert_eq!(action.action_type, AgentActionType::Final);
-        assert_eq!(action.content.as_deref(), Some("Je peux vous proposer une alternative."));
+        assert_eq!(
+            action.content.as_deref(),
+            Some("Je peux vous proposer une alternative.")
+        );
         assert!(action.thinking.is_some());
         let thinking = action.thinking.as_deref().unwrap();
         assert!(thinking.contains("Initial reasoning."));
@@ -3740,11 +4416,27 @@ mod tests {
     #[test]
     fn built_in_registry_exposes_only_valid_executable_descriptors() {
         let registry = ToolRegistry::default();
-        assert_eq!(registry.descriptors().len(), 36);
+        assert_eq!(registry.descriptors().len(), 43);
         assert!(registry
             .descriptors()
             .iter()
             .all(|descriptor| descriptor.validate().is_ok()));
+        assert!(registry
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == TOOL_CORE_WORKSPACE_DELETE));
+        assert!(registry
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == TOOL_CORE_WORKSPACE_REPLACE_IN_FILES));
+        assert!(registry
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == TOOL_CORE_WORKSPACE_GIT_DIFF));
+        assert!(registry
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == TOOL_CORE_ARTIFACT_CREATE));
         assert!(registry
             .descriptors()
             .iter()

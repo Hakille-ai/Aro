@@ -169,14 +169,20 @@ pub fn resolve_model_profile(model_id: &str, provider: &ModelProviderKind) -> Mo
         ModelProviderKind::OpenAi => 128_000,
         ModelProviderKind::Mistral => 32_768,
         ModelProviderKind::OpenAiCompatible => {
-            if id_lower.contains("deepseek") || id_lower.contains("qwen") || id_lower.contains("kimi") {
+            if id_lower.contains("deepseek")
+                || id_lower.contains("qwen")
+                || id_lower.contains("kimi")
+            {
                 65_536
             } else {
                 32_768
             }
         }
         ModelProviderKind::Ollama | ModelProviderKind::LlamaCpp => {
-            if id_lower.contains("qwen") || id_lower.contains("deepseek") || id_lower.contains("llama-3") {
+            if id_lower.contains("qwen")
+                || id_lower.contains("deepseek")
+                || id_lower.contains("llama-3")
+            {
                 32_768
             } else if id_lower.contains("gemma") || id_lower.contains("phi") {
                 8_192
@@ -191,7 +197,9 @@ pub fn resolve_model_profile(model_id: &str, provider: &ModelProviderKind) -> Mo
         8_192
     } else {
         match provider {
-            ModelProviderKind::Google | ModelProviderKind::Anthropic | ModelProviderKind::OpenAi => 8_192,
+            ModelProviderKind::Google
+            | ModelProviderKind::Anthropic
+            | ModelProviderKind::OpenAi => 8_192,
             ModelProviderKind::OpenAiCompatible => 8_192,
             ModelProviderKind::Ollama | ModelProviderKind::LlamaCpp => {
                 if id_lower.contains("mini") || id_lower.contains("1b") {
@@ -769,7 +777,10 @@ impl MemoryConfigurationSettings {
         }
 
         let profile = resolve_model_profile(model_id, provider);
-        let ceiling = self.total_token_ceiling.max(profile.context_window).max(8192);
+        let ceiling = self
+            .total_token_ceiling
+            .max(profile.context_window)
+            .max(8192);
 
         // Reserve budget dynamically scales to guarantee ample headspace for model output + reasoning
         let reserve = (profile.max_output_tokens as usize)
@@ -826,7 +837,6 @@ impl Default for AppSettings {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -958,5 +968,3 @@ mod tests {
         assert_eq!(settings.notification.email_provider, "smtp");
     }
 }
-
-

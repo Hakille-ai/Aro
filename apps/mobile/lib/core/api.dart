@@ -179,9 +179,10 @@ class AroApi {
           throw const ApiException(401, 'Session fermée.');
         }
         await saveSession(value);
-      } on ApiException catch (e) {
-        if ((e.status == 401 || e.status == 403) &&
-            generation == _sessionGeneration) {
+      } catch (_) {
+        // A network failure is ambiguous: the server may have rotated the
+        // predecessor already. Never retry that credential on the next 401.
+        if (generation == _sessionGeneration) {
           await clearSession();
         }
         rethrow;

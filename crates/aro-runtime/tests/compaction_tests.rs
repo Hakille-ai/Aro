@@ -10,24 +10,27 @@
 //! - Multi-interval compaction across 30+ turns
 
 use aro_core::{
-    ChatMessage, Conversation, EpisodeSummary, LongTermMemory, MessageRole, AssistantMode,
+    AssistantMode, ChatMessage, Conversation, EpisodeSummary, LongTermMemory, MessageRole,
 };
 use aro_memory::SqliteMemoryStore;
 use aro_runtime::context_manager::{
     extract_configs_and_keys, extract_decisions, extract_ports, extract_urls_and_uris,
-    extract_user_rules, CompactionState, ContinuousCompactor, ContextWindowManager,
+    extract_user_rules, CompactionState, ContextWindowManager, ContinuousCompactor,
 };
 use uuid::Uuid;
 
 fn create_temp_store() -> (SqliteMemoryStore, std::path::PathBuf) {
-    let db_path = std::env::temp_dir().join(format!("aro-compaction-test-{}.sqlite", Uuid::new_v4()));
+    let db_path =
+        std::env::temp_dir().join(format!("aro-compaction-test-{}.sqlite", Uuid::new_v4()));
     let store = SqliteMemoryStore::new(&db_path).expect("failed to create sqlite memory store");
     (store, db_path)
 }
 
 fn create_conversation(store: &SqliteMemoryStore, conv_id: Uuid) {
     let conv = Conversation::with_id(conv_id, "Test Conversation", AssistantMode::Chat);
-    store.upsert_conversation(&conv).expect("must create conversation");
+    store
+        .upsert_conversation(&conv)
+        .expect("must create conversation");
 }
 
 fn cleanup_temp_store(path: std::path::PathBuf) {
@@ -39,7 +42,10 @@ fn test_lossless_extraction_ports_and_endpoints() {
     let input = "The backend runs on port 8080. Connect to localhost:3000, 127.0.0.1:5432, 0.0.0.0:8000, and internal-service.internal:9090. Ignore invalid port 99999.";
     let ports = extract_ports(input);
 
-    assert!(ports.contains(&"Port: 8080".to_string()), "Must extract Port: 8080");
+    assert!(
+        ports.contains(&"Port: 8080".to_string()),
+        "Must extract Port: 8080"
+    );
     assert!(
         ports.contains(&"Endpoint: localhost:3000".to_string()),
         "Must extract Endpoint: localhost:3000"
@@ -72,11 +78,13 @@ fn test_lossless_extraction_urls_and_uris() {
         "Must extract https URL"
     );
     assert!(
-        urls.iter().any(|u| u.contains("ws://live.aro.internal:4000")),
+        urls.iter()
+            .any(|u| u.contains("ws://live.aro.internal:4000")),
         "Must extract ws URI"
     );
     assert!(
-        urls.iter().any(|u| u.contains("postgres://user:secret@localhost:5432/arodb")),
+        urls.iter()
+            .any(|u| u.contains("postgres://user:secret@localhost:5432/arodb")),
         "Must extract postgres URI"
     );
     assert!(
@@ -119,7 +127,9 @@ fn test_lossless_extraction_architectural_decisions() {
         "Must capture SQLite WAL decision"
     );
     assert!(
-        decisions.iter().any(|d| d.contains("Reciprocal Rank Fusion")),
+        decisions
+            .iter()
+            .any(|d| d.contains("Reciprocal Rank Fusion")),
         "Must capture RRF architecture decision"
     );
 }
@@ -180,7 +190,10 @@ fn test_compaction_turn_interval_trigger_at_10_turns() {
     let compactor = ContinuousCompactor::new(store.clone());
     let compaction_opt = compactor.consolidate_if_needed(conv_id).unwrap();
 
-    assert!(compaction_opt.is_some(), "Compaction must trigger after 10 turns");
+    assert!(
+        compaction_opt.is_some(),
+        "Compaction must trigger after 10 turns"
+    );
     let result = compaction_opt.unwrap();
     assert_eq!(result.turns_compacted, 10);
     assert_eq!(result.episode.turn_start, 1);
@@ -193,15 +206,24 @@ fn test_compaction_turn_interval_trigger_at_10_turns() {
     let ep = latest_ep.unwrap();
     assert_eq!(ep.turn_start, 1);
     assert_eq!(ep.turn_end, 10);
-    assert!(!ep.entities.is_empty(), "Episode must contain extracted entities");
+    assert!(
+        !ep.entities.is_empty(),
+        "Episode must contain extracted entities"
+    );
 
     // Check extracted high-salience memories persisted in memories table
     let memories = store.list_memories().unwrap();
-    assert!(!memories.is_empty(), "Proposed memories must be stored in memories table");
+    assert!(
+        !memories.is_empty(),
+        "Proposed memories must be stored in memories table"
+    );
 
     // Second evaluation with no new turns should skip
     let second_eval = compactor.consolidate_if_needed(conv_id).unwrap();
-    assert!(second_eval.is_none(), "Must skip when no uncompacted turns remain");
+    assert!(
+        second_eval.is_none(),
+        "Must skip when no uncompacted turns remain"
+    );
 
     cleanup_temp_store(db_path);
 }
@@ -232,7 +254,10 @@ fn test_compaction_token_threshold_trigger() {
     let compactor = ContinuousCompactor::new(store.clone());
     let compaction_opt = compactor.consolidate_if_needed(conv_id).unwrap();
 
-    assert!(compaction_opt.is_some(), "Must trigger compaction when uncompacted tokens >= 2400");
+    assert!(
+        compaction_opt.is_some(),
+        "Must trigger compaction when uncompacted tokens >= 2400"
+    );
     let result = compaction_opt.unwrap();
     assert_eq!(result.turns_compacted, 3);
     assert_eq!(result.episode.turn_start, 1);
@@ -250,7 +275,10 @@ fn test_context_window_manager_8192_strict_ceiling() {
     let mut semantic_candidates = Vec::new();
     for i in 1..=20 {
         let mut mem = LongTermMemory::new(
-            format!("Semantic rule {}: Always validate data before writing to database.", i),
+            format!(
+                "Semantic rule {}: Always validate data before writing to database.",
+                i
+            ),
             Some(conv_id),
         );
         mem.pinned = i <= 3; // First 3 pinned
@@ -266,7 +294,11 @@ fn test_context_window_manager_8192_strict_ceiling() {
             conversation_id: conv_id,
             turn_start: (i - 1) * 10 + 1,
             turn_end: i * 10,
-            summary: format!("Summary of turns {}-{}: Setup architecture and database.", (i - 1) * 10 + 1, i * 10),
+            summary: format!(
+                "Summary of turns {}-{}: Setup architecture and database.",
+                (i - 1) * 10 + 1,
+                i * 10
+            ),
             key_decisions: vec![format!("Decision chunk {}", i)],
             entities: vec!["SQLite".to_string(), "Postgres".to_string()],
             token_count: 80,
@@ -279,22 +311,46 @@ fn test_context_window_manager_8192_strict_ceiling() {
     for i in 1..=25 {
         working_messages.push(ChatMessage::new(
             conv_id,
-            if i % 2 == 1 { MessageRole::User } else { MessageRole::Assistant },
+            if i % 2 == 1 {
+                MessageRole::User
+            } else {
+                MessageRole::Assistant
+            },
             format!("Working turn {}: Detail information and instructions.", i),
         ));
     }
 
     let sys_prompt = "You are ARO AI system assistant. Strictly follow instructions.";
     let assembled = mgr
-        .assemble_context(sys_prompt, &semantic_candidates, &episodic_candidates, &working_messages)
+        .assemble_context(
+            sys_prompt,
+            &semantic_candidates,
+            &episodic_candidates,
+            &working_messages,
+        )
         .expect("assemble_context must succeed");
 
     // Partition invariants
-    assert!(assembled.token_usage.system_tokens <= 800, "System tokens <= 800");
-    assert!(assembled.token_usage.semantic_tokens <= 1600, "Semantic tokens <= 1600");
-    assert!(assembled.token_usage.episodic_tokens <= 2000, "Episodic tokens <= 2000");
-    assert!(assembled.token_usage.working_tokens <= 2400, "Working tokens <= 2400");
-    assert_eq!(assembled.token_usage.reserve_tokens, 1392, "Reserve headroom = 1392");
+    assert!(
+        assembled.token_usage.system_tokens <= 800,
+        "System tokens <= 800"
+    );
+    assert!(
+        assembled.token_usage.semantic_tokens <= 1600,
+        "Semantic tokens <= 1600"
+    );
+    assert!(
+        assembled.token_usage.episodic_tokens <= 2000,
+        "Episodic tokens <= 2000"
+    );
+    assert!(
+        assembled.token_usage.working_tokens <= 2400,
+        "Working tokens <= 2400"
+    );
+    assert_eq!(
+        assembled.token_usage.reserve_tokens, 1392,
+        "Reserve headroom = 1392"
+    );
     assert!(
         assembled.token_usage.total_tokens <= 8192,
         "Total tokens {} MUST be <= 8192 ceiling",
@@ -310,7 +366,10 @@ fn test_context_window_manager_8192_strict_ceiling() {
 
     // Eviction report verification
     assert!(assembled.eviction_report.working_evicted >= 17);
-    assert_eq!(assembled.eviction_report.working_retained, assembled.working_messages.len());
+    assert_eq!(
+        assembled.eviction_report.working_retained,
+        assembled.working_messages.len()
+    );
 }
 
 #[test]
@@ -331,8 +390,14 @@ fn test_sliding_window_reverse_recency() {
 
     assert_eq!(retained.len(), 8, "Must retain exactly 8 messages");
     assert_eq!(evicted, 7, "Must evict 7 older messages");
-    assert_eq!(retained[0].content, "Turn 8", "Oldest retained must be Turn 8");
-    assert_eq!(retained[7].content, "Turn 15", "Newest retained must be Turn 15");
+    assert_eq!(
+        retained[0].content, "Turn 8",
+        "Oldest retained must be Turn 8"
+    );
+    assert_eq!(
+        retained[7].content, "Turn 15",
+        "Newest retained must be Turn 15"
+    );
     assert!(tokens <= 2400);
 }
 
@@ -344,14 +409,25 @@ fn test_restart_resilience_and_compaction_recovery() {
 
     // 1. Initial process: Add turns 1..10 and compact
     for i in 1..=10 {
-        let u = ChatMessage::new(conv_id, MessageRole::User, format!("Phase 1 Turn {}: port {}", i, 3000 + i));
+        let u = ChatMessage::new(
+            conv_id,
+            MessageRole::User,
+            format!("Phase 1 Turn {}: port {}", i, 3000 + i),
+        );
         store.add_message(&u).unwrap();
-        let a = ChatMessage::new(conv_id, MessageRole::Assistant, format!("Phase 1 Reply {}", i));
+        let a = ChatMessage::new(
+            conv_id,
+            MessageRole::Assistant,
+            format!("Phase 1 Reply {}", i),
+        );
         store.add_message(&a).unwrap();
     }
 
     let compactor1 = ContinuousCompactor::new(store.clone());
-    let res1 = compactor1.consolidate_if_needed(conv_id).unwrap().expect("Must compact phase 1");
+    let res1 = compactor1
+        .consolidate_if_needed(conv_id)
+        .unwrap()
+        .expect("Must compact phase 1");
     assert_eq!(res1.episode.turn_end, 10);
 
     // 2. Simulate process restart: create a new compactor instance from store
@@ -360,19 +436,36 @@ fn test_restart_resilience_and_compaction_recovery() {
     let compactor2 = ContinuousCompactor::new(store.clone());
     let messages_after_restart = store.list_messages(conv_id).unwrap();
     let state = CompactionState::recover(&store, conv_id, &messages_after_restart).unwrap();
-    assert_eq!(state.last_compacted_turn, 10, "Must recover last_compacted_turn = 10 from SQLite");
-    assert_eq!(state.uncompacted_turns, 0, "Zero uncompacted turns initially after restart");
+    assert_eq!(
+        state.last_compacted_turn, 10,
+        "Must recover last_compacted_turn = 10 from SQLite"
+    );
+    assert_eq!(
+        state.uncompacted_turns, 0,
+        "Zero uncompacted turns initially after restart"
+    );
 
     // 3. Add turns 11..20
     for i in 11..=20 {
-        let u = ChatMessage::new(conv_id, MessageRole::User, format!("Phase 2 Turn {}: endpoint localhost:{}", i, 8000 + i));
+        let u = ChatMessage::new(
+            conv_id,
+            MessageRole::User,
+            format!("Phase 2 Turn {}: endpoint localhost:{}", i, 8000 + i),
+        );
         store.add_message(&u).unwrap();
-        let a = ChatMessage::new(conv_id, MessageRole::Assistant, format!("Phase 2 Reply {}", i));
+        let a = ChatMessage::new(
+            conv_id,
+            MessageRole::Assistant,
+            format!("Phase 2 Reply {}", i),
+        );
         store.add_message(&a).unwrap();
     }
 
     // 4. Compact second interval
-    let res2 = compactor2.consolidate_if_needed(conv_id).unwrap().expect("Must compact phase 2");
+    let res2 = compactor2
+        .consolidate_if_needed(conv_id)
+        .unwrap()
+        .expect("Must compact phase 2");
     assert_eq!(res2.episode.turn_start, 11);
     assert_eq!(res2.episode.turn_end, 20);
 
@@ -399,7 +492,12 @@ fn test_multi_interval_30_turns_compaction() {
         let u = ChatMessage::new(
             conv_id,
             MessageRole::User,
-            format!("Turn {}: We decided to configure component_{} at port {}", turn, turn, 7000 + turn),
+            format!(
+                "Turn {}: We decided to configure component_{} at port {}",
+                turn,
+                turn,
+                7000 + turn
+            ),
         );
         store.add_message(&u).unwrap();
 
@@ -415,7 +513,11 @@ fn test_multi_interval_30_turns_compaction() {
     }
 
     let episodes = store.list_episodes(conv_id).unwrap();
-    assert_eq!(episodes.len(), 3, "Must produce exactly 3 episodes for 30 turns");
+    assert_eq!(
+        episodes.len(),
+        3,
+        "Must produce exactly 3 episodes for 30 turns"
+    );
     assert_eq!(episodes[0].turn_span(), 10);
     assert_eq!(episodes[1].turn_span(), 10);
     assert_eq!(episodes[2].turn_span(), 10);

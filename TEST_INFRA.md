@@ -1,35 +1,47 @@
-# E2E Test Infra: ARO Cognitive Memory Backend
+# E2E Test Infra: ARO Autonomous Multi-Agent & Tooling
 
 ## Test Philosophy
-- Opaque-box, requirement-driven. Derives strictly from `ORIGINAL_REQUEST.md` (Follow-up 2026-09-11T21:44:50Z).
-- Methodology: Category-Partition + Boundary Value Analysis (BVA) + Pairwise Combinatorial Testing + 100+ Turn Long-Conversation Workload Testing.
+- Opaque-box, requirement-driven. Derived from `ORIGINAL_REQUEST.md` and user specifications.
+- Methodology: Category-Partition + Boundary Value Analysis (BVA) + Pairwise Combinatorial Testing + Real-World Workload Testing.
 
 ## Feature Inventory & Test Mapping
-| # | Feature | Source (Requirement) | Tier 1 (Feature) | Tier 2 (Boundary) | Tier 3 (Cross-Feature) | Tier 4 (Workload) |
-|---|---------|----------------------|:----------------:|:-----------------:|:----------------------:|:-----------------:|
-| 1 | Working Memory Buffer | ORIGINAL_REQUEST §R1 | 5 tests | 5 tests | ✓ | ✓ |
-| 2 | Episodic Memory & Schema | ORIGINAL_REQUEST §R1 | 5 tests | 5 tests | ✓ | ✓ |
-| 3 | Long-Term Semantic Store | ORIGINAL_REQUEST §R1 | 5 tests | 5 tests | ✓ | ✓ |
-| 4 | Dynamic Scoring Engine | ORIGINAL_REQUEST §R1 | 5 tests | 5 tests | ✓ | ✓ |
-| 5 | WAL Concurrency & ACID | ORIGINAL_REQUEST §AC2 | 5 tests | 5 tests | ✓ | ✓ |
-| 6 | Adaptive Context Manager | ORIGINAL_REQUEST §R2 | 5 tests | 5 tests | ✓ | ✓ |
-| 7 | Lossless Entity Preservation | ORIGINAL_REQUEST §R2 | 5 tests | 5 tests | ✓ | ✓ |
-| 8 | Hybrid Search (RRF) | ORIGINAL_REQUEST §R3 | 5 tests | 5 tests | ✓ | ✓ |
-| 9 | Agent Tool: memory_save | ORIGINAL_REQUEST §R3 | 5 tests | 5 tests | ✓ | ✓ |
-| 10 | Agent Tool: memory_search | ORIGINAL_REQUEST §R3 | 5 tests | 5 tests | ✓ | ✓ |
-| 11 | Agent Tool: memory_recall | ORIGINAL_REQUEST §R3 | 5 tests | 5 tests | ✓ | ✓ |
-| 12 | Agent Tool: memory_update | ORIGINAL_REQUEST §R3 | 5 tests | 5 tests | ✓ | ✓ |
-| 13 | Agent Tool: memory_forget | ORIGINAL_REQUEST §R3 | 5 tests | 5 tests | ✓ | ✓ |
-| 14 | 100+ Turn Long Session | ORIGINAL_REQUEST §AC1 | 5 tests | 5 tests | ✓ | ✓ |
-| 15 | Cold Restart Resumption | ORIGINAL_REQUEST §AC3 | 5 tests | 5 tests | ✓ | ✓ |
+| # | Feature | Requirement | Tier 1 (Coverage) | Tier 2 (Boundaries) | Tier 3 (Interactions) | Tier 4 (Workload) |
+|---|---------|-------------|:-----------------:|:-------------------:|:---------------------:|:-----------------:|
+| 1 | Cognitive Memory Persistence | R1 | 5 | 5 | ✓ | ✓ |
+| 2 | Sub-Agent Async Execution | R1 | 5 | 5 | ✓ | ✓ |
+| 3 | Cloud Worker Delegation | R1 | 5 | 5 | ✓ | ✓ |
+| 4 | Memory IPC & Sync | R1 | 5 | 5 | ✓ | ✓ |
+| 5 | Tool Authorization Guard | R2 | 5 | 5 | ✓ | ✓ |
+| 6 | Workspace Confinement | R2 | 5 | 5 | ✓ | ✓ |
+| 7 | Shell & Code Sandboxing | R2 | 5 | 5 | ✓ | ✓ |
+| 8 | Tool Registry Parity | R2 | 5 | 5 | ✓ | ✓ |
+| 9 | Svelte Typecheck Integrity | R3/R4 | 5 | 5 | ✓ | ✓ |
+| 10 | Persistent Sub-Agent UI Thread | R3 | 5 | 5 | ✓ | ✓ |
+| 11 | Observability & Breadcrumbs | R3 | 5 | 5 | ✓ | ✓ |
 
 ## Test Architecture
-- Test runner: `cargo test -p aro-memory -p aro-vector -p aro-runtime`
-- Integration harness: `crates/aro-runtime/tests/long_conversation_100_turns_test.rs`
-- Pass/fail semantics: 100% pass, 0 regressions on baseline 27 unit tests.
+- **Location**: `tests/e2e/`
+- **Execution Command**: `npm run test:e2e:opaque` or Node/Vitest opaque-box test runner
+- **Pass/Fail Semantics**: 100% assertions pass, exit code 0.
+- **Tiers**:
+  - **Tier 1 (Feature Coverage)**: >=5 isolated tests per feature (55+ tests).
+  - **Tier 2 (Boundary & Corner Cases)**: >=5 boundary tests per feature (empty inputs, overflows, unauthorized access, root escaping) (55+ tests).
+  - **Tier 3 (Cross-Feature Combinations)**: Multi-agent coordination with restricted permission presets (e.g. Subagent running under Read-Only preset attempting workspace write) (11+ pairwise tests).
+  - **Tier 4 (Real-World Scenarios)**: Full user workflows (e.g. Principal agent decomposes a complex software engineering problem, delegates to sub-agents, shares findings across restarts, validates security boundaries, reflects live updates in UI) (6+ scenarios).
+
+## Real-World Application Scenarios (Tier 4)
+| # | Scenario | Features Exercised | Complexity |
+|---|----------|--------------------|------------|
+| 1 | Autonomous Multi-Agent Code Audit | F1, F2, F5, F6, F10, F11 | High |
+| 2 | Read-Only Sandbox Exploration | F5, F6, F7, F8, F11 | Medium |
+| 3 | State Recovery Across Restart | F1, F4, F10 | High |
+| 4 | Sandboxed Code Execution with Secret Scrubbing | F5, F7 | Medium |
+| 5 | Complex Collaborative Task with Artifact Handover | F1, F2, F3, F4, F10 | High |
+| 6 | Full Permission Escalation Prevention | F5, F6, F7, F8 | High |
 
 ## Coverage Thresholds
-- Tier 1: $\ge 5$ tests per feature (happy path isolation).
-- Tier 2: $\ge 5$ tests per feature (empty strings, token overflows, corrupted inputs, boundary limits).
-- Tier 3: Pairwise interaction (e.g., compaction + restart, save + hybrid search, decay + pinned override).
-- Tier 4: $\ge 5$ real-world application scenarios (100+ turns simulation, facts at turns 5/20 recalled at turn 95+, multi-agent concurrent writes).
+- Tier 1: >=55 tests (>=5 per feature)
+- Tier 2: >=55 tests (>=5 per feature)
+- Tier 3: >=11 cross-feature tests
+- Tier 4: >=6 real-world scenarios
+- **Total Minimum**: >=127 comprehensive E2E tests

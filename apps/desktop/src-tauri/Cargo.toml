@@ -10,6 +10,7 @@ rust-version.workspace = true
 build = "build.rs"
 
 [dependencies]
+aro-browser = { path = "../../../crates/aro-browser" }
 aro-core = { path = "../../../crates/aro-core" }
 aro-mcp = { path = "../../../crates/aro-mcp" }
 aro-memory = { path = "../../../crates/aro-memory" }

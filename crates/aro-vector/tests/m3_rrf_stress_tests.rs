@@ -14,8 +14,14 @@ fn test_rrf_empty_hits_all_permutations() {
     let id1 = Uuid::new_v4();
     let id2 = Uuid::new_v4();
     let vec_hits = vec![
-        VectorMemoryHit { memory_id: id1, score: 0.95 },
-        VectorMemoryHit { memory_id: id2, score: 0.85 },
+        VectorMemoryHit {
+            memory_id: id1,
+            score: 0.95,
+        },
+        VectorMemoryHit {
+            memory_id: id2,
+            score: 0.85,
+        },
     ];
     let res_vec_only = reciprocal_rank_fusion(&empty_fts, &vec_hits, 60.0, 0.40, 0.60);
     assert_eq!(res_vec_only.len(), 2);
@@ -58,9 +64,18 @@ fn test_rrf_disjoint_hits_weight_proportions() {
 
     let fts_hits = vec![f1, f2, f3];
     let vec_hits = vec![
-        VectorMemoryHit { memory_id: v1, score: 0.99 },
-        VectorMemoryHit { memory_id: v2, score: 0.88 },
-        VectorMemoryHit { memory_id: v3, score: 0.77 },
+        VectorMemoryHit {
+            memory_id: v1,
+            score: 0.99,
+        },
+        VectorMemoryHit {
+            memory_id: v2,
+            score: 0.88,
+        },
+        VectorMemoryHit {
+            memory_id: v3,
+            score: 0.77,
+        },
     ];
 
     // Standard weights: w_vec = 0.60, w_fts = 0.40, k = 60
@@ -86,10 +101,22 @@ fn test_rrf_partially_overlapping_consensus_priority() {
 
     let fts_hits = vec![a, b, c, d];
     let vec_hits = vec![
-        VectorMemoryHit { memory_id: e, score: 0.99 },
-        VectorMemoryHit { memory_id: c, score: 0.90 },
-        VectorMemoryHit { memory_id: b, score: 0.80 },
-        VectorMemoryHit { memory_id: f, score: 0.70 },
+        VectorMemoryHit {
+            memory_id: e,
+            score: 0.99,
+        },
+        VectorMemoryHit {
+            memory_id: c,
+            score: 0.90,
+        },
+        VectorMemoryHit {
+            memory_id: b,
+            score: 0.80,
+        },
+        VectorMemoryHit {
+            memory_id: f,
+            score: 0.70,
+        },
     ];
 
     let res = reciprocal_rank_fusion(&fts_hits, &vec_hits, 60.0, 0.40, 0.60);
@@ -161,9 +188,12 @@ fn test_rrf_mathematical_monotonicity() {
 
     for (i, item_x) in res.iter().enumerate() {
         for item_y in &res[i + 1..] {
-            if let (Some(fx), Some(fy), Some(vx), Some(vy)) =
-                (item_x.fts_rank, item_y.fts_rank, item_x.vec_rank, item_y.vec_rank)
-            {
+            if let (Some(fx), Some(fy), Some(vx), Some(vy)) = (
+                item_x.fts_rank,
+                item_y.fts_rank,
+                item_x.vec_rank,
+                item_y.vec_rank,
+            ) {
                 if fx <= fy && vx <= vy && (fx < fy || vx < vy) {
                     assert!(
                         item_x.rrf_score > item_y.rrf_score,
@@ -183,8 +213,14 @@ fn test_rrf_tie_breaking_determinism_and_invariance() {
     // 1. Exact tie in score: w_fts = 0.50, w_vec = 0.50, k = 60
     let fts_hits = vec![id_low, id_high];
     let vec_hits = vec![
-        VectorMemoryHit { memory_id: id_high, score: 0.99 },
-        VectorMemoryHit { memory_id: id_low, score: 0.88 },
+        VectorMemoryHit {
+            memory_id: id_high,
+            score: 0.99,
+        },
+        VectorMemoryHit {
+            memory_id: id_low,
+            score: 0.88,
+        },
     ];
 
     let res = reciprocal_rank_fusion(&fts_hits, &vec_hits, 60.0, 0.50, 0.50);
@@ -228,24 +264,49 @@ fn test_rrf_duplicate_ids_best_rank_retention() {
 
     let fts_hits = vec![a, b, a, c, b];
     let vec_hits = vec![
-        VectorMemoryHit { memory_id: b, score: 0.95 },
-        VectorMemoryHit { memory_id: a, score: 0.85 },
-        VectorMemoryHit { memory_id: b, score: 0.75 },
+        VectorMemoryHit {
+            memory_id: b,
+            score: 0.95,
+        },
+        VectorMemoryHit {
+            memory_id: a,
+            score: 0.85,
+        },
+        VectorMemoryHit {
+            memory_id: b,
+            score: 0.75,
+        },
     ];
 
     let res = reciprocal_rank_fusion(&fts_hits, &vec_hits, 60.0, 0.40, 0.60);
     assert_eq!(res.len(), 3, "Output must contain exactly 3 unique items");
 
     let a_entry = res.iter().find(|s| s.memory_id == a).unwrap();
-    assert_eq!(a_entry.fts_rank, Some(1), "A must retain minimum fts_rank 1");
+    assert_eq!(
+        a_entry.fts_rank,
+        Some(1),
+        "A must retain minimum fts_rank 1"
+    );
     assert_eq!(a_entry.vec_rank, Some(2), "A must retain vec_rank 2");
 
     let b_entry = res.iter().find(|s| s.memory_id == b).unwrap();
-    assert_eq!(b_entry.fts_rank, Some(2), "B must retain minimum fts_rank 2");
-    assert_eq!(b_entry.vec_rank, Some(1), "B must retain minimum vec_rank 1");
+    assert_eq!(
+        b_entry.fts_rank,
+        Some(2),
+        "B must retain minimum fts_rank 2"
+    );
+    assert_eq!(
+        b_entry.vec_rank,
+        Some(1),
+        "B must retain minimum vec_rank 1"
+    );
 
     let c_entry = res.iter().find(|s| s.memory_id == c).unwrap();
-    assert_eq!(c_entry.fts_rank, Some(4), "C must retain minimum fts_rank 4");
+    assert_eq!(
+        c_entry.fts_rank,
+        Some(4),
+        "C must retain minimum fts_rank 4"
+    );
     assert_eq!(c_entry.vec_rank, None);
 }
 
@@ -253,13 +314,22 @@ fn test_rrf_duplicate_ids_best_rank_retention() {
 fn test_rrf_boundary_clamping_negative_k_and_weights() {
     let id = Uuid::new_v4();
     let fts_hits = vec![id];
-    let vec_hits = vec![VectorMemoryHit { memory_id: id, score: 0.9 }];
+    let vec_hits = vec![VectorMemoryHit {
+        memory_id: id,
+        score: 0.9,
+    }];
 
     let res = reciprocal_rank_fusion(&fts_hits, &vec_hits, -500.0, -10.0, -20.0);
     assert_eq!(res.len(), 1);
     assert!(!res[0].rrf_score.is_nan(), "Score must not be NaN");
-    assert!(!res[0].rrf_score.is_infinite(), "Score must not be infinite");
-    assert_eq!(res[0].rrf_score, 0.0, "Clamped negative weights must yield 0.0");
+    assert!(
+        !res[0].rrf_score.is_infinite(),
+        "Score must not be infinite"
+    );
+    assert_eq!(
+        res[0].rrf_score, 0.0,
+        "Clamped negative weights must yield 0.0"
+    );
 
     let res_zero = reciprocal_rank_fusion(&fts_hits, &vec_hits, 0.0, 0.0, 0.0);
     assert_eq!(res_zero.len(), 1);

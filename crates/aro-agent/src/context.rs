@@ -23,7 +23,8 @@ pub fn render_semantic_section(memories: &[LongTermMemory]) -> String {
     if memories.is_empty() {
         return String::new();
     }
-    let mut out = String::from("\n\n## Long-Term Semantic Knowledge (Rules, Facts & Preferences):\n");
+    let mut out =
+        String::from("\n\n## Long-Term Semantic Knowledge (Rules, Facts & Preferences):\n");
     for mem in memories {
         let pin_badge = if mem.pinned { " [PINNED]" } else { "" };
         out.push_str(&format!(
@@ -68,7 +69,7 @@ pub fn render_composite_system_prompt(
             "Response contract:\n- Answer the user directly in natural text.\n- Do not wrap the answer in JSON.\n- Use Markdown only when it improves readability.\n- Cite source IDs only when context sources materially affect the answer."
         }
         ModelResponseFormat::AgentActionJson => {
-            "Response contract:\nReturn exactly one JSON object and no markdown. Use {\"type\":\"final\",\"content\":\"...\"} when answering the user, {\"type\":\"tool\",\"toolId\":\"core.search.web\",\"input\":{\"query\":\"...\"},\"reason\":\"...\"} or another listed tool when external, current, file, or page context is required, or {\"type\":\"pause\",\"reason\":\"...\"} when user input is required. For URLs the user provides, prefer core.web.page.read. Cite source IDs in final content when context sources matter. If you reason inside <think>...</think> tags, you must always output your final answer or JSON action after </think>."
+            "Response contract:\nReturn exactly one JSON object and no markdown. Use {\"type\":\"final\",\"content\":\"...\"} when answering the user, {\"type\":\"tool\",\"toolId\":\"core.search.web\",\"input\":{\"query\":\"...\"},\"reason\":\"...\"} or another listed tool when external, current, file, or page context is required, or {\"type\":\"pause\",\"reason\":\"...\"} when user input is required. For URLs the user provides, prefer core.web.page.read. Browser loop: tabs → snapshot (elements[] refs) → action with targetRef. For core.browser.action inspect/extract/screenshot, always pass the page `url` in input. Cite source IDs in final content when context sources matter. If you reason inside <think>...</think> tags, you must always output your final answer or JSON action after </think>."
         }
     };
 
@@ -436,7 +437,9 @@ mod tests {
 
         assert_eq!(pack.run_id, run.id);
         assert_eq!(pack.goal, "Execute architectural refactor");
-        assert!(pack.summary.contains("Goal: Execute architectural refactor"));
+        assert!(pack
+            .summary
+            .contains("Goal: Execute architectural refactor"));
         // Sources: run (1) + environment (1) + working msg (1) + episode (1) + memory (1) + dyn_source (1) = 6
         assert_eq!(pack.sources.len(), 6);
         // Only enabled tools: builtin tool included, disabled skill excluded -> 1 tool
@@ -450,7 +453,14 @@ mod tests {
     fn test_cognitive_context_builder_max_sources_truncation() {
         let builder = CognitiveContextBuilder::with_limits(3, 2);
         let conv_id = Uuid::new_v4();
-        let run = AgentRun::new("Truncation test", AssistantMode::Chat, None, None, None, None);
+        let run = AgentRun::new(
+            "Truncation test",
+            AssistantMode::Chat,
+            None,
+            None,
+            None,
+            None,
+        );
         let env = EnvironmentSnapshot::default();
 
         let msgs = (0..5)

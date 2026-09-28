@@ -28,47 +28,67 @@ Tauri commands
 Local model / voice / memory adapters
 ```
 
-## Crates
+## Workspace Crates & Modules
 
 ### `aro-core`
+Shared domain models, settings, runtime status, voice contracts, and errors. Lightweight and stable.
 
-Shared domain models, settings, runtime status, voice contracts, and errors. This crate should remain dependency-light and stable.
+### `aro-agent`
+Agent lifecycle, prompt synthesis, and the executable tool registry (`ToolRegistry`).
+
+### `aro-browser`
+Real Chromium automation over CDP (`chromiumoxide`): tab pool, verified snapshots (screenshot + element refs + text), verified actions, user input relay, OS-keyring vault, system-browser import. Single source of truth for agents and the `BrowserWorkspace` UI.
+
+### `aro-agent-domain`
+Autonomous agent execution engine, multi-agent orchestration lanes, turn loops, agent definitions, and streaming event protocols.
+
+### `aro-files`
+Object storage abstraction (Local & S3/MinIO), file metadata tracking, and durable ClamAV antivirus scanning queue.
+
+### `aro-integrations`
+External services, OAuth credentials, provider connections, and webhook handlers.
+
+### `aro-mcp`
+Model Context Protocol client and server bridge for connecting external tool and context servers.
 
 ### `aro-memory`
+Cognitive memory subsystem with SQLite FTS5 full-text indexing, vector hybrid reranking, episode tracking, and semantic extraction.
 
-Legacy/local memory helpers. PostgreSQL-backed `aro-store` is the source of truth for product data.
+### `aro-plugins`
+Extensible sandboxed plugin manager, manifest verification, and execution runtime.
 
-### `aro-store`
-
-PostgreSQL persistence for the cloud API. It owns SQLx migrations, tenant-scoped repositories, settings/preferences persistence, refresh-token storage, outbox events, and conversation/message repositories.
-
-### `apps/api`
-
-Axum HTTP API. It owns auth, JWT sessions, organization scoping, bootstrap, PostgreSQL-backed CRUD, SSE endpoints for cloud assistant streaming, and Redis-backed rate limits, short locks, readiness, metrics, and outbox stream fanout.
-
-Redis is optional outside production. When configured, startup verifies it and the API uses it only for short-lived coordination:
-
-- request rate limits keyed by IP or JWT user/organization;
-- conversation and agent-lane locks with short TTLs;
-- worker publication of PostgreSQL outbox rows to a Redis Stream for fast consumers.
-
-Redis loss must not delete product data. PostgreSQL remains the durable source of truth.
+### `aro-policy`
+Security boundary enforcement, sandbox path validation, network domain filtering, and permission guards.
 
 ### `aro-runtime`
+Assistant orchestration and model providers (Ollama, llama.cpp, mock, server cloud).
 
-Assistant orchestration and model providers. Local providers are:
+### `aro-secrets`
+Encrypted OS-keyring custody for sensitive tokens, API keys, and provider secrets.
 
-- Mock provider for development and tests.
-- Ollama provider for fast local setup.
-- `llama.cpp` OpenAI-compatible provider for production local inference.
+### `aro-skills`
+Executable skill scripts, parameter schema verification, and task recipes.
+
+### `aro-store`
+PostgreSQL persistence for the cloud API. Owns SQLx migrations, tenant-scoped repositories, settings, refresh-token families, outbox events, and audit logs.
+
+### `aro-tools`
+Guarded tool registry and sandboxed executors for filesystem, shell commands, web search, notifications, and computer use.
+
+### `aro-vector`
+Vector embeddings, Qdrant client, and reciprocal rank fusion (RRF) hybrid retrieval.
 
 ### `aro-voice`
+Local STT (Whisper.cpp) and TTS (Piper) speech adapters and wake-word verification.
 
-Speech-to-text and text-to-speech adapters. The product contract assumes Whisper.cpp and Piper-compatible local binaries, with a disabled runtime for machines that have not configured voice yet. Voice setup also maintains local model slots for wake-word, STT Whisper, and TTS Piper under `vendor/voice/models`.
+### `apps/api`
+Axum HTTP API with JWT auth, tenant isolation, SSE assistant streams, and optional Redis rate-limiting/coordination.
 
 ### `apps/desktop/src-tauri`
+Tauri 2 desktop bridge, secure OS keyring integration, file IPC, and local process management.
 
-Tauri integration layer. It owns secure token storage, API client commands, local runtime commands, app data directories for ephemeral/cache state, and the frontend bridge.
+### `packages/contracts`, `packages/api-client`, `packages/ui-tokens`
+TypeScript monorepo packages for API contracts, SDK clients, and shared Apple Minimal design tokens.
 
 ## Data Flow
 

@@ -30,6 +30,10 @@ Then edit the four environment files:
   `ARO_PUBLIC_BASE_URL`, `ARO_CORS_ALLOWED_ORIGINS`, and digest-pinned image references.
 - Put only `DATABASE_URL`, `ARO_JWT_SECRET`, `ARO_SECRETS_KEY`, `ARO_METRICS_TOKEN`, and the API S3
   identity in `.env.production.api`.
+- Password reset mail is disabled until `ARO_PASSWORD_RESET_DELIVERY_ENABLED=true` and the
+  SMTP relay settings, sender, API SMTP credential and public acceptance URL are configured.
+  The reset link puts its one-time token in the URL fragment; the desktop form also accepts
+  the token copied from the mail. Password reset revokes refresh sessions.
 - Put only `ARO_WORKER_DATABASE_URL` and the scanner S3 identity in `.env.production.worker`.
 - Put only the schema-owner `ARO_MIGRATION_DATABASE_URL` in `.env.production.migrate`.
 - Keep all three database URLs consistent with the migrator/app/worker secret files.

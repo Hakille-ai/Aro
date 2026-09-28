@@ -50,7 +50,10 @@ pub async fn notifications_list(
     auth: AuthContext,
     Query(filter): Query<NotificationFilter>,
 ) -> Result<Json<Vec<NotificationItem>>, ApiError> {
-    let list = state.store.list_notifications(auth.tenant_context(), &filter).await?;
+    let list = state
+        .store
+        .list_notifications(auth.tenant_context(), &filter)
+        .await?;
     Ok(Json(list))
 }
 
@@ -80,7 +83,10 @@ pub async fn notification_create(
     notif.organization_id = Some(auth.tenant_context().organization_id());
     notif.user_id = Some(auth.tenant_context().actor_id());
 
-    let saved = state.store.create_notification(auth.tenant_context(), &notif).await?;
+    let saved = state
+        .store
+        .create_notification(auth.tenant_context(), &notif)
+        .await?;
     Ok((StatusCode::CREATED, Json(saved)))
 }
 
@@ -88,7 +94,10 @@ pub async fn notifications_unread_count(
     State(state): State<ApiState>,
     auth: AuthContext,
 ) -> Result<Json<Value>, ApiError> {
-    let count = state.store.get_unread_notification_count(auth.tenant_context()).await?;
+    let count = state
+        .store
+        .get_unread_notification_count(auth.tenant_context())
+        .await?;
     Ok(Json(json!({ "unreadCount": count })))
 }
 
@@ -97,7 +106,10 @@ pub async fn notification_mark_read(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let updated = state.store.mark_notification_as_read(auth.tenant_context(), id).await?;
+    let updated = state
+        .store
+        .mark_notification_as_read(auth.tenant_context(), id)
+        .await?;
     Ok(Json(json!({ "success": updated })))
 }
 
@@ -105,7 +117,10 @@ pub async fn notifications_mark_all_read(
     State(state): State<ApiState>,
     auth: AuthContext,
 ) -> Result<Json<Value>, ApiError> {
-    let affected = state.store.mark_all_notifications_as_read(auth.tenant_context()).await?;
+    let affected = state
+        .store
+        .mark_all_notifications_as_read(auth.tenant_context())
+        .await?;
     Ok(Json(json!({ "markedCount": affected })))
 }
 
@@ -114,7 +129,10 @@ pub async fn notification_delete(
     auth: AuthContext,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    let deleted = state.store.delete_notification(auth.tenant_context(), id).await?;
+    let deleted = state
+        .store
+        .delete_notification(auth.tenant_context(), id)
+        .await?;
     Ok(Json(json!({ "success": deleted })))
 }
 
@@ -122,7 +140,10 @@ pub async fn notifications_clear_all(
     State(state): State<ApiState>,
     auth: AuthContext,
 ) -> Result<Json<Value>, ApiError> {
-    let cleared = state.store.clear_all_notifications(auth.tenant_context()).await?;
+    let cleared = state
+        .store
+        .clear_all_notifications(auth.tenant_context())
+        .await?;
     Ok(Json(json!({ "clearedCount": cleared })))
 }
 
@@ -136,7 +157,9 @@ pub async fn email_send(
     let trimmed_body = payload.body.trim().to_string();
 
     if trimmed_to.is_empty() || trimmed_subject.is_empty() {
-        return Err(ApiError::bad_request("Recipient 'to' and 'subject' are required"));
+        return Err(ApiError::bad_request(
+            "Recipient 'to' and 'subject' are required",
+        ));
     }
 
     if !trimmed_to.contains('@') || !trimmed_to.contains('.') || trimmed_to.len() < 5 {
@@ -167,15 +190,15 @@ pub async fn email_send(
                 .and_then(|p| p.parse::<u16>().ok())
                 .unwrap_or(587);
 
-            let from_str = std::env::var("ARO_SMTP_FROM")
-                .unwrap_or_else(|_| "noreply@aro-ai.com".to_string());
+            let from_str =
+                std::env::var("ARO_SMTP_FROM").unwrap_or_else(|_| "noreply@aro-ai.com".to_string());
 
-            let tls_mode = std::env::var("ARO_SMTP_TLS_MODE")
-                .unwrap_or_else(|_| "starttls".to_string());
+            let tls_mode =
+                std::env::var("ARO_SMTP_TLS_MODE").unwrap_or_else(|_| "starttls".to_string());
 
-            let from: Mailbox = from_str
-                .parse()
-                .map_err(|e| ApiError::bad_request(format!("Invalid sender address ARO_SMTP_FROM: {e}")))?;
+            let from: Mailbox = from_str.parse().map_err(|e| {
+                ApiError::bad_request(format!("Invalid sender address ARO_SMTP_FROM: {e}"))
+            })?;
 
             let to_mb: Mailbox = trimmed_to
                 .parse()
@@ -199,19 +222,27 @@ pub async fn email_send(
 
             let transport_builder = if tls_mode.eq_ignore_ascii_case("tls") {
                 AsyncSmtpTransport::<Tokio1Executor>::relay(relay)
-                    .map_err(|e| ApiError::internal(format!("SMTP relay configuration error: {e}")))?
+                    .map_err(|e| {
+                        ApiError::internal(format!("SMTP relay configuration error: {e}"))
+                    })?
                     .port(port)
                     .timeout(Some(Duration::from_secs(20)))
             } else {
                 AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(relay)
-                    .map_err(|e| ApiError::internal(format!("SMTP starttls configuration error: {e}")))?
+                    .map_err(|e| {
+                        ApiError::internal(format!("SMTP starttls configuration error: {e}"))
+                    })?
                     .port(port)
                     .timeout(Some(Duration::from_secs(20)))
             };
 
             let mut transport_builder = transport_builder;
-            let username = std::env::var("ARO_SMTP_USERNAME").ok().filter(|u| !u.trim().is_empty());
-            let password = std::env::var("ARO_SMTP_PASSWORD").ok().filter(|p| !p.trim().is_empty());
+            let username = std::env::var("ARO_SMTP_USERNAME")
+                .ok()
+                .filter(|u| !u.trim().is_empty());
+            let password = std::env::var("ARO_SMTP_PASSWORD")
+                .ok()
+                .filter(|p| !p.trim().is_empty());
             if let (Some(u), Some(p)) = (username, password) {
                 transport_builder = transport_builder.credentials(Credentials::new(u, p));
             }
@@ -236,7 +267,8 @@ pub async fn email_send(
     if let Ok(resend_key) = std::env::var("RESEND_API_KEY") {
         let resend_key = resend_key.trim();
         if !resend_key.is_empty() {
-            let from = std::env::var("ARO_EMAIL_FROM").unwrap_or_else(|_| "onboarding@resend.dev".to_string());
+            let from = std::env::var("ARO_EMAIL_FROM")
+                .unwrap_or_else(|_| "onboarding@resend.dev".to_string());
             let client = reqwest::Client::new();
             let resend_payload = json!({
                 "from": from,
@@ -257,7 +289,9 @@ pub async fn email_send(
             if !resp.status().is_success() {
                 let status = resp.status();
                 let err_text = resp.text().await.unwrap_or_default();
-                return Err(ApiError::internal(format!("Resend API error ({status}): {err_text}")));
+                return Err(ApiError::internal(format!(
+                    "Resend API error ({status}): {err_text}"
+                )));
             }
 
             return Ok(Json(json!({

@@ -62,6 +62,7 @@ impl CloudApiClient {
         token: String,
         email: String,
         password: String,
+        totp_code: Option<String>,
     ) -> AroResult<AuthSession> {
         self.post_public(
             "/auth/invitations/accept-account",
@@ -69,6 +70,7 @@ impl CloudApiClient {
                 token,
                 email,
                 password,
+                totp_code,
             },
         )
         .await
@@ -824,15 +826,43 @@ impl CloudApiClient {
             .await
     }
 
-    pub async fn billing_request(&self, access_token:&str, method:&str, path:&str, body:Option<serde_json::Value>) -> AroResult<serde_json::Value> {
-        let valid = matches!((method,path),
-            ("GET","/billing/catalog"|"/billing/account"|"/billing/compute-keys") |
-            ("POST","/billing/checkout"|"/billing/checkout/resume"|"/billing/portal"|"/billing/compute-keys") |
-            ("PUT","/billing/limits")) || (method=="DELETE" && path.strip_prefix("/billing/compute-keys/").is_some_and(|id|uuid::Uuid::parse_str(id).is_ok()));
-        if !valid {return Err(aro_core::AroError::Security("unsupported billing operation".into()));}
-        let method=reqwest::Method::from_bytes(method.as_bytes()).map_err(|e|aro_core::AroError::Configuration(e.to_string()))?;
-        let mut request=self.client.request(method,format!("{}{}",self.base_url,path)).bearer_auth(access_token);
-        if let Some(body)=body {request=request.json(&body);}
+    pub async fn billing_request(
+        &self,
+        access_token: &str,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> AroResult<serde_json::Value> {
+        let valid = matches!(
+            (method, path),
+            (
+                "GET",
+                "/billing/catalog" | "/billing/account" | "/billing/compute-keys"
+            ) | (
+                "POST",
+                "/billing/checkout"
+                    | "/billing/checkout/resume"
+                    | "/billing/portal"
+                    | "/billing/compute-keys"
+            ) | ("PUT", "/billing/limits")
+        ) || (method == "DELETE"
+            && path
+                .strip_prefix("/billing/compute-keys/")
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()));
+        if !valid {
+            return Err(aro_core::AroError::Security(
+                "unsupported billing operation".into(),
+            ));
+        }
+        let method = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|e| aro_core::AroError::Configuration(e.to_string()))?;
+        let mut request = self
+            .client
+            .request(method, format!("{}{}", self.base_url, path))
+            .bearer_auth(access_token);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
         read_response(request.send().await.map_err(map_reqwest)?).await
     }
 
@@ -1059,6 +1089,7 @@ pub struct RegisterRequest {
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
+    pub totp_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1080,6 +1111,7 @@ struct AcceptExistingInvitationWithPasswordRequest {
     token: String,
     email: String,
     password: String,
+    totp_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
